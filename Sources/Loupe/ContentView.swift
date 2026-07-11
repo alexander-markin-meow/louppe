@@ -1,0 +1,305 @@
+import SwiftUI
+import AppKit
+
+struct ContentView: View {
+    @ObservedObject var store: SessionStore
+
+    var body: some View {
+        Group {
+            switch store.phase {
+            case .welcome:
+                WelcomeView(store: store)
+            case .scanning(let found):
+                ScanningView(found: found)
+            case .ready:
+                SessionView(store: store)
+            }
+        }
+        .frame(minWidth: 900, minHeight: 600)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            store.saveSession()
+        }
+    }
+}
+
+struct WelcomeView: View {
+    @ObservedObject var store: SessionStore
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "camera.viewfinder")
+                .font(.system(size: 56))
+                .foregroundStyle(.secondary)
+            Text("Louppe")
+                .font(.largeTitle.bold())
+            Text("Pick a folder of photos, mark each one Yes or No,\nthen export the keepers. Originals are never changed.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+
+            Button {
+                store.promptForSourceFolder()
+            } label: {
+                Label("Choose Photo Folder…", systemImage: "folder")
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+            }
+            .controlSize(.large)
+            .keyboardShortcut("o")
+
+            if let error = store.scanError {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
+            if !store.recentFolders.isEmpty {
+                VStack(spacing: 6) {
+                    Text("Recent")
+                        .font(.caption.smallCaps())
+                        .foregroundStyle(.secondary)
+                    ForEach(store.recentFolders.prefix(5), id: \.path) { url in
+                        Button {
+                            store.openFolder(url)
+                        } label: {
+                            Label(url.lastPathComponent, systemImage: "clock")
+                                .frame(maxWidth: 320)
+                        }
+                        .buttonStyle(.link)
+                        .help(url.path)
+                    }
+                }
+                .padding(.top, 8)
+            }
+        }
+        .padding(40)
+    }
+}
+
+struct ScanningView: View {
+    let found: Int
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+            Text(found > 0 ? "Scanning… \(found) photos found" : "Scanning folder…")
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Removes the window's "full-size content" flag so the content area starts
+/// below the toolbar rather than extending under it. The toolbar itself keeps
+/// its standard translucent glass appearance.
+struct BelowToolbarLayout: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Configurator() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class Configurator: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.styleMask.remove(.fullSizeContentView)
+        }
+    }
+}
+
+struct SessionView: View {
+    @ObservedObject var store: SessionStore
+    @State private var keyMonitor: Any?
+
+    var body: some View {
+        Group {
+            switch store.viewMode {
+            case .culling:
+                MainCullingView(store: store)
+            case .lightTable:
+                LightTableView(store: store)
+            }
+        }
+        .toolbar { toolbarContent }
+        .navigationTitle("")
+        // Keep the native liquid-glass toolbar, but lay the window content
+        // out *below* it instead of extending underneath — so thumbnails and
+        // the info panel can never scroll up behind the toolbar.
+        .background(BelowToolbarLayout())
+        .sheet(isPresented: $store.isExportPresented) {
+            ExportView(store: store)
+        }
+        .onAppear(perform: installKeyMonitor)
+        .onDisappear(perform: removeKeyMonitor)
+    }
+
+    private var subtitle: String {
+        guard !store.items.isEmpty else { return "" }
+        return "\(store.currentIndex + 1) of \(store.items.count)  ·  ✓ \(store.yesCount)  ✗ \(store.noCount)  · \(store.undecidedCount) left"
+    }
+
+    private var statusText: some View {
+        Text(subtitle)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        // Current folder: a real button — click it to go back to the start
+        // screen and pick a different folder (the session is saved first).
+        ToolbarItem(placement: .navigation) {
+            Button {
+                store.closeSession()
+            } label: {
+                Label(store.sourceFolder?.lastPathComponent ?? "Folder", systemImage: "folder")
+                    .labelStyle(.titleAndIcon)
+            }
+            .help("Back to the start screen to open another folder")
+        }
+
+        ToolbarItem(placement: .navigation) {
+            Button {
+                store.rescan()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .help("Re-scan this folder for new photos (⌘R)")
+        }
+
+        // Session status, centered in the toolbar at the same height as the
+        // other toolbar controls — plain text, opted out of the glass capsule.
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .principal) {
+                statusText
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .principal) {
+                statusText
+            }
+        }
+
+        ToolbarItemGroup {
+            Picker("View", selection: $store.viewMode) {
+                Image(systemName: "photo").tag(ViewMode.culling)
+                    .help("Main culling view (Tab)")
+                Image(systemName: "square.grid.3x3").tag(ViewMode.lightTable)
+                    .help("Light table grid (Tab)")
+            }
+            .pickerStyle(.segmented)
+
+            Button {
+                store.clearAllRatings()
+            } label: {
+                Image(systemName: "eraser")
+            }
+            .help("Clear all ratings — undo with ⌘Z (R)")
+
+            Button {
+                withAnimation { store.showFilmstrip.toggle() }
+            } label: {
+                Image(systemName: store.showFilmstrip ? "sidebar.squares.left" : "sidebar.left")
+            }
+            .help("Show or hide the browser (Q)")
+
+            Button {
+                withAnimation { store.showMetadataPanel.toggle() }
+            } label: {
+                Image(systemName: "info.circle")
+            }
+            .help("Show or hide photo info (W)")
+        }
+
+        // Export: its own prominent blue button. Use a bare Image (not a
+        // Label with hidden text) so the icon centers in the circle instead
+        // of being nudged aside by reserved label space.
+        ToolbarItem {
+            Button {
+                store.isExportPresented = true
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+                    // Nudge up a touch to visually center the share glyph.
+                    .offset(y: -1)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .tint(.blue)
+            .help("Export the photos marked Yes (E)")
+        }
+    }
+
+    // MARK: - Keyboard shortcuts
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if handleKey(event) { return nil }
+            return event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
+
+    private func handleKey(_ event: NSEvent) -> Bool {
+        // Leave command shortcuts (⌘Z, ⌘E…) to the menu bar, and don't steal
+        // keys while the export sheet or a panel is up or the user is typing.
+        guard case .ready = store.phase else { return false }
+        if store.isExportPresented { return false }
+
+        // ⌘+ / ⌘− resize the light table grid.
+        if event.modifierFlags.contains(.command), store.viewMode == .lightTable {
+            switch event.charactersIgnoringModifiers {
+            case "=", "+": store.zoomGrid(larger: true); return true
+            case "-": store.zoomGrid(larger: false); return true
+            default: break
+            }
+        }
+
+        // ⌘Z — undo the last rating (or a whole "clear all").
+        if event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.shift),
+           event.charactersIgnoringModifiers?.lowercased() == "z" {
+            store.undo()
+            return true
+        }
+
+        if event.modifierFlags.intersection([.command, .option, .control]) != [] { return false }
+        if NSApp.keyWindow?.firstResponder is NSTextView { return false }
+
+        switch event.keyCode {
+        case 123: store.goPrevious(); return true            // ←
+        case 124: store.goNext(); return true                // →
+        case 48:  store.toggleViewMode(); return true        // Tab
+        case 49:  store.goNext(); return true                // Space: next, no rating
+        default: break
+        }
+
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "f": store.rate(.yes); return true
+        case "d": store.rate(.no); return true
+        case "q": withAnimation { store.showFilmstrip.toggle() }; return true
+        case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
+        case "g": store.toggleViewMode(); return true
+        case "e": store.isExportPresented = true; return true
+        case "r": store.clearAllRatings(); return true
+        case "s":
+            if store.viewMode == .culling {
+                store.toggleZoom(.actual)
+                return true
+            }
+            return false
+        case "a":
+            if store.viewMode == .culling {
+                store.toggleZoom(.small)
+                return true
+            }
+            return false
+        default:
+            return false
+        }
+    }
+}
