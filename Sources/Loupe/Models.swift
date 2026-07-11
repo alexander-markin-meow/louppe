@@ -24,7 +24,11 @@ struct PhotoItem: Identifiable {
 
     var fileTypeLabel: String {
         if pairedURL != nil { return "RAW + JPEG" }
-        return isRaw ? "RAW" : "JPEG"
+        if isRaw { return "RAW" }
+        switch primaryURL.pathExtension.lowercased() {
+        case "tif", "tiff": return "TIFF"
+        default: return "JPEG"
+        }
     }
 
     var allURLs: [URL] {

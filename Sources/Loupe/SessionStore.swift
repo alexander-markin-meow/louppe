@@ -44,7 +44,7 @@ final class SessionStore: ObservableObject {
     private var undoStack: [(changes: [RatingChange], previousIndex: Int)] = []
     private var saveDebounce: DispatchWorkItem?
 
-    nonisolated static let supportedExtensions: Set<String> = ["nef", "raf", "jpg", "jpeg"]
+    nonisolated static let supportedExtensions: Set<String> = ["nef", "raf", "jpg", "jpeg", "tif", "tiff"]
     nonisolated static let rawExtensions: Set<String> = ["nef", "raf"]
     nonisolated static let maxScanDepth = 5
     nonisolated static let sidecarName = ".loupe_session.json"
@@ -130,7 +130,7 @@ final class SessionStore: ObservableObject {
         currentIndex = loaded.firstIndex(where: { $0.rating == .undecided }) ?? 0
         phase = loaded.isEmpty ? .welcome : .ready
         if loaded.isEmpty {
-            scanError = "No supported photos (.NEF, .RAF, .JPG, .JPEG) were found in that folder."
+            scanError = "No supported photos (.NEF, .RAF, .JPG, .JPEG, .TIF) were found in that folder."
         } else {
             saveSession()
             prefetchAroundCurrent()
