@@ -48,7 +48,7 @@ struct FilmstripView: View {
                                     .padding(.vertical, 3)
                             }
                             ThumbnailView(item: item, isCurrent: index == store.currentIndex)
-                                .frame(width: 102, height: 70)
+                                .frame(width: 102, height: 102)
                                 .onTapGesture {
                                     store.setIndex(index)
                                 }
@@ -91,23 +91,40 @@ struct MetadataPanel: View {
     // The exposure triangle, shown as a horizontal row at the top.
     private let exposureLabels = ["Aperture", "Shutter", "ISO"]
 
+    // Promoted into the header area, so left out of the field column below.
+    private let headerLabels = ["Filename", "Camera"]
+
     private var exposureFields: [MetadataField] {
         exposureLabels.compactMap { label in fields.first { $0.label == label } }
     }
 
     private var otherFields: [MetadataField] {
-        fields.filter { !exposureLabels.contains($0.label) }
+        fields.filter { !exposureLabels.contains($0.label) && !headerLabels.contains($0.label) }
+    }
+
+    private var cameraName: String? {
+        fields.first { $0.label == "Camera" }?.value
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text("Info")
+                    Text(item.displayName)
                         .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer()
                     RatingBadge(rating: item.rating)
                 }
+
+                if let cameraName {
+                    Text(cameraName)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                }
+
                 Divider()
 
                 if !exposureFields.isEmpty {

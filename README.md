@@ -65,4 +65,4 @@ The fresh app appears at `dist/Louppe.app`. Copy it to `/Applications` to instal
 - `Sources/Loupe/LightTableView.swift` — grid view
 - `Sources/Loupe/ExportView.swift` — export dialog
 
-Supported formats: `.NEF`, `.RAF`, `.JPG`, `.JPEG` (per the v1 spec).
+Supported formats: `.NEF`, `.RAF`, `.JPG`, `.JPEG`, `.TIF`, `.TIFF`.

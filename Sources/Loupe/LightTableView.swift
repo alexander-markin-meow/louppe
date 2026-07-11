@@ -65,7 +65,7 @@ struct LightTableView: View {
     private func cell(index: Int, item: PhotoItem) -> some View {
         VStack(spacing: 3) {
             ThumbnailView(item: item, isCurrent: index == store.currentIndex)
-                .aspectRatio(3.0 / 2.0, contentMode: .fit)
+                .aspectRatio(1, contentMode: .fit)
             Text(item.displayName)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
