@@ -18,11 +18,15 @@ struct ThumbnailView: View {
         ZStack(alignment: .topTrailing) {
             Group {
                 if let image {
+                    // Whole photo fits inside the tile — letterboxed rather
+                    // than cropped, so verticals and horizontals both show
+                    // completely.
                     Image(nsImage: image)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: 6)
                         .fill(Color(nsColor: .quaternaryLabelColor))
                         .overlay {
                             Image(systemName: "photo")
@@ -30,7 +34,6 @@ struct ThumbnailView: View {
                         }
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(isCurrent ? Color.accentColor : .clear, lineWidth: 3)

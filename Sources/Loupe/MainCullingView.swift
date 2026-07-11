@@ -48,7 +48,7 @@ struct FilmstripView: View {
                                     .padding(.vertical, 3)
                             }
                             ThumbnailView(item: item, isCurrent: index == store.currentIndex)
-                                .frame(width: 102, height: 70)
+                                .frame(width: 102, height: 102)
                                 .onTapGesture {
                                     store.setIndex(index)
                                 }
