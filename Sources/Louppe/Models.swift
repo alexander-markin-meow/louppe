@@ -38,7 +38,7 @@ struct PhotoItem: Identifiable {
     }
 }
 
-// MARK: - Session sidecar file (.loupe_session.json)
+// MARK: - Session sidecar file (.louppe_session.json)
 
 struct SessionEntry: Codable {
     var filename: String

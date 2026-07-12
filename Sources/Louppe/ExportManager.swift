@@ -1,6 +1,9 @@
 import Foundation
 import AppKit
 
+/// Copies all "yes"-rated photos (and their RAW/JPEG partners) to a
+/// user-chosen destination, auto-suffixing filename collisions.
+/// Originals are only ever read, never modified or moved.
 @MainActor
 final class ExportManager: ObservableObject {
     enum State: Equatable {
@@ -50,8 +53,7 @@ final class ExportManager: ObservableObject {
                     failed += 1
                 }
                 let done = i + 1
-                await MainActor.run { [copied, failed] in
-                    _ = copied; _ = failed
+                await MainActor.run {
                     self.state = .copying(done: done, total: sources.count)
                 }
             }

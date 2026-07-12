@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds Loupe.app from source. Run:  ./build_app.sh
+# Builds Louppe.app from source. Run:  ./build_app.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -10,7 +10,7 @@ APP_DIR="dist/Louppe.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
-cp .build/release/Loupe "$APP_DIR/Contents/MacOS/Loupe"
+cp .build/release/Louppe "$APP_DIR/Contents/MacOS/Louppe"
 cp AppIcon/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
@@ -23,13 +23,13 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDisplayName</key>
     <string>Louppe</string>
     <key>CFBundleIdentifier</key>
-    <string>com.alexandermarkin.loupe</string>
+    <string>com.alexandermarkin.louppe</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleExecutable</key>
-    <string>Loupe</string>
+    <string>Louppe</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>

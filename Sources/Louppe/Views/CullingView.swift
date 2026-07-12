@@ -1,0 +1,34 @@
+import SwiftUI
+
+/// The primary one-photo-at-a-time review screen:
+/// browser column (filmstrip) · large photo pane · info panel.
+struct CullingView: View {
+    @ObservedObject var store: SessionStore
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if store.showFilmstrip {
+                FilmstripView(store: store)
+                    .frame(width: 122)
+                    .background(Color.appBackground)
+                    .transition(.move(edge: .leading))
+            }
+
+            ZStack {
+                Color.appBackground
+                if let item = store.currentItem {
+                    FullImageView(item: item, zoomMode: $store.zoomMode)
+                        .id(item.id)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if store.showMetadataPanel, let item = store.currentItem {
+                Divider()
+                MetadataPanel(item: item)
+                    .frame(width: 240)
+                    .transition(.move(edge: .trailing))
+            }
+        }
+    }
+}

@@ -36,10 +36,10 @@ In the **Light Table** grid: single-click a photo to cycle its rating
 
 ### Where things are stored
 
-- Ratings: a hidden `.loupe_session.json` file inside the photo folder
-  (or in `~/Library/Application Support/Loupe/Sessions/` if the folder is
+- Ratings: a hidden `.louppe_session.json` file inside the photo folder
+  (or in `~/Library/Application Support/Louppe/Sessions/` if the folder is
   read-only, e.g. a locked SD card). Reopening a folder resumes the session.
-- Thumbnails cache: `~/Library/Caches/Loupe/` (safe to delete anytime).
+- Thumbnails cache: `~/Library/Caches/Louppe/` (safe to delete anytime).
 
 ## Rebuilding from source
 
@@ -53,14 +53,19 @@ The fresh app appears at `dist/Louppe.app`. Copy it to `/Applications` to instal
 
 ## Source layout
 
-- `Sources/Loupe/LoupeApp.swift` — app entry point, menu commands
-- `Sources/Loupe/SessionStore.swift` — folder scanning, RAW+JPEG pairing, ratings, undo, session persistence
-- `Sources/Loupe/ImagePipeline.swift` — image decoding (ImageIO embedded previews), thumbnail cache, prefetching
-- `Sources/Loupe/Metadata.swift` — EXIF extraction for the info panel
-- `Sources/Loupe/ExportManager.swift` — copying keepers, filename collision handling
-- `Sources/Loupe/ContentView.swift` — welcome screen, keyboard handling, toolbar
-- `Sources/Loupe/MainCullingView.swift` — big image + filmstrip + info panel
-- `Sources/Loupe/LightTableView.swift` — grid view
-- `Sources/Loupe/ExportView.swift` — export dialog
+Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
+
+- `LouppeApp.swift` — app entry point, menu commands
+- `SessionStore.swift` — ratings, undo, navigation, session persistence
+- `FolderScanner.swift` — recursive folder scan, RAW+JPEG pairing, sorting
+- `ImagePipeline.swift` — image decoding (ImageIO), thumbnail caches, prefetching
+- `MetadataExtractor.swift` — EXIF extraction (capture dates, info panel fields)
+- `ExportManager.swift` — copying keepers, filename collision handling
+- `Models.swift` — the photo item and session file formats
+- `Views/` — welcome screen, session toolbar + hotkeys, culling view, filmstrip,
+  light table, info panel, thumbnails, export dialog
+
+See `CLAUDE.md` for a full architecture map, build/verify instructions, and
+project invariants (useful for both humans and AI assistants).
 
 Supported formats: `.NEF`, `.RAF`, `.JPG`, `.JPEG`, `.TIF`, `.TIFF`.

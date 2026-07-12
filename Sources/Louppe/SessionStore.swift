@@ -18,6 +18,8 @@ enum ZoomMode {
     case small    // phone-sized preview
 }
 
+/// The app's single source of truth: the loaded session (photos + ratings),
+/// navigation, undo, view state, and persistence to the sidecar file.
 @MainActor
 final class SessionStore: ObservableObject {
     @Published var phase: AppPhase = .welcome
@@ -44,10 +46,7 @@ final class SessionStore: ObservableObject {
     private var undoStack: [(changes: [RatingChange], previousIndex: Int)] = []
     private var saveDebounce: DispatchWorkItem?
 
-    nonisolated static let supportedExtensions: Set<String> = ["nef", "raf", "jpg", "jpeg", "tif", "tiff"]
-    nonisolated static let rawExtensions: Set<String> = ["nef", "raf"]
-    nonisolated static let maxScanDepth = 5
-    nonisolated static let sidecarName = ".loupe_session.json"
+    nonisolated static let sidecarName = ".louppe_session.json"
 
     init() {
         loadRecents()
@@ -62,6 +61,15 @@ final class SessionStore: ObservableObject {
     var currentItem: PhotoItem? {
         guard items.indices.contains(currentIndex) else { return nil }
         return items[currentIndex]
+    }
+
+    /// True when the photo at `index` was taken on a different day than the
+    /// one before it — the filmstrip and light table draw a separator there.
+    func startsNewDay(at index: Int) -> Bool {
+        guard index > 0, items.indices.contains(index) else { return false }
+        guard let previous = items[index - 1].captureDate,
+              let current = items[index].captureDate else { return false }
+        return !Calendar.current.isDate(previous, inSameDayAs: current)
     }
 
     // MARK: - Opening a folder
@@ -79,7 +87,6 @@ final class SessionStore: ObservableObject {
     }
 
     func openFolder(_ url: URL) {
-        NSLog("Loupe: opening folder %@", url.path)
         sourceFolder = url
         scanError = nil
         phase = .scanning(found: 0)
@@ -90,7 +97,7 @@ final class SessionStore: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do {
-                let scanned = try self.scanFolder(url) { count in
+                let scanned = try FolderScanner.scan(url) { count in
                     Task { @MainActor in
                         if case .scanning = self.phase {
                             self.phase = .scanning(found: count)
@@ -110,7 +117,6 @@ final class SessionStore: ObservableObject {
     }
 
     private func finishScan(url: URL, scanned: [PhotoItem]) {
-        NSLog("Loupe: scan finished, %d items", scanned.count)
         var loaded = scanned
         // Restore prior ratings from the sidecar file, if present.
         if let session = readSessionFile(for: url) {
@@ -137,95 +143,20 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    // MARK: - Scanning (runs off the main thread)
-
-    nonisolated private func scanFolder(_ root: URL, progress: @escaping (Int) -> Void) throws -> [PhotoItem] {
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .creationDateKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else {
-            throw NSError(domain: "Loupe", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not read that folder."])
-        }
-
-        var files: [URL] = []
-        for case let url as URL in enumerator {
-            if enumerator.level > Self.maxScanDepth {
-                enumerator.skipDescendants()
-                continue
-            }
-            let ext = url.pathExtension.lowercased()
-            guard Self.supportedExtensions.contains(ext) else { continue }
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
-            guard values?.isRegularFile == true else { continue }
-            files.append(url)
-            if files.count % 25 == 0 { progress(files.count) }
-        }
-
-        // Group RAW+JPEG pairs: same folder, same base filename.
-        var groups: [String: [URL]] = [:]
-        for url in files {
-            let key = url.deletingPathExtension().path.lowercased()
-            groups[key, default: []].append(url)
-        }
-
-        var result: [PhotoItem] = []
-        let rootPath = root.standardizedFileURL.path
-        for (_, urls) in groups {
-            let raws = urls.filter { Self.rawExtensions.contains($0.pathExtension.lowercased()) }
-            let jpegs = urls.filter { !Self.rawExtensions.contains($0.pathExtension.lowercased()) }
-
-            var pairs: [(primary: URL, paired: URL?)] = []
-            if let raw = raws.first, let jpeg = jpegs.first {
-                pairs.append((raw, jpeg))
-                // Rare leftovers (e.g., two RAWs with the same base name) become separate items.
-                for extra in raws.dropFirst() { pairs.append((extra, nil)) }
-                for extra in jpegs.dropFirst() { pairs.append((extra, nil)) }
-            } else {
-                for url in urls { pairs.append((url, nil)) }
-            }
-
-            for (primary, paired) in pairs {
-                let size = (try? FileManager.default.attributesOfItem(atPath: primary.path)[.size] as? Int64) ?? 0
-                let captureDate = MetadataExtractor.captureDate(for: primary)
-                    ?? (try? primary.resourceValues(forKeys: [.creationDateKey]).creationDate)
-                let relative = relativePath(of: primary, under: rootPath)
-                result.append(PhotoItem(
-                    id: relative,
-                    primaryURL: primary,
-                    pairedURL: paired,
-                    captureDate: captureDate,
-                    fileSize: size
-                ))
-            }
-        }
-
-        result.sort { a, b in
-            switch (a.captureDate, b.captureDate) {
-            case let (da?, db?) where da != db: return da < db
-            case (nil, .some): return false
-            case (.some, nil): return true
-            default: return a.id.localizedStandardCompare(b.id) == .orderedAscending
-            }
-        }
-        return result
-    }
-
-    nonisolated private func relativePath(of url: URL, under rootPath: String) -> String {
-        let path = url.standardizedFileURL.path
-        if path.hasPrefix(rootPath + "/") {
-            return String(path.dropFirst(rootPath.count + 1))
-        }
-        return url.lastPathComponent
+    /// Re-scan the current folder to pick up newly added photos.
+    /// Existing ratings survive: they're saved to the sidecar first,
+    /// and the scan restores them by filename.
+    func rescan() {
+        guard let folder = sourceFolder else { return }
+        saveDebounce?.cancel()
+        saveSession()
+        openFolder(folder)
     }
 
     // MARK: - Rating
 
     func rate(_ rating: Rating) {
-        guard let item = currentItem else { return }
         setRating(rating, atIndex: currentIndex, recordUndo: true)
-        _ = item
         advanceToNextUndecided()
     }
 
@@ -322,16 +253,6 @@ final class SessionStore: ObservableObject {
         gridThumbSize = min(max(next, 90), 400)
     }
 
-    /// Re-scan the current folder to pick up newly added photos.
-    /// Existing ratings survive: they're saved to the sidecar first,
-    /// and the scan restores them by filename.
-    func rescan() {
-        guard let folder = sourceFolder else { return }
-        saveDebounce?.cancel()
-        saveSession()
-        openFolder(folder)
-    }
-
     private func prefetchAroundCurrent() {
         let windowOffsets = [1, 2, 3, -1]
         let urls = windowOffsets.compactMap { offset -> URL? in
@@ -400,7 +321,7 @@ final class SessionStore: ObservableObject {
 
     private func fallbackSessionURL(for folder: URL) -> URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = support.appendingPathComponent("Loupe/Sessions", isDirectory: true)
+        let dir = support.appendingPathComponent("Louppe/Sessions", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var hash: UInt64 = 14695981039346656037
         for byte in folder.path.utf8 {

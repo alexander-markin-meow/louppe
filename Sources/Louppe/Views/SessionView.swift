@@ -1,109 +1,13 @@
 import SwiftUI
 import AppKit
 
-struct ContentView: View {
-    @ObservedObject var store: SessionStore
-
-    var body: some View {
-        Group {
-            switch store.phase {
-            case .welcome:
-                WelcomeView(store: store)
-            case .scanning(let found):
-                ScanningView(found: found)
-            case .ready:
-                SessionView(store: store)
-            }
-        }
-        .frame(minWidth: 900, minHeight: 600)
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            store.saveSession()
-        }
-    }
-}
-
-struct WelcomeView: View {
-    @ObservedObject var store: SessionStore
-
-    var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "camera.viewfinder")
-                .font(.system(size: 56))
-                .foregroundStyle(.secondary)
-            Text("Louppe")
-                .font(.largeTitle.bold())
-            Text("Pick a folder of photos, mark each one Yes or No,\nthen export the keepers. Originals are never changed.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-
-            Button {
-                store.promptForSourceFolder()
-            } label: {
-                Label("Choose Photo Folder…", systemImage: "folder")
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-            }
-            .controlSize(.large)
-            .keyboardShortcut("o")
-
-            if let error = store.scanError {
-                Text(error)
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .multilineTextAlignment(.center)
-            }
-
-            if !store.recentFolders.isEmpty {
-                VStack(spacing: 6) {
-                    Text("Recent")
-                        .font(.caption.smallCaps())
-                        .foregroundStyle(.secondary)
-                    ForEach(store.recentFolders.prefix(5), id: \.path) { url in
-                        Button {
-                            store.openFolder(url)
-                        } label: {
-                            Label(url.lastPathComponent, systemImage: "clock")
-                                .frame(maxWidth: 320)
-                        }
-                        .buttonStyle(.link)
-                        .help(url.path)
-                    }
-                }
-                .padding(.top, 8)
-            }
-        }
-        .padding(40)
-    }
-}
-
-struct ScanningView: View {
-    let found: Int
-
-    var body: some View {
-        VStack(spacing: 14) {
-            ProgressView()
-                .controlSize(.large)
-            Text(found > 0 ? "Scanning… \(found) photos found" : "Scanning folder…")
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// Removes the window's "full-size content" flag so the content area starts
-/// below the toolbar rather than extending under it. The toolbar itself keeps
-/// its standard translucent glass appearance.
-struct BelowToolbarLayout: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { Configurator() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class Configurator: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            window?.styleMask.remove(.fullSizeContentView)
-        }
-    }
-}
-
+/// The active culling session: hosts the culling/light-table views, the
+/// toolbar, the export sheet, and all single-key hotkeys.
+///
+/// Hotkey map (README's table must stay in sync with `handleKey`):
+///   F yes · D no · S 100% zoom · A phone-size zoom · R clear all
+///   Q browser · W info panel · E export · Space next · ←/→ prev/next
+///   Tab/G switch view · ⌘Z undo · ⌘+/⌘− grid size
 struct SessionView: View {
     @ObservedObject var store: SessionStore
     @State private var keyMonitor: Any?
@@ -112,7 +16,7 @@ struct SessionView: View {
         Group {
             switch store.viewMode {
             case .culling:
-                MainCullingView(store: store)
+                CullingView(store: store)
             case .lightTable:
                 LightTableView(store: store)
             }
@@ -141,6 +45,8 @@ struct SessionView: View {
             .foregroundStyle(.secondary)
             .monospacedDigit()
     }
+
+    // MARK: - Toolbar
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
@@ -300,6 +206,21 @@ struct SessionView: View {
             return false
         default:
             return false
+        }
+    }
+}
+
+/// Removes the window's "full-size content" flag so the content area starts
+/// below the toolbar rather than extending under it. The toolbar itself keeps
+/// its standard translucent glass appearance.
+struct BelowToolbarLayout: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Configurator() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class Configurator: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.styleMask.remove(.fullSizeContentView)
         }
     }
 }

@@ -1,5 +1,8 @@
 import SwiftUI
 
+/// The contact-sheet grid: click to cycle a photo's rating, double-click to
+/// open it in the culling view. Days are separated by a horizontal line and
+/// each day starts on a fresh row. ⌘+/⌘− resize the tiles.
 struct LightTableView: View {
     @ObservedObject var store: SessionStore
 
@@ -13,19 +16,12 @@ struct LightTableView: View {
     private var dayGroups: [[(index: Int, item: PhotoItem)]] {
         var groups: [[(index: Int, item: PhotoItem)]] = []
         for (i, item) in store.items.enumerated() {
-            if i == 0 || startsNewDay(at: i) {
+            if i == 0 || store.startsNewDay(at: i) {
                 groups.append([])
             }
             groups[groups.count - 1].append((i, item))
         }
         return groups
-    }
-
-    private func startsNewDay(at index: Int) -> Bool {
-        guard index > 0 else { return false }
-        guard let previous = store.items[index - 1].captureDate,
-              let current = store.items[index].captureDate else { return false }
-        return !Calendar.current.isDate(previous, inSameDayAs: current)
     }
 
     var body: some View {

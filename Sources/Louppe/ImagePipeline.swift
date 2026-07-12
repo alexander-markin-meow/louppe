@@ -11,8 +11,8 @@ final class ImagePipeline: @unchecked Sendable {
 
     private let thumbCache = NSCache<NSString, NSImage>()
     private let fullCache = NSCache<NSString, NSImage>()
-    private let decodeQueue = DispatchQueue(label: "loupe.decode", qos: .userInitiated, attributes: .concurrent)
-    private let prefetchQueue = DispatchQueue(label: "loupe.prefetch", qos: .utility)
+    private let decodeQueue = DispatchQueue(label: "louppe.decode", qos: .userInitiated, attributes: .concurrent)
+    private let prefetchQueue = DispatchQueue(label: "louppe.prefetch", qos: .utility)
     private let diskCacheRoot: URL
 
     static let thumbPixelSize: CGFloat = 320
@@ -22,7 +22,7 @@ final class ImagePipeline: @unchecked Sendable {
         thumbCache.countLimit = 3000
         fullCache.countLimit = 12
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        diskCacheRoot = caches.appendingPathComponent("Loupe/Thumbnails", isDirectory: true)
+        diskCacheRoot = caches.appendingPathComponent("Louppe/Thumbnails", isDirectory: true)
         try? FileManager.default.createDirectory(at: diskCacheRoot, withIntermediateDirectories: true)
     }
 

@@ -2,18 +2,20 @@ import SwiftUI
 import AppKit
 
 @main
-struct LoupeApp: App {
+struct LouppeApp: App {
     @StateObject private var store = SessionStore()
 
     var body: some Scene {
         Window("Louppe", id: "main") {
-            ContentView(store: store)
+            RootView(store: store)
                 .onAppear {
                     NSApp.activate(ignoringOtherApps: true)
-                    // Optional launch argument: open a folder straight away
-                    // (used for testing: Loupe /path/to/folder).
-                    let args = CommandLine.arguments.dropFirst()
-                    if let path = args.first(where: { $0.hasPrefix("/") }),
+                    // Optional launch argument for testing:
+                    //   open Louppe.app --args -openFolder /path/to/photos
+                    // Flag-style on purpose: a bare path argument makes macOS
+                    // treat the launch as a document-open request and suppress
+                    // the app's default window entirely.
+                    if let path = UserDefaults.standard.string(forKey: "openFolder"),
                        FileManager.default.fileExists(atPath: path) {
                         store.openFolder(URL(fileURLWithPath: path))
                     }
