@@ -4,10 +4,15 @@ Fast, keyboard-driven macOS app for reviewing a folder of photos and marking
 each one **Yes** (keep) or **No** (reject), then exporting the keepers to a new
 folder. Originals are never modified, moved, or deleted.
 
+## Download
+
+Grab the latest build from **[Releases](https://github.com/alexander-markin-meow/louppe/releases/latest)** — download `Louppe.zip`, unzip, drag `Louppe.app` into Applications.
+
+This app isn't notarized by Apple, so on first launch macOS will warn it can't verify the developer. Right-click the app → **Open** → **Open** again in the dialog. That's a one-time step; it opens normally after that.
+
 ## Using the app
 
-The finished app is installed at **/Applications/Louppe.app** — open it like any
-other app. Pick a folder (an SD card works), review, then press **⌘E** to export.
+Pick a folder (an SD card works), review, then press **⌘E** to export.
 
 ### Keyboard shortcuts
 
