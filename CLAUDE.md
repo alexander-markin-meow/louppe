@@ -76,6 +76,10 @@ truth, created in `LouppeApp` and passed to every view.
   README's shortcut table — keep the two in sync when changing keys.
 - One background gray everywhere: `Color.appBackground`. Don't introduce
   other panel shades; use `Divider()` lines to separate regions.
+- One accent color everywhere: `Color.louppeAccent`, the brand purple
+  #9853A6 (defined in RootView.swift, applied as a global `.tint` and used
+  for the app-icon glyph). Green/red stay reserved for yes/no ratings; don't
+  use blue or `Color.accentColor` for anything.
 
 ## Known gotchas
 

@@ -82,7 +82,7 @@ struct SessionView: View {
                 Image(systemName: store.filter.isActive
                     ? "line.3.horizontal.decrease.circle.fill"
                     : "line.3.horizontal.decrease.circle")
-                    .foregroundStyle(store.filter.isActive ? Color.accentColor : Color.primary)
+                    .foregroundStyle(store.filter.isActive ? Color.louppeAccent : Color.primary)
             }
             .popover(isPresented: $store.isFilterPresented, arrowEdge: .bottom) {
                 FilterView(store: store)
@@ -143,7 +143,7 @@ struct SessionView: View {
             .help("Show or hide photo info (W)")
         }
 
-        // Export: its own prominent blue button. Use a bare Image (not a
+        // Export: its own prominent purple button. Use a bare Image (not a
         // Label with hidden text) so the icon centers in the circle instead
         // of being nudged aside by reserved label space.
         ToolbarItem {
@@ -156,7 +156,7 @@ struct SessionView: View {
             }
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
-            .tint(.blue)
+            .tint(Color.louppeAccent)
             .help("Export the photos marked Yes (E)")
         }
     }

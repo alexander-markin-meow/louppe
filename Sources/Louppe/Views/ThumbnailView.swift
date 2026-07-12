@@ -30,7 +30,7 @@ struct ThumbnailView: View {
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(isCurrent ? Color.accentColor : .clear, lineWidth: 3)
+                    .strokeBorder(isCurrent ? Color.louppeAccent : .clear, lineWidth: 3)
             }
 
             RatingBadge(rating: item.rating)

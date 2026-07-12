@@ -1,16 +1,47 @@
 import SwiftUI
 
+/// The Louppe logo — the same 3×3 grid as the app icon, with the middle
+/// "keeper" tile filled — drawn natively so it stays crisp at any size and
+/// always matches the brand purple. Proportions were measured from the
+/// 1024 px app-icon master (AppIcon/AppIcon-1024.png).
+struct LouppeLogo: View {
+    var size: CGFloat = 64
+
+    var body: some View {
+        let tile = size / 3.82          // 3 tiles + 2 gaps of 0.41 × tile
+        let gap = tile * 0.41
+        let stroke = tile * 0.135
+        let radius = tile * 0.2
+        VStack(spacing: gap) {
+            ForEach(0..<3) { row in
+                HStack(spacing: gap) {
+                    ForEach(0..<3) { column in
+                        RoundedRectangle(cornerRadius: radius)
+                            .strokeBorder(Color.louppeAccent, lineWidth: stroke)
+                            .background(
+                                // Only the center tile — the keeper — is filled.
+                                row == 1 && column == 1
+                                    ? RoundedRectangle(cornerRadius: radius).fill(Color.louppeAccent)
+                                    : nil
+                            )
+                            .frame(width: tile, height: tile)
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The start screen: pick a folder (or a recent one) to begin a session.
 struct WelcomeView: View {
     @ObservedObject var store: SessionStore
 
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "camera.viewfinder")
-                .font(.system(size: 56))
-                .foregroundStyle(.secondary)
+            LouppeLogo(size: 64)
             Text("Louppe")
                 .font(.largeTitle.bold())
+                .foregroundStyle(Color.louppeAccent)
             Text("Pick a folder of photos, mark each one Yes or No,\nthen export the keepers. Originals are never changed.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
