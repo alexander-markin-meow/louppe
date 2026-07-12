@@ -34,6 +34,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2026 Alex Markin</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>

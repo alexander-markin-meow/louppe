@@ -31,8 +31,21 @@ final class SessionStore: ObservableObject {
     @Published var zoomMode: ZoomMode = .fit
     @Published var gridThumbSize: CGFloat = 170
     @Published var isExportPresented = false
+    @Published var isFilterPresented = false
+    /// In-flight big-photo decodes (a count, so overlapping loads during fast
+    /// arrow-key navigation can't blank the spinner early). The toolbar shows
+    /// a small spinner while it's above zero.
+    @Published var fullImageLoads = 0
     @Published var scanError: String?
     @Published var recentFolders: [URL] = []
+
+    /// The toolbar filter. Views only render `visibleIndices`; `items` stays
+    /// the full list so ratings and the sidecar are never affected by filtering.
+    @Published var filter = PhotoFilter() {
+        didSet { if filter != oldValue { applyFilter() } }
+    }
+    /// Indices into `items` that pass the current filter, in session order.
+    @Published private(set) var visibleIndices: [Int] = []
 
     private(set) var sourceFolder: URL?
 
@@ -63,12 +76,48 @@ final class SessionStore: ObservableObject {
         return items[currentIndex]
     }
 
-    /// True when the photo at `index` was taken on a different day than the
-    /// one before it — the filmstrip and light table draw a separator there.
-    func startsNewDay(at index: Int) -> Bool {
-        guard index > 0, items.indices.contains(index) else { return false }
-        guard let previous = items[index - 1].captureDate,
-              let current = items[index].captureDate else { return false }
+    // MARK: - Filtering
+
+    /// The photos the views should show, each with its absolute index into `items`.
+    /// Defensive bounds check: even if an index momentarily goes stale while
+    /// `items` is being replaced, render fewer tiles instead of crashing.
+    var visibleItems: [(index: Int, item: PhotoItem)] {
+        visibleIndices.compactMap { i in
+            items.indices.contains(i) ? (i, items[i]) : nil
+        }
+    }
+
+    /// Distinct file-type labels present in this session, for the filter menu.
+    var availableTypes: [String] {
+        Set(items.map(\.fileTypeLabel)).sorted()
+    }
+
+    /// Span of capture dates in this session — seeds the filter's date pickers.
+    var captureDateRange: ClosedRange<Date>? {
+        let dates = items.compactMap(\.captureDate)
+        guard let first = dates.min(), let last = dates.max() else { return nil }
+        return first...last
+    }
+
+    private func applyFilter() {
+        visibleIndices = items.indices.filter { filter.matches(items[$0]) }
+        // Keep the current photo visible: snap to the nearest photo that
+        // passes the filter (forward first, else the last visible one).
+        if !visibleIndices.isEmpty, !visibleIndices.contains(currentIndex) {
+            currentIndex = visibleIndices.first(where: { $0 >= currentIndex }) ?? visibleIndices.last!
+        }
+        prefetchAroundCurrent()
+    }
+
+    /// True when the photo at visible position `pos` was taken on a different
+    /// day than the visible one before it — the filmstrip and light table
+    /// draw a separator there.
+    func startsNewDay(atVisiblePosition pos: Int) -> Bool {
+        guard pos > 0, visibleIndices.indices.contains(pos),
+              items.indices.contains(visibleIndices[pos - 1]),
+              items.indices.contains(visibleIndices[pos]) else { return false }
+        guard let previous = items[visibleIndices[pos - 1]].captureDate,
+              let current = items[visibleIndices[pos]].captureDate else { return false }
         return !Calendar.current.isDate(previous, inSameDayAs: current)
     }
 
@@ -90,6 +139,9 @@ final class SessionStore: ObservableObject {
         sourceFolder = url
         scanError = nil
         phase = .scanning(found: 0)
+        // visibleIndices must be cleared in the same turn items is emptied —
+        // stale indices into a shrunk array crash any view that renders first.
+        visibleIndices = []
         items = []
         undoStack = []
         addToRecents(url)
@@ -134,6 +186,9 @@ final class SessionStore: ObservableObject {
         items = loaded
         // Resume from the first undecided photo.
         currentIndex = loaded.firstIndex(where: { $0.rating == .undecided }) ?? 0
+        // Recompute visibility (a re-scan keeps the active filter; it may
+        // also snap currentIndex onto a visible photo).
+        applyFilter()
         phase = loaded.isEmpty ? .welcome : .ready
         if loaded.isEmpty {
             scanError = "No supported photos (.NEF, .RAF, .JPG, .JPEG, .TIF) were found in that folder."
@@ -210,10 +265,20 @@ final class SessionStore: ObservableObject {
         scheduleSave()
     }
 
-    // MARK: - Navigation
+    // MARK: - Navigation (moves through *visible* photos only)
 
-    func goNext() { setIndex(currentIndex + 1) }
-    func goPrevious() { setIndex(currentIndex - 1) }
+    func goNext() { stepVisible(1) }
+    func goPrevious() { stepVisible(-1) }
+
+    private func stepVisible(_ delta: Int) {
+        guard !visibleIndices.isEmpty else { return }
+        guard let pos = visibleIndices.firstIndex(of: currentIndex) else {
+            setIndex(visibleIndices[0])
+            return
+        }
+        let newPos = min(max(pos + delta, 0), visibleIndices.count - 1)
+        setIndex(visibleIndices[newPos])
+    }
 
     func setIndex(_ index: Int) {
         guard !items.isEmpty else { return }
@@ -224,11 +289,12 @@ final class SessionStore: ObservableObject {
     }
 
     private func advanceToNextUndecided() {
-        guard !items.isEmpty else { return }
+        guard !visibleIndices.isEmpty else { return }
+        let pos = visibleIndices.firstIndex(of: currentIndex) ?? 0
         // Search forward from the current photo, wrapping around once.
-        let count = items.count
+        let count = visibleIndices.count
         for offset in 1...count {
-            let candidate = (currentIndex + offset) % count
+            let candidate = visibleIndices[(pos + offset) % count]
             if items[candidate].rating == .undecided {
                 currentIndex = candidate
                 prefetchAroundCurrent()
@@ -236,7 +302,7 @@ final class SessionStore: ObservableObject {
             }
         }
         // Nothing undecided left: just step forward if possible.
-        setIndex(currentIndex + 1)
+        stepVisible(1)
     }
 
     func toggleViewMode() {
@@ -254,11 +320,15 @@ final class SessionStore: ObservableObject {
     }
 
     private func prefetchAroundCurrent() {
+        // Prefetch the neighbouring *visible* photos, so filtered-out files
+        // in between don't waste the warm-up window.
+        guard let pos = visibleIndices.firstIndex(of: currentIndex) else { return }
         let windowOffsets = [1, 2, 3, -1]
         let urls = windowOffsets.compactMap { offset -> URL? in
-            let i = currentIndex + offset
-            guard items.indices.contains(i) else { return nil }
-            return items[i].primaryURL
+            let p = pos + offset
+            guard visibleIndices.indices.contains(p) else { return nil }
+            let item = items[visibleIndices[p]]
+            return item.isSupported ? item.primaryURL : nil
         }
         ImagePipeline.shared.prefetchFullImages(urls: urls)
     }
@@ -358,6 +428,9 @@ final class SessionStore: ObservableObject {
         undoStack = []
         currentIndex = 0
         viewMode = .culling
+        filter = PhotoFilter()
+        visibleIndices = []
+        isFilterPresented = false
         phase = .welcome
     }
 }

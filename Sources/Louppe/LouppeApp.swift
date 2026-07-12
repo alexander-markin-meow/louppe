@@ -22,6 +22,13 @@ struct LouppeApp: App {
                 }
         }
         .commands {
+            // Standard About panel (icon, name, version, copyright) with a
+            // custom credits section: author, contact email, GitHub link.
+            CommandGroup(replacing: .appInfo) {
+                Button("About Louppe") {
+                    NSApp.orderFrontStandardAboutPanel(options: [.credits: Self.aboutCredits])
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") {
                     store.promptForSourceFolder()
@@ -71,5 +78,33 @@ struct LouppeApp: App {
                 .disabled(store.viewMode != .lightTable)
             }
         }
+    }
+
+    /// Credits block for the About panel. Links are clickable.
+    private static var aboutCredits: NSAttributedString {
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        center.lineSpacing = 2
+        let base: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: center,
+        ]
+        var link = base
+        let credits = NSMutableAttributedString()
+
+        credits.append(NSAttributedString(
+            string: "Fast photo culling for photographers.\n\n", attributes: base))
+        credits.append(NSAttributedString(
+            string: "Created by Alex Markin\n", attributes: base))
+
+        link[.link] = URL(string: "mailto:a@alex-markin.com")!
+        credits.append(NSAttributedString(string: "a@alex-markin.com", attributes: link))
+        credits.append(NSAttributedString(string: "\n", attributes: base))
+
+        link[.link] = URL(string: "https://github.com/alexander-markin-meow/louppe")!
+        credits.append(NSAttributedString(string: "GitHub", attributes: link))
+
+        return credits
     }
 }

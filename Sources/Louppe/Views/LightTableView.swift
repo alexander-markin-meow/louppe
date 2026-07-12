@@ -15,11 +15,11 @@ struct LightTableView: View {
     /// on a fresh row. Each element keeps its global index for rating/jumping.
     private var dayGroups: [[(index: Int, item: PhotoItem)]] {
         var groups: [[(index: Int, item: PhotoItem)]] = []
-        for (i, item) in store.items.enumerated() {
-            if i == 0 || store.startsNewDay(at: i) {
+        for (position, entry) in store.visibleItems.enumerated() {
+            if position == 0 || store.startsNewDay(atVisiblePosition: position) {
                 groups.append([])
             }
-            groups[groups.count - 1].append((i, item))
+            groups[groups.count - 1].append(entry)
         }
         return groups
     }
@@ -27,6 +27,14 @@ struct LightTableView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
+                if store.visibleIndices.isEmpty && store.filter.isActive {
+                    ContentUnavailableView(
+                        "No photos match the filter",
+                        systemImage: "line.3.horizontal.decrease.circle",
+                        description: Text("Adjust or reset the filter in the toolbar to see photos again.")
+                    )
+                    .padding(.top, 80)
+                }
                 LazyVStack(spacing: 14) {
                     ForEach(Array(dayGroups.enumerated()), id: \.offset) { groupIndex, group in
                         if groupIndex > 0 {

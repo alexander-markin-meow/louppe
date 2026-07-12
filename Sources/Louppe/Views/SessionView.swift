@@ -36,14 +36,26 @@ struct SessionView: View {
 
     private var subtitle: String {
         guard !store.items.isEmpty else { return "" }
-        return "\(store.currentIndex + 1) of \(store.items.count)  ·  ✓ \(store.yesCount)  ✗ \(store.noCount)  · \(store.undecidedCount) left"
+        let position = (store.visibleIndices.firstIndex(of: store.currentIndex) ?? 0) + 1
+        var text = "\(position) of \(store.visibleIndices.count)"
+        if store.filter.isActive {
+            text += " (of \(store.items.count) total)"
+        }
+        return text + "  ·  ✓ \(store.yesCount)  ✗ \(store.noCount)  · \(store.undecidedCount) left"
     }
 
     private var statusText: some View {
-        Text(subtitle)
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .monospacedDigit()
+        HStack(spacing: 8) {
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            // Photo-decode spinner. Always present (just invisible when idle)
+            // so the status text doesn't shift when it appears.
+            ProgressView()
+                .controlSize(.small)
+                .opacity(store.fullImageLoads > 0 ? 1 : 0)
+        }
     }
 
     // MARK: - Toolbar
@@ -60,6 +72,22 @@ struct SessionView: View {
                     .labelStyle(.titleAndIcon)
             }
             .help("Back to the start screen to open another folder")
+        }
+
+        // Filter: opens the glass popover with search / date / type filters.
+        ToolbarItem(placement: .navigation) {
+            Button {
+                store.isFilterPresented.toggle()
+            } label: {
+                Image(systemName: store.filter.isActive
+                    ? "line.3.horizontal.decrease.circle.fill"
+                    : "line.3.horizontal.decrease.circle")
+                    .foregroundStyle(store.filter.isActive ? Color.accentColor : Color.primary)
+            }
+            .popover(isPresented: $store.isFilterPresented, arrowEdge: .bottom) {
+                FilterView(store: store)
+            }
+            .help("Filter which photos are shown")
         }
 
         ToolbarItem(placement: .navigation) {
@@ -155,6 +183,8 @@ struct SessionView: View {
         // keys while the export sheet or a panel is up or the user is typing.
         guard case .ready = store.phase else { return false }
         if store.isExportPresented { return false }
+        // Don't steal letters while the filter popover is up (search typing).
+        if store.isFilterPresented { return false }
 
         // ⌘+ / ⌘− resize the light table grid.
         if event.modifierFlags.contains(.command), store.viewMode == .lightTable {

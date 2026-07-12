@@ -4,8 +4,48 @@ import Foundation
 /// pairs RAW+JPEG shots, reads capture dates, and sorts chronologically.
 /// Pure file-system work with no UI state — safe to run on any thread.
 enum FolderScanner {
-    static let supportedExtensions: Set<String> = ["nef", "raf", "jpg", "jpeg", "tif", "tiff"]
-    static let rawExtensions: Set<String> = ["nef", "raf"]
+    /// Camera RAW formats macOS's ImageIO can decode (verified against
+    /// CGImageSourceCopyTypeIdentifiers on this machine).
+    static let rawExtensions: Set<String> = [
+        "nef", "nrw",               // Nikon
+        "raf",                      // Fujifilm
+        "dng",                      // Adobe / many cameras
+        "cr2", "cr3", "crw",        // Canon
+        "arw", "sr2", "srf",        // Sony
+        "orf",                      // Olympus
+        "rw2", "raw",               // Panasonic / Leica
+        "pef",                      // Pentax
+        "srw",                      // Samsung
+        "3fr", "fff",               // Hasselblad
+        "dcr",                      // Kodak
+        "mos",                      // Leaf
+        "iiq",                      // Phase One
+        "mrw",                      // Konica Minolta
+        "erf",                      // Epson
+        "rwl",                      // Leica
+    ]
+
+    /// Types we can actually decode and preview: RAWs above, plus the
+    /// still-image formats ImageIO handles.
+    static let supportedExtensions: Set<String> = rawExtensions.union([
+        "jpg", "jpeg", "tif", "tiff",
+        "png", "gif", "bmp", "heic", "heif", "hif",
+        "webp", "avif", "jxl", "jp2", "psd", "tga", "ico",
+    ])
+
+    /// Visual files we recognise but can't preview — RAW formats ImageIO
+    /// doesn't decode, and video. They show up in the session as a grey
+    /// "file isn't supported" placeholder instead of being silently dropped.
+    static let unsupportedVisualExtensions: Set<String> = [
+        // RAW formats ImageIO can't decode
+        "x3f", "kdc", "mef", "gpr",
+        // Video
+        "mov", "mp4", "m4v", "avi", "mkv", "mpg", "mpeg", "wmv", "flv",
+        "webm", "3gp", "mts", "m2ts", "hevc", "insv",
+    ]
+
+    /// Everything we surface in a session — previewable or placeholder.
+    static let recognizedExtensions: Set<String> = supportedExtensions.union(unsupportedVisualExtensions)
 
     /// SD cards nest photos under e.g. DCIM/100NIKON/, so scan recursively —
     /// but not endlessly, in case of symlink loops or pathological trees.
@@ -29,7 +69,7 @@ enum FolderScanner {
                 continue
             }
             let ext = url.pathExtension.lowercased()
-            guard supportedExtensions.contains(ext) else { continue }
+            guard recognizedExtensions.contains(ext) else { continue }
             let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
             guard values?.isRegularFile == true else { continue }
             files.append(url)
@@ -61,13 +101,16 @@ enum FolderScanner {
 
             for (primary, paired) in pairs {
                 let size = (try? fm.attributesOfItem(atPath: primary.path)[.size] as? Int64) ?? 0
-                let captureDate = MetadataExtractor.captureDate(for: primary)
+                let info = MetadataExtractor.scanInfo(for: primary)
+                let captureDate = info.captureDate
                     ?? (try? primary.resourceValues(forKeys: [.creationDateKey]).creationDate)
                 result.append(PhotoItem(
                     id: relativePath(of: primary, under: rootPath),
                     primaryURL: primary,
                     pairedURL: paired,
                     captureDate: captureDate,
+                    cameraModel: info.cameraModel,
+                    lensModel: info.lensModel,
                     fileSize: size
                 ))
             }

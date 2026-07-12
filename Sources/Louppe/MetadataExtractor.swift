@@ -3,19 +3,30 @@ import ImageIO
 
 enum MetadataExtractor {
 
-    /// Reads the capture date quickly during the folder scan.
-    static func captureDate(for url: URL) -> Date? {
+    /// The metadata read once per file during the folder scan.
+    struct ScanInfo {
+        var captureDate: Date?
+        var cameraModel: String?
+        var lensModel: String?
+    }
+
+    /// Reads capture date + camera + lens in a single pass during the scan,
+    /// so the filter search can match them without re-opening every file.
+    static func scanInfo(for url: URL) -> ScanInfo {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-            return nil
+            return ScanInfo()
         }
         let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
         let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
         let dateString = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
             ?? (exif?[kCGImagePropertyExifDateTimeDigitized] as? String)
             ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String)
-        guard let dateString else { return nil }
-        return exifDateFormatter.date(from: dateString)
+        return ScanInfo(
+            captureDate: dateString.flatMap { exifDateFormatter.date(from: $0) },
+            cameraModel: tiff?[kCGImagePropertyTIFFModel] as? String,
+            lensModel: exif?[kCGImagePropertyExifLensModel] as? String
+        )
     }
 
     /// Full field list for the metadata panel.

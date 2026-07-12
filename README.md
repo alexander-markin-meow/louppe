@@ -73,4 +73,16 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 See `CLAUDE.md` for a full architecture map, build/verify instructions, and
 project invariants (useful for both humans and AI assistants).
 
-Supported formats: `.NEF`, `.RAF`, `.JPG`, `.JPEG`, `.TIF`, `.TIFF`.
+Supported formats:
+
+- **RAW** — Nikon `.NEF`/`.NRW`, Fujifilm `.RAF`, Adobe `.DNG`, Canon
+  `.CR2`/`.CR3`/`.CRW`, Sony `.ARW`/`.SR2`/`.SRF`, Olympus `.ORF`, Panasonic
+  `.RW2`/`.RAW`, Pentax `.PEF`, Samsung `.SRW`, Hasselblad `.3FR`/`.FFF`,
+  Leica `.RWL`, Phase One `.IIQ`, Leaf `.MOS`, Kodak `.DCR`, Konica Minolta
+  `.MRW`, Epson `.ERF`
+- **Images** — `.JPG`/`.JPEG`, `.TIF`/`.TIFF`, `.PNG`, `.HEIC`/`.HEIF`/`.HIF`,
+  `.WEBP`, `.AVIF`, `.JXL`, `.GIF`, `.BMP`, `.PSD`, `.TGA`, `.JP2`, `.ICO`
+
+Other visual files (videos, a few rare RAW formats) still appear in the
+session as a grey "file isn't supported" placeholder, so nothing on the card
+is silently hidden — you can rate and export them like any other file.

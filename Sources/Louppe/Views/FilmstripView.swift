@@ -9,21 +9,21 @@ struct FilmstripView: View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 6) {
-                    ForEach(Array(store.items.enumerated()), id: \.element.id) { index, item in
+                    ForEach(Array(store.visibleItems.enumerated()), id: \.element.item.id) { position, entry in
                         VStack(spacing: 6) {
-                            if store.startsNewDay(at: index) {
+                            if store.startsNewDay(atVisiblePosition: position) {
                                 RoundedRectangle(cornerRadius: 1)
                                     .fill(.secondary.opacity(0.5))
                                     .frame(width: 64, height: 2)
                                     .padding(.vertical, 3)
                             }
-                            ThumbnailView(item: item, isCurrent: index == store.currentIndex)
+                            ThumbnailView(item: entry.item, isCurrent: entry.index == store.currentIndex)
                                 .frame(width: 102, height: 102)
                                 .onTapGesture {
-                                    store.setIndex(index)
+                                    store.setIndex(entry.index)
                                 }
                         }
-                        .id(item.id)
+                        .id(entry.item.id)
                     }
                 }
                 .padding(.horizontal, 10)

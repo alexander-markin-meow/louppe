@@ -16,9 +16,17 @@ struct CullingView: View {
 
             ZStack {
                 Color.appBackground
-                if let item = store.currentItem {
-                    FullImageView(item: item, zoomMode: $store.zoomMode)
-                        .id(item.id)
+                if store.visibleIndices.isEmpty && store.filter.isActive {
+                    ContentUnavailableView(
+                        "No photos match the filter",
+                        systemImage: "line.3.horizontal.decrease.circle",
+                        description: Text("Adjust or reset the filter in the toolbar to see photos again.")
+                    )
+                } else if let item = store.currentItem {
+                    FullImageView(item: item, zoomMode: $store.zoomMode) { loading in
+                        store.fullImageLoads += loading ? 1 : -1
+                    }
+                    .id(item.id)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

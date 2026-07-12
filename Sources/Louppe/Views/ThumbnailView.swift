@@ -12,7 +12,9 @@ struct ThumbnailView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Group {
-                if let image {
+                if !item.isSupported {
+                    UnsupportedThumbnail(item: item)
+                } else if let image {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
@@ -35,8 +37,35 @@ struct ThumbnailView: View {
                 .padding(4)
         }
         .task(id: item.id) {
+            guard item.isSupported else { return }
             image = await ImagePipeline.shared.thumbnail(for: item.primaryURL)
         }
+    }
+}
+
+/// Grey placeholder tile shown for recognised-but-unpreviewable files
+/// (other RAW formats, PNG/HEIC/WebP, video, …).
+struct UnsupportedThumbnail: View {
+    let item: PhotoItem
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Color(nsColor: .quaternaryLabelColor))
+            .overlay {
+                VStack(spacing: 6) {
+                    Image(systemName: "doc.questionmark")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.secondary)
+                    Text("File isn't supported")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(item.fileTypeLabel)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .multilineTextAlignment(.center)
+                .padding(6)
+            }
     }
 }
 

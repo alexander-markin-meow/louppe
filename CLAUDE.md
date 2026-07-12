@@ -46,15 +46,16 @@ truth, created in `LouppeApp` and passed to every view.
 | File | Responsibility |
 |---|---|
 | `Sources/Louppe/LouppeApp.swift` | `@main`, window scene, menu-bar commands |
-| `Sources/Louppe/SessionStore.swift` | Session state: ratings, undo (batched), navigation, sidecar persistence, recents |
+| `Sources/Louppe/SessionStore.swift` | Session state: ratings, undo (batched), navigation, filtering (`visibleIndices`), sidecar persistence, recents |
 | `Sources/Louppe/FolderScanner.swift` | Recursive folder scan, RAW+JPEG pairing, chronological sort |
 | `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding, thumbnail memory+disk caches, prefetching |
 | `Sources/Louppe/MetadataExtractor.swift` | EXIF reading for capture dates + info panel |
 | `Sources/Louppe/ExportManager.swift` | Copies keepers to a destination, collision-suffixing |
-| `Sources/Louppe/Models.swift` | `PhotoItem`, `Rating`, sidecar codables |
+| `Sources/Louppe/Models.swift` | `PhotoItem`, `Rating`, `PhotoFilter`, sidecar codables |
 | `Sources/Louppe/Views/RootView.swift` | Phase switch (welcome/scanning/session), `Color.appBackground` |
 | `Sources/Louppe/Views/WelcomeView.swift` | Start screen + scanning progress |
 | `Sources/Louppe/Views/SessionView.swift` | Toolbar, export sheet, **all single-key hotkeys** (`handleKey`) |
+| `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, file-type toggles |
 | `Sources/Louppe/Views/CullingView.swift` | Single-photo layout: filmstrip / photo / info panel |
 | `Sources/Louppe/Views/FilmstripView.swift` | Vertical thumbnail browser with day separators |
 | `Sources/Louppe/Views/LightTableView.swift` | Grid view, day-grouped rows, click-to-rate |
@@ -78,6 +79,10 @@ truth, created in `LouppeApp` and passed to every view.
 
 ## Known gotchas
 
+- **`visibleIndices` must never outlive `items`**: any place that replaces or
+  empties `items` must reset/recompute `visibleIndices` in the same turn
+  (see `openFolder`) — stale indices crashed the app on re-scan once.
+  `visibleItems` bounds-checks as a backstop; keep it that way.
 - **ImageIO embedded thumbnails**: many JPEGs embed a tiny (~160px) preview.
   `ImagePipeline.decode` asks for the fast embedded path first and falls back
   to a full decode when the result is undersized — removing that fallback
