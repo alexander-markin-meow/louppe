@@ -1,6 +1,6 @@
 # Louppe: Photo Culling App
 
-Fast, keyboard-driven macOS app for reviewing a folder of photos and marking
+Fast, keyboard-driven open source macOS app for reviewing a folder of photos and marking
 each one **Yes** (keep) or **No** (reject), then exporting the keepers to a new
 folder. Originals are never modified, moved, or deleted.
 
