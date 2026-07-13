@@ -46,7 +46,7 @@ truth, created in `LouppeApp` and passed to every view.
 | File | Responsibility |
 |---|---|
 | `Sources/Louppe/LouppeApp.swift` | `@main`, window scene, menu-bar commands |
-| `Sources/Louppe/SessionStore.swift` | Session state: ratings, undo (batched), navigation, filtering (`visibleIndices`), sidecar persistence, recents |
+| `Sources/Louppe/SessionStore.swift` | Session state: ratings, undo (batched), navigation, filtering + sorting (`visibleIndices`), sidecar persistence, recents |
 | `Sources/Louppe/FolderScanner.swift` | Recursive folder scan, RAW+JPEG pairing, chronological sort |
 | `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding, thumbnail memory+disk caches, prefetching |
 | `Sources/Louppe/MetadataExtractor.swift` | EXIF reading for capture dates + info panel |
@@ -54,8 +54,8 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Models.swift` | `PhotoItem`, `Rating`, `PhotoFilter`, sidecar codables |
 | `Sources/Louppe/Views/RootView.swift` | Phase switch (welcome/scanning/session), `Color.appBackground` |
 | `Sources/Louppe/Views/WelcomeView.swift` | Start screen + scanning progress |
-| `Sources/Louppe/Views/SessionView.swift` | Toolbar, export sheet, **all single-key hotkeys** (`handleKey`) |
-| `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, file-type toggles |
+| `Sources/Louppe/Views/SessionView.swift` | Toolbar (incl. sort menu), export sheet, **all single-key hotkeys** (`handleKey`) |
+| `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, file-type / camera / lens toggles |
 | `Sources/Louppe/Views/CullingView.swift` | Single-photo layout: filmstrip / photo / info panel |
 | `Sources/Louppe/Views/FilmstripView.swift` | Vertical thumbnail browser with day separators |
 | `Sources/Louppe/Views/LightTableView.swift` | Grid view, day-grouped rows, click-to-rate |
@@ -82,6 +82,11 @@ truth, created in `LouppeApp` and passed to every view.
   use blue or `Color.accentColor` for anything.
 
 ## Known gotchas
+
+- **Don't try to regroup the left-toolbar glass capsules.** `ToolbarSpacer`
+  is silently ignored in the `.navigation` placement on macOS 26 (tried
+  2026-07-12, including an invisible-item workaround — the owner found every
+  variant worse and asked to keep the default automatic grouping).
 
 - **`visibleIndices` must never outlive `items`**: any place that replaces or
   empties `items` must reset/recompute `visibleIndices` in the same turn

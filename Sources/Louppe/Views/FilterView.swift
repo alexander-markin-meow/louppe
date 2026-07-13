@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// The toolbar filter menu (shown as a popover): search across file metadata,
-/// narrow to a day or date range, and pick which file types to show.
-/// Standard controls throughout — TextField, DatePicker, Toggle.
+/// narrow to a day or date range, and pick which file types, cameras, and
+/// lenses to show. Standard controls throughout — TextField, DatePicker, Toggle.
 struct FilterView: View {
     @ObservedObject var store: SessionStore
 
@@ -53,13 +53,31 @@ struct FilterView: View {
             Text("File types")
                 .font(.subheadline.weight(.semibold))
             ForEach(store.availableTypes, id: \.self) { type in
-                Toggle(isOn: typeBinding(type)) {
-                    HStack {
-                        Text(type)
-                        Spacer()
-                        Text("\(count(of: type))")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
+                Toggle(isOn: exclusionBinding(type, \.excludedTypes)) {
+                    labeledCount(type, store.items.filter { $0.fileTypeLabel == type }.count)
+                }
+            }
+
+            // Camera / lens sections appear only when the folder actually
+            // mixes more than one — a single value can't be filtered on.
+            if store.availableCameras.count > 1 {
+                Divider()
+                Text("Camera")
+                    .font(.subheadline.weight(.semibold))
+                ForEach(store.availableCameras, id: \.self) { camera in
+                    Toggle(isOn: exclusionBinding(camera, \.excludedCameras)) {
+                        labeledCount(camera, store.items.filter { $0.cameraLabel == camera }.count)
+                    }
+                }
+            }
+
+            if store.availableLenses.count > 1 {
+                Divider()
+                Text("Lens")
+                    .font(.subheadline.weight(.semibold))
+                ForEach(store.availableLenses, id: \.self) { lens in
+                    Toggle(isOn: exclusionBinding(lens, \.excludedLenses)) {
+                        labeledCount(lens, store.items.filter { $0.lensLabel == lens }.count)
                     }
                 }
             }
@@ -109,19 +127,29 @@ struct FilterView: View {
         store.filter.dateFrom...Date.distantFuture
     }
 
-    private func typeBinding(_ type: String) -> Binding<Bool> {
+    /// One binding shape for all three exclusion sets (types, cameras, lenses):
+    /// the toggle is on when the label is *not* excluded.
+    private func exclusionBinding(_ label: String, _ set: WritableKeyPath<PhotoFilter, Set<String>>) -> Binding<Bool> {
         Binding {
-            !store.filter.excludedTypes.contains(type)
+            !store.filter[keyPath: set].contains(label)
         } set: { on in
             if on {
-                store.filter.excludedTypes.remove(type)
+                store.filter[keyPath: set].remove(label)
             } else {
-                store.filter.excludedTypes.insert(type)
+                store.filter[keyPath: set].insert(label)
             }
         }
     }
 
-    private func count(of type: String) -> Int {
-        store.items.filter { $0.fileTypeLabel == type }.count
+    private func labeledCount(_ label: String, _ count: Int) -> some View {
+        HStack {
+            Text(label)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Text("\(count)")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
     }
 }

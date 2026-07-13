@@ -44,7 +44,12 @@ final class SessionStore: ObservableObject {
     @Published var filter = PhotoFilter() {
         didSet { if filter != oldValue { applyFilter() } }
     }
-    /// Indices into `items` that pass the current filter, in session order.
+    /// The toolbar sort menu. Reorders `visibleIndices` only — `items` keeps
+    /// its scan order, so undo indices and the sidecar are unaffected.
+    @Published var sort = PhotoSort() {
+        didSet { if sort != oldValue { applyFilter() } }
+    }
+    /// Indices into `items` that pass the current filter, in the chosen sort order.
     @Published private(set) var visibleIndices: [Int] = []
 
     private(set) var sourceFolder: URL?
@@ -92,6 +97,14 @@ final class SessionStore: ObservableObject {
         Set(items.map(\.fileTypeLabel)).sorted()
     }
 
+    /// Distinct camera / lens labels in this session, for the filter menu.
+    var availableCameras: [String] {
+        Set(items.map(\.cameraLabel)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+    var availableLenses: [String] {
+        Set(items.map(\.lensLabel)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
     /// Span of capture dates in this session — seeds the filter's date pickers.
     var captureDateRange: ClosedRange<Date>? {
         let dates = items.compactMap(\.captureDate)
@@ -100,7 +113,9 @@ final class SessionStore: ObservableObject {
     }
 
     private func applyFilter() {
-        visibleIndices = items.indices.filter { filter.matches(items[$0]) }
+        visibleIndices = items.indices
+            .filter { filter.matches(items[$0]) }
+            .sorted { sort.areInOrder(items[$0], items[$1]) }
         // Keep the current photo visible: snap to the nearest photo that
         // passes the filter (forward first, else the last visible one).
         if !visibleIndices.isEmpty, !visibleIndices.contains(currentIndex) {
@@ -113,6 +128,9 @@ final class SessionStore: ObservableObject {
     /// day than the visible one before it — the filmstrip and light table
     /// draw a separator there.
     func startsNewDay(atVisiblePosition pos: Int) -> Bool {
+        // Day separators only make sense while photos are in date order —
+        // sorted by name, neighbours can hop between days arbitrarily.
+        guard sort.key == .captureDate else { return false }
         guard pos > 0, visibleIndices.indices.contains(pos),
               items.indices.contains(visibleIndices[pos - 1]),
               items.indices.contains(visibleIndices[pos]) else { return false }
@@ -429,6 +447,7 @@ final class SessionStore: ObservableObject {
         currentIndex = 0
         viewMode = .culling
         filter = PhotoFilter()
+        sort = PhotoSort()
         visibleIndices = []
         isFilterPresented = false
         phase = .welcome

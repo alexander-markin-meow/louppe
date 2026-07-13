@@ -13,25 +13,18 @@ struct SessionView: View {
     @State private var keyMonitor: Any?
 
     var body: some View {
-        Group {
-            switch store.viewMode {
-            case .culling:
-                CullingView(store: store)
-            case .lightTable:
-                LightTableView(store: store)
+        mainContent
+            .toolbar { toolbarContent }
+            .navigationTitle("")
+            // Keep the native liquid-glass toolbar, but lay the window content
+            // out *below* it instead of extending underneath — so thumbnails and
+            // the info panel can never scroll up behind the toolbar.
+            .background(BelowToolbarLayout())
+            .sheet(isPresented: $store.isExportPresented) {
+                ExportView(store: store)
             }
-        }
-        .toolbar { toolbarContent }
-        .navigationTitle("")
-        // Keep the native liquid-glass toolbar, but lay the window content
-        // out *below* it instead of extending underneath — so thumbnails and
-        // the info panel can never scroll up behind the toolbar.
-        .background(BelowToolbarLayout())
-        .sheet(isPresented: $store.isExportPresented) {
-            ExportView(store: store)
-        }
-        .onAppear(perform: installKeyMonitor)
-        .onDisappear(perform: removeKeyMonitor)
+            .onAppear(perform: installKeyMonitor)
+            .onDisappear(perform: removeKeyMonitor)
     }
 
     private var subtitle: String {
@@ -58,8 +51,23 @@ struct SessionView: View {
         }
     }
 
+    private var mainContent: some View {
+        Group {
+            switch store.viewMode {
+            case .culling:
+                CullingView(store: store)
+            case .lightTable:
+                LightTableView(store: store)
+            }
+        }
+    }
+
     // MARK: - Toolbar
 
+    /// Original arrangement: separate navigation items in order
+    /// folder / filter / sort / re-scan; macOS groups the glass itself.
+    /// (ToolbarSpacer-based regrouping was tried and reverted — the
+    /// .navigation area ignores spacers on macOS 26.)
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         // Current folder: a real button — click it to go back to the start
@@ -74,21 +82,8 @@ struct SessionView: View {
             .help("Back to the start screen to open another folder")
         }
 
-        // Filter: opens the glass popover with search / date / type filters.
-        ToolbarItem(placement: .navigation) {
-            Button {
-                store.isFilterPresented.toggle()
-            } label: {
-                Image(systemName: store.filter.isActive
-                    ? "line.3.horizontal.decrease.circle.fill"
-                    : "line.3.horizontal.decrease.circle")
-                    .foregroundStyle(store.filter.isActive ? Color.louppeAccent : Color.primary)
-            }
-            .popover(isPresented: $store.isFilterPresented, arrowEdge: .bottom) {
-                FilterView(store: store)
-            }
-            .help("Filter which photos are shown")
-        }
+        filterItem
+        sortItem
 
         ToolbarItem(placement: .navigation) {
             Button {
@@ -112,6 +107,54 @@ struct SessionView: View {
             }
         }
 
+        trailingItems
+    }
+
+    /// Filter: opens the glass popover with search / date / type filters.
+    @ToolbarContentBuilder
+    private var filterItem: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button {
+                store.isFilterPresented.toggle()
+            } label: {
+                Image(systemName: store.filter.isActive
+                    ? "line.3.horizontal.decrease.circle.fill"
+                    : "line.3.horizontal.decrease.circle")
+                    .foregroundStyle(store.filter.isActive ? Color.louppeAccent : Color.primary)
+            }
+            .popover(isPresented: $store.isFilterPresented, arrowEdge: .bottom) {
+                FilterView(store: store)
+            }
+            .help("Filter which photos are shown")
+        }
+    }
+
+    /// Sort: a native menu with check-marked pickers, like Finder's
+    /// sort menu. Only reorders what's shown — never touches ratings.
+    @ToolbarContentBuilder
+    private var sortItem: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Menu {
+                Picker("Sort by", selection: $store.sort.key) {
+                    Text("Date taken").tag(PhotoSort.Key.captureDate)
+                    Text("Name").tag(PhotoSort.Key.name)
+                }
+                Divider()
+                Picker("Order", selection: $store.sort.ascending) {
+                    Text("Ascending").tag(true)
+                    Text("Descending").tag(false)
+                }
+            } label: {
+                Image(systemName: "arrow.up.arrow.down")
+            }
+            .pickerStyle(.inline)
+            .menuIndicator(.hidden)
+            .help("Sort photos by date taken or name")
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var trailingItems: some ToolbarContent {
         ToolbarItemGroup {
             Picker("View", selection: $store.viewMode) {
                 Image(systemName: "photo").tag(ViewMode.culling)

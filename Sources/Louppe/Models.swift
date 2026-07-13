@@ -43,6 +43,11 @@ struct PhotoItem: Identifiable {
         }
     }
 
+    /// Labels the camera/lens filter toggles group by. Files without EXIF
+    /// (screenshots, videos…) collect under "Unknown" so they stay filterable.
+    var cameraLabel: String { cameraModel ?? "Unknown" }
+    var lensLabel: String { lensModel ?? "Unknown" }
+
     var allURLs: [URL] {
         var urls = [primaryURL]
         if let paired = pairedURL { urls.append(paired) }
@@ -67,6 +72,45 @@ struct PhotoItem: Identifiable {
     }()
 }
 
+// MARK: - Session sort
+
+/// How the toolbar sort menu orders the visible photos.
+struct PhotoSort: Equatable {
+    enum Key: Equatable {
+        case captureDate
+        case name
+    }
+    var key: Key = .captureDate
+    var ascending = true
+
+    /// Comparator for the session's visible order. Photos without a capture
+    /// date always sort to the end, whichever direction is chosen.
+    func areInOrder(_ a: PhotoItem, _ b: PhotoItem) -> Bool {
+        switch key {
+        case .captureDate:
+            switch (a.captureDate, b.captureDate) {
+            case let (da?, db?) where da != db:
+                return ascending ? da < db : da > db
+            case (nil, .some): return false
+            case (.some, nil): return true
+            default: return namesInOrder(a, b)
+            }
+        case .name:
+            return namesInOrder(a, b)
+        }
+    }
+
+    /// Finder-style name comparison (numbers compare numerically, so
+    /// IMG_9 comes before IMG_10). Ties break on the stable id.
+    private func namesInOrder(_ a: PhotoItem, _ b: PhotoItem) -> Bool {
+        let comparison = a.displayName.localizedStandardCompare(b.displayName)
+        if comparison != .orderedSame {
+            return ascending ? comparison == .orderedAscending : comparison == .orderedDescending
+        }
+        return a.id < b.id
+    }
+}
+
 // MARK: - Session filter
 
 /// What the toolbar filter menu narrows the session down to.
@@ -79,15 +123,22 @@ struct PhotoFilter: Equatable {
     /// File-type labels the user has switched off. Empty = all types shown,
     /// so newly appearing types after a re-scan default to visible.
     var excludedTypes: Set<String> = []
+    /// Same exclusion pattern for camera and lens labels.
+    var excludedCameras: Set<String> = []
+    var excludedLenses: Set<String> = []
 
     var isActive: Bool {
         !searchText.trimmingCharacters(in: .whitespaces).isEmpty
             || dateEnabled
             || !excludedTypes.isEmpty
+            || !excludedCameras.isEmpty
+            || !excludedLenses.isEmpty
     }
 
     func matches(_ item: PhotoItem) -> Bool {
         if excludedTypes.contains(item.fileTypeLabel) { return false }
+        if excludedCameras.contains(item.cameraLabel) { return false }
+        if excludedLenses.contains(item.lensLabel) { return false }
 
         if dateEnabled {
             // Whole-day bounds, so from == to means "that one day".
