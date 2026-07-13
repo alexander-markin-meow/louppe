@@ -86,3 +86,8 @@ Supported formats:
 Other visual files (videos, a few rare RAW formats) still appear in the
 session as a grey "file isn't supported" placeholder, so nothing on the card
 is silently hidden — you can rate and export them like any other file.
+
+## License
+
+Louppe is free and open source under the [MIT License](LICENSE) — you're free
+to use, modify, and redistribute it.
