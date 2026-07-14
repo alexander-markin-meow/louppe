@@ -62,9 +62,9 @@ struct LouppeApp: App {
                 .disabled(store.isCleaningUp || !store.canUndo)
 
                 Button("Clear All Ratings") {
-                    store.clearAllRatings()
+                    store.requestClearAllRatings()
                 }
-                .disabled(store.items.isEmpty || store.isCleaningUp)
+                .disabled(store.ratedCount == 0 || store.isCleaningUp)
             }
             CommandGroup(after: .saveItem) {
                 Button("Export…") {

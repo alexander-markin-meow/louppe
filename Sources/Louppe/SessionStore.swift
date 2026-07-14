@@ -136,6 +136,7 @@ final class SessionStore: ObservableObject {
     var yesCount: Int { ratingTally.yes }
     var noCount: Int { ratingTally.no }
     var undecidedCount: Int { ratingTally.undecided }
+    var ratedCount: Int { ratingTally.yes + ratingTally.no }
 
     var currentItem: PhotoItem? {
         guard items.indices.contains(currentIndex) else { return nil }
@@ -293,6 +294,7 @@ final class SessionStore: ObservableObject {
         items = []
         resetDerivedData()
         undoStack = []
+        isClearAllRatingsConfirmationPresented = false
         pendingCleanUp = nil
         addToRecents(url)
 
@@ -541,9 +543,25 @@ final class SessionStore: ObservableObject {
         scheduleSave()
     }
 
+    /// Whether clearing every rating is awaiting confirmation in SessionView.
+    @Published var isClearAllRatingsConfirmationPresented = false
+
+    /// Ask before resetting a larger rated set to undecided. Toolbar, menu,
+    /// and the bare R shortcut all come through here so the threshold is
+    /// consistent: 1–15 ratings clear immediately, while 16+ need approval.
+    func requestClearAllRatings() {
+        guard !isCleaningUp, ratedCount > 0 else { return }
+        if ratedCount > 15 {
+            isClearAllRatingsConfirmationPresented = true
+        } else {
+            clearAllRatings()
+        }
+    }
+
     /// Reset every photo to undecided — one undo step brings all ratings back.
     func clearAllRatings() {
         guard !isCleaningUp else { return }
+        isClearAllRatingsConfirmationPresented = false
         let changes = items.indices.compactMap { i -> RatingChange? in
             guard items[i].rating != .undecided else { return nil }
             return RatingChange(index: i, previousRating: items[i].rating, previousRatedAt: items[i].ratedAt)
@@ -1059,6 +1077,7 @@ final class SessionStore: ObservableObject {
         sourceFolder = nil
         undoStack = []
         selectedIndices = []
+        isClearAllRatingsConfirmationPresented = false
         pendingCleanUp = nil
         cleanUpError = nil
         currentIndex = 0

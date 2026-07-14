@@ -24,6 +24,15 @@ struct SessionView: View {
             .sheet(isPresented: $store.isExportPresented) {
                 ExportView(store: store)
             }
+            .alert("Clear All Ratings?", isPresented: $store.isClearAllRatingsConfirmationPresented) {
+                Button("Clear All Ratings", role: .destructive) {
+                    store.clearAllRatings()
+                }
+                .keyboardShortcut(.defaultAction)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(clearAllRatingsMessage)
+            }
             .confirmationDialog(
                 cleanUpTitle,
                 isPresented: isCleanUpConfirmPresented,
@@ -47,6 +56,12 @@ struct SessionView: View {
     }
 
     // MARK: - Clean up confirmation
+
+    private var clearAllRatingsMessage: String {
+        let count = store.ratedCount
+        let photos = count == 1 ? "1 photo" : "\(count) photos"
+        return "This will remove the Yes or No rating from \(photos). You can undo it with ⌘Z."
+    }
 
     private var isCleanUpConfirmPresented: Binding<Bool> {
         Binding(
@@ -278,11 +293,11 @@ struct SessionView: View {
             .disabled(store.isCleaningUp || !store.canUndo)
             .help("Undo the last rating or clean-up (Z or ⌘Z)")
             Button {
-                store.clearAllRatings()
+                store.requestClearAllRatings()
             } label: {
                 Image(systemName: "eraser")
             }
-            .disabled(store.isCleaningUp)
+            .disabled(store.isCleaningUp || store.ratedCount == 0)
             .help("Clear all photo ratings (R)")
         }
 
@@ -365,8 +380,9 @@ struct SessionView: View {
         if store.isExportPresented { return false }
         // Don't steal letters while the filter popover is up (search typing).
         if store.isFilterPresented { return false }
-        // Nor while the clean-up confirmation or its error alert is up.
-        if store.pendingCleanUp != nil || store.cleanUpError != nil { return false }
+        // Nor while a confirmation or error alert is up.
+        if store.isClearAllRatingsConfirmationPresented ||
+            store.pendingCleanUp != nil || store.cleanUpError != nil { return false }
 
         // ⌘+ / ⌘− resize the Grid view.
         if event.modifierFlags.contains(.command), store.viewMode == .grid {
@@ -439,7 +455,7 @@ struct SessionView: View {
         case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
         case "g": store.toggleViewMode(); return true
         case "e": store.isExportPresented = true; return true
-        case "r": store.clearAllRatings(); return true
+        case "r": store.requestClearAllRatings(); return true
         case "z": store.undo(); return true                  // bare Z = ⌘Z
         case "s":
             if store.viewMode == .gallery {

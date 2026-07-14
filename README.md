@@ -29,14 +29,13 @@ Pick a folder (an SD card works), review, then press **⌘E** to export.
 | S | Toggle 100% zoom / fit |
 | A | Toggle phone-sized preview / fit |
 | Tab / G | Switch Gallery ↔ Grid view |
-| E | Export |
+| E or ⌘E | Export |
 | Q | Show/hide the browser (thumbnail column) |
 | W | Show/hide the info panel |
-| R | Clear all ratings (one ⌘Z brings them all back) |
+| R | Clear all ratings (16+ ratings ask for confirmation; Enter confirms; ⌘Z restores) |
 | ⌘R | Re-scan folder for new photos |
 | ⌘+ / ⌘− | Bigger / smaller thumbnails in the Grid view |
 | Z or ⌘Z | Undo last rating or clean-up |
-| ⌘E | Export |
 | ⌘O | Open a different folder |
 | ⌘A | Select all photos (respects the filter) |
 | ⌘⇧← / ⌘⇧→ | Select from the current photo to the first / last |
