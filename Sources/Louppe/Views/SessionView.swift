@@ -77,14 +77,15 @@ struct SessionView: View {
     private func cleanUpMessage(for mode: CleanUpMode) -> String {
         let counts = store.cleanUpCounts(for: mode)
         let files = counts.files == 1 ? "1 file" : "\(counts.files) files"
-        var parts = ["\(files) will move to the macOS Trash (a RAW+JPEG pair counts as two)."]
+        let space = ByteCountFormatter.string(fromByteCount: counts.bytes, countStyle: .file)
+        var parts = ["\(files) will be moved to Trash (RAW+JPEG pair counts as two), freeing \(space) of space."]
         switch mode {
         case .selection:
-            parts.append("Only the selected photos leave the folder; everything else stays.")
+            parts.append("Only the selected photos will leave the folder; everything else stays.")
         case .trashNo:
             parts.append("Photos marked “Yes” and unrated photos stay in the folder.")
         case .keepOnlyYes:
-            parts.append("Every photo not marked “Yes” — including unrated ones — leaves the folder.")
+            parts.append("Only photos marked “Yes” stay in the folder.")
         }
         // With a filter active, spell out the scope of the rating-based
         // options so nothing hidden is trashed (or spared) by surprise.
@@ -97,8 +98,7 @@ struct SessionView: View {
                 parts.append("All \(store.items.count) photos in the folder are considered, including the ones the filter currently hides.")
             }
         }
-        parts.append("Nothing is deleted permanently: press ⌘Z to put everything back.")
-        return parts.joined(separator: " ")
+        return parts.joined(separator: "\n")
     }
 
     private func photosPhrase(_ count: Int) -> String {

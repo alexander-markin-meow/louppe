@@ -80,6 +80,7 @@ struct UnsupportedThumbnail: View {
 /// The ✓ / ✗ / undecided dot shown on thumbnails and in the info panel.
 struct RatingBadge: View {
     let rating: Rating
+    var size: CGFloat = 14
 
     var body: some View {
         Group {
@@ -96,7 +97,7 @@ struct RatingBadge: View {
                     .opacity(0.85)
             }
         }
-        .font(.system(size: 14, weight: .bold))
+        .font(.system(size: size, weight: .bold))
         .shadow(radius: 1.5)
     }
 }

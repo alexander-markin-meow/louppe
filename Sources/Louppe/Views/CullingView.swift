@@ -41,8 +41,8 @@ struct CullingView: View {
 
             if store.showMetadataPanel, let item = store.currentItem {
                 Divider()
-                MetadataPanel(item: item)
-                    .frame(width: 240)
+                MetadataPanel(store: store, item: item)
+                    .frame(width: 280)
                     .transition(.move(edge: .trailing))
             }
         }

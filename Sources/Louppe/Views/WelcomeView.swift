@@ -74,6 +74,7 @@ struct WelcomeView: View {
                         } label: {
                             Label(url.lastPathComponent, systemImage: "clock")
                                 .frame(maxWidth: 320)
+                                .foregroundStyle(Color.louppeAccent)
                         }
                         .buttonStyle(.link)
                         .help(url.path)

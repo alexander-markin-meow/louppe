@@ -657,9 +657,13 @@ final class SessionStore: ObservableObject {
     /// How many photos (and actual files, counting RAW+JPEG pairs as two)
     /// a clean-up mode would move to the Trash, respecting the scope toggle.
     /// Only needed once, when the confirmation dialog opens.
-    func cleanUpCounts(for mode: CleanUpMode) -> (photos: Int, files: Int) {
+    func cleanUpCounts(for mode: CleanUpMode) -> (photos: Int, files: Int, bytes: Int64) {
         let doomed = cleanUpTargets(for: mode).map { items[$0] }
-        return (doomed.count, doomed.reduce(0) { $0 + $1.allURLs.count })
+        return (
+            doomed.count,
+            doomed.reduce(0) { $0 + $1.allURLs.count },
+            doomed.reduce(0) { $0 + $1.totalFileSize }
+        )
     }
 
     /// Menu label for trashing the selection, with a live count. Lives on the

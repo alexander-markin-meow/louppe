@@ -21,6 +21,7 @@ struct PhotoItem: Identifiable, Sendable {
     let cameraModel: String?
     let lensModel: String?
     let fileSize: Int64
+    let pairedFileSize: Int64
     /// Locale-folded metadata assembled once during scanning. Search filtering
     /// reads this string directly instead of rebuilding and date-formatting it
     /// for every photo on every keystroke.
@@ -36,6 +37,7 @@ struct PhotoItem: Identifiable, Sendable {
         cameraModel: String?,
         lensModel: String?,
         fileSize: Int64,
+        pairedFileSize: Int64 = 0,
         rating: Rating = .undecided,
         ratedAt: Date? = nil
     ) {
@@ -46,6 +48,7 @@ struct PhotoItem: Identifiable, Sendable {
         self.cameraModel = cameraModel
         self.lensModel = lensModel
         self.fileSize = fileSize
+        self.pairedFileSize = pairedFileSize
         self.rating = rating
         self.ratedAt = ratedAt
 
@@ -94,6 +97,8 @@ struct PhotoItem: Identifiable, Sendable {
         if let paired = pairedURL { urls.append(paired) }
         return urls
     }
+
+    var totalFileSize: Int64 { fileSize + pairedFileSize }
 
     static func normalizeForSearch(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)

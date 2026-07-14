@@ -134,7 +134,8 @@ enum FolderScanner {
                     captureDate: captureDate,
                     cameraModel: info.cameraModel,
                     lensModel: info.lensModel,
-                    fileSize: facts?.size ?? 0
+                    fileSize: facts?.size ?? 0,
+                    pairedFileSize: paired.flatMap { factsByURL[$0]?.size } ?? 0
                 ))
             }
         }
