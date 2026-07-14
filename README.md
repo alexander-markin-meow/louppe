@@ -115,7 +115,7 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `Views/` — welcome screen, session toolbar + hotkeys, culling view, filmstrip,
   light table, info panel, thumbnails, export dialog
 
-See `CLAUDE.md` for a full architecture map, build/verify instructions, and
+See `AGENTS.md` for a full architecture map, build/verify instructions, and
 project invariants (useful for both humans and AI assistants).
 
 Supported formats:
