@@ -9,28 +9,31 @@ struct FilmstripView: View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 6) {
-                    ForEach(Array(store.visibleItems.enumerated()), id: \.element.item.id) { position, entry in
-                        VStack(spacing: 6) {
-                            if store.startsNewDay(atVisiblePosition: position) {
-                                RoundedRectangle(cornerRadius: 1)
-                                    .fill(.secondary.opacity(0.5))
-                                    .frame(width: 64, height: 2)
-                                    .padding(.vertical, 3)
-                            }
-                            ThumbnailView(
-                                item: entry.item,
-                                isCurrent: entry.index == store.currentIndex,
-                                isSelected: store.selectedIndices.contains(entry.index)
-                            )
-                            .frame(width: 102, height: 102)
-                            .onTapGesture {
-                                // ⇧-click: range · ⌘-click: add/remove · click: jump.
-                                store.handleThumbnailClick(at: entry.index) {
-                                    store.setIndex(entry.index)
+                    ForEach(store.visibleIndices, id: \.self) { index in
+                        if store.items.indices.contains(index) {
+                            let item = store.items[index]
+                            VStack(spacing: 6) {
+                                if store.visibleDayStartIndices.contains(index) {
+                                    RoundedRectangle(cornerRadius: 1)
+                                        .fill(.secondary.opacity(0.5))
+                                        .frame(width: 64, height: 2)
+                                        .padding(.vertical, 3)
+                                }
+                                ThumbnailView(
+                                    item: item,
+                                    isCurrent: index == store.currentIndex,
+                                    isSelected: store.selectedIndices.contains(index)
+                                )
+                                .frame(width: 102, height: 102)
+                                .onTapGesture {
+                                    // ⇧-click: range · ⌘-click: add/remove · click: jump.
+                                    store.handleThumbnailClick(at: index) {
+                                        store.setIndex(index)
+                                    }
                                 }
                             }
+                            .id(item.id)
                         }
-                        .id(entry.item.id)
                     }
                 }
                 .padding(.horizontal, 10)

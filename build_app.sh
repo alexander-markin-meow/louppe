@@ -6,8 +6,14 @@ cd "$(dirname "$0")"
 echo "Compiling (release build)…"
 swift build -c release
 
-APP_DIR="dist/Louppe.app"
-rm -rf "$APP_DIR"
+OUTPUT_APP="dist/Louppe.app"
+# This repository can live in a File Provider-managed Documents folder, which
+# immediately reattaches com.apple.FinderInfo to app bundles and makes strict
+# signature verification fail. Assemble and verify on the local temp volume,
+# then copy the verified bundle back without extended attributes.
+STAGING_ROOT="$(mktemp -d /private/tmp/Louppe-build.XXXXXX)"
+trap 'rm -rf "$STAGING_ROOT"' EXIT
+APP_DIR="$STAGING_ROOT/Louppe.app"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 cp .build/release/Louppe "$APP_DIR/Contents/MacOS/Louppe"
@@ -48,6 +54,11 @@ PLIST
 
 xattr -cr "$APP_DIR"
 codesign --force --sign - "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
+
+rm -rf "$OUTPUT_APP"
+mkdir -p "$(dirname "$OUTPUT_APP")"
+ditto --noextattr --noqtn "$APP_DIR" "$OUTPUT_APP"
 
 echo ""
-echo "Done → $PWD/$APP_DIR"
+echo "Done → $PWD/$OUTPUT_APP"

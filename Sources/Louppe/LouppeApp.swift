@@ -3,12 +3,14 @@ import AppKit
 
 @main
 struct LouppeApp: App {
+    @NSApplicationDelegateAdaptor(LouppeApplicationDelegate.self) private var appDelegate
     @StateObject private var store = SessionStore()
 
     var body: some Scene {
         Window("Louppe", id: "main") {
             RootView(store: store)
                 .onAppear {
+                    appDelegate.store = store
                     NSApp.activate(ignoringOtherApps: true)
                     // Optional launch argument for testing:
                     //   open Louppe.app --args -openFolder /path/to/photos
@@ -21,6 +23,10 @@ struct LouppeApp: App {
                     }
                 }
         }
+        // Keep the system-owned macOS window chrome. This adopts the current
+        // platform appearance (including macOS 26 window geometry) instead of
+        // freezing a custom or plain style in the app.
+        .windowStyle(.automatic)
         .commands {
             // Standard About panel (icon, name, version, copyright) with a
             // custom credits section: author, contact email, GitHub link.
@@ -34,17 +40,18 @@ struct LouppeApp: App {
                     store.promptForSourceFolder()
                 }
                 .keyboardShortcut("o")
+                .disabled(store.isCleaningUp)
 
                 Button("Rescan Folder") {
                     store.rescan()
                 }
                 .keyboardShortcut("r")
-                .disabled(store.sourceFolder == nil)
+                .disabled(store.sourceFolder == nil || store.isCleaningUp)
 
                 Button("Close Session") {
                     store.closeSession()
                 }
-                .disabled(store.sourceFolder == nil)
+                .disabled(store.sourceFolder == nil || store.isCleaningUp)
             }
             CommandGroup(replacing: .undoRedo) {
                 // Undoes ratings and clean-ups alike, so just "Undo".
@@ -52,18 +59,19 @@ struct LouppeApp: App {
                     store.undo()
                 }
                 .keyboardShortcut("z")
+                .disabled(store.isCleaningUp || !store.canUndo)
 
                 Button("Clear All Ratings") {
                     store.clearAllRatings()
                 }
-                .disabled(store.items.isEmpty)
+                .disabled(store.items.isEmpty || store.isCleaningUp)
             }
             CommandGroup(after: .saveItem) {
                 Button("Export…") {
                     store.isExportPresented = true
                 }
                 .keyboardShortcut("e")
-                .disabled(store.items.isEmpty)
+                .disabled(store.items.isEmpty || store.isCleaningUp)
 
                 Divider()
 
@@ -72,7 +80,7 @@ struct LouppeApp: App {
                 Menu("Clean Up") {
                     CleanUpMenuItems(store: store)
                 }
-                .disabled(store.items.isEmpty)
+                .disabled(store.items.isEmpty || store.isCleaningUp)
             }
             CommandGroup(after: .toolbar) {
                 Button("Zoom In") {
@@ -116,5 +124,24 @@ struct LouppeApp: App {
         credits.append(NSAttributedString(string: "GitHub", attributes: link))
 
         return credits
+    }
+}
+
+/// A Trash/restore batch cannot be made transactional by the filesystem. Keep
+/// the process alive until its worker has either completed or rolled a partial
+/// RAW+JPEG operation back, instead of allowing Quit to strand half a pair.
+@MainActor
+private final class LouppeApplicationDelegate: NSObject, NSApplicationDelegate {
+    weak var store: SessionStore?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard store?.isCleaningUp == true else { return .terminateNow }
+
+        let alert = NSAlert()
+        alert.messageText = "Clean Up is still running"
+        alert.informativeText = "Wait for the Trash or restore progress to finish, then quit Louppe."
+        alert.alertStyle = .warning
+        alert.runModal()
+        return .terminateCancel
     }
 }

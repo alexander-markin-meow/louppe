@@ -17,12 +17,9 @@ struct SessionView: View {
 
     var body: some View {
         mainContent
+            .overlay { cleanUpProgressOverlay }
             .toolbar { toolbarContent }
             .navigationTitle("")
-            // Keep the native liquid-glass toolbar, but lay the window content
-            // out *below* it instead of extending underneath — so thumbnails and
-            // the info panel can never scroll up behind the toolbar.
-            .background(BelowToolbarLayout())
             .sheet(isPresented: $store.isExportPresented) {
                 ExportView(store: store)
             }
@@ -147,71 +144,83 @@ struct SessionView: View {
         }
     }
 
+    @ViewBuilder
+    private var cleanUpProgressOverlay: some View {
+        if let progress = store.cleanUpProgress {
+            VStack(spacing: 8) {
+                Text(progress.title)
+                    .font(.headline)
+                ProgressView(value: Double(progress.done), total: Double(max(progress.total, 1)))
+                    .frame(width: 280)
+                Text("\(progress.done) of \(progress.total) files")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .padding(18)
+            .background(Color.appBackground, in: RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+            .shadow(radius: 12)
+            // The overlay reports progress without blocking scrolling or view
+            // inspection. SessionStore separately guards unsafe mutations.
+            .allowsHitTesting(false)
+        }
+    }
+
     // MARK: - Toolbar
 
-    /// Toolbar order (rearranged 2026-07-13 per the owner):
-    /// folder · re-scan · filter · sort · view picker = status =
-    /// undo · clear all · clean up · browser · info · export.
-    /// Capsule grouping on BOTH sides is deliberately left to macOS
-    /// (spacer-based regrouping was tried twice and reverted: .navigation
-    /// ignores spacers, and on the trailing side the owner preferred the
-    /// automatic look).
+    /// Toolbar order and Liquid Glass groups (2026-07-14):
+    /// {folder · re-scan · clean up} {filter · sort · view picker} = status =
+    /// {undo · clear all} {browser · info} {export}.
+    /// On macOS 26, fixed ToolbarSpacers are Apple's native separator between
+    /// neighbouring glass groups. Earlier systems keep the same control order.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // Current folder: a real button — click it to go back to the start
-        // screen and pick a different folder (the session is saved first).
-        ToolbarItem(placement: .navigation) {
+        ToolbarItemGroup(placement: .navigation) {
+            // Current folder: click it to return to the start screen and pick
+            // another folder (the session is saved first).
             Button {
                 store.closeSession()
             } label: {
                 Label(store.sourceFolder?.lastPathComponent ?? "Folder", systemImage: "folder")
                     .labelStyle(.titleAndIcon)
             }
+            .disabled(store.isCleaningUp)
             .help("Choose another folder")
-        }
 
-        ToolbarItem(placement: .navigation) {
             Button {
                 store.rescan()
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
+            .disabled(store.isCleaningUp)
             .help("Re-scan for new photos (⌘R)")
-        }
 
-        filterItem
-        sortItem
-
-        // The view switcher lives on the left, next to what it switches.
-        ToolbarItem(placement: .navigation) {
-            Picker("View", selection: $store.viewMode) {
-                Image(systemName: "photo").tag(ViewMode.culling)
-                Image(systemName: "square.grid.3x3").tag(ViewMode.lightTable)
+            // The menu body is shared with the File menu. Clean Up is the
+            // only feature that touches originals, and only moves them to
+            // the macOS Trash after confirmation.
+            Menu {
+                CleanUpMenuItems(store: store)
+            } label: {
+                Image(systemName: "document.on.trash")
+                    // Toolbar Menu styling ignores imageScale on macOS 26;
+                    // scale the drawing while retaining the normal hit area.
+                    .scaleEffect(0.78)
             }
-            .pickerStyle(.segmented)
-            .help("Switch view (Tab)")
+            .disabled(store.isCleaningUp)
+            .menuIndicator(.hidden)
+            .tint(Color.primary)
+            .help("Clean up: move photos to the Trash")
         }
 
-        // Session status, centered in the toolbar at the same height as the
-        // other toolbar controls — plain text, opted out of the glass capsule.
         if #available(macOS 26.0, *) {
-            ToolbarItem(placement: .principal) {
-                statusText
-            }
-            .sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .principal) {
-                statusText
-            }
+            ToolbarSpacer(.fixed, placement: .navigation)
         }
 
-        trailingItems
-    }
-
-    /// Filter: opens the glass popover with search / date / type filters.
-    @ToolbarContentBuilder
-    private var filterItem: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
+        ToolbarItemGroup(placement: .navigation) {
             Button {
                 store.isFilterPresented.toggle()
             } label: {
@@ -224,14 +233,9 @@ struct SessionView: View {
                 FilterView(store: store)
             }
             .help("Filter the photos")
-        }
-    }
 
-    /// Sort: a native menu with check-marked pickers, like Finder's
-    /// sort menu. Only reorders what's shown — never touches ratings.
-    @ToolbarContentBuilder
-    private var sortItem: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
+            // A native menu with check-marked pickers, like Finder's sort
+            // menu. It only reorders what's shown and never touches ratings.
             Menu {
                 Picker("Sort by", selection: $store.sort.key) {
                     Text("Date taken").tag(PhotoSort.Key.captureDate)
@@ -250,45 +254,49 @@ struct SessionView: View {
             // Keep the glyph neutral — menus inherit the purple accent.
             .tint(Color.primary)
             .help("Sort the photos")
-        }
-    }
 
-    /// One flat group — the capsule layout is deliberately left to macOS
-    /// (explicit ToolbarSpacer splits were tried on 2026-07-13 and the owner
-    /// preferred the system's automatic grouping).
-    @ToolbarContentBuilder
-    private var trailingItems: some ToolbarContent {
+            Picker("View", selection: $store.viewMode) {
+                Image(systemName: "photo").tag(ViewMode.culling)
+                Image(systemName: "square.grid.3x3").tag(ViewMode.lightTable)
+            }
+            .pickerStyle(.segmented)
+            .help("Switch view (Tab)")
+        }
+
+        // Session status stays centered and opts out of a glass capsule.
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .principal) {
+                statusText
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .principal) {
+                statusText
+            }
+        }
+
         ToolbarItemGroup {
             Button {
                 store.undo()
             } label: {
                 Image(systemName: "arrow.uturn.backward")
             }
-            .disabled(!store.canUndo)
+            .disabled(store.isCleaningUp || !store.canUndo)
             .help("Undo (Z)")
             Button {
                 store.clearAllRatings()
             } label: {
                 Image(systemName: "eraser")
             }
+            .disabled(store.isCleaningUp)
             .help("Clear all ratings (R)")
+        }
 
-            // Clean up: the one place the app touches originals — and only
-            // ever by moving them to the macOS Trash, behind a confirmation.
-            // The menu body is shared with the File menu (CleanUpMenuItems).
-            Menu {
-                CleanUpMenuItems(store: store)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .menuIndicator(.hidden)
-            // Menus pick up the global purple accent; retint just this one
-            // so the glyph stays neutral like its button neighbours.
-            // (foregroundStyle on the label image doesn't stick — toolbar
-            // menus take their colour from tint.)
-            .tint(Color.primary)
-            .help("Clean up: move photos to the Trash")
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed)
+        }
 
+        ToolbarItemGroup {
             Button {
                 withAnimation { store.showFilmstrip.toggle() }
             } label: {
@@ -304,6 +312,10 @@ struct SessionView: View {
             .help("Show/hide photo info (W)")
         }
 
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed)
+        }
+
         // Export: its own prominent purple button. Use a bare Image (not a
         // Label with hidden text) so the icon centers in the circle instead
         // of being nudged aside by reserved label space.
@@ -315,6 +327,7 @@ struct SessionView: View {
                     // Nudge up a touch to visually center the share glyph.
                     .offset(y: -1)
             }
+            .disabled(store.isCleaningUp)
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .tint(Color.louppeAccent)
@@ -343,6 +356,18 @@ struct SessionView: View {
         // Leave command shortcuts (⌘Z, ⌘E…) to the menu bar, and don't steal
         // keys while the export sheet or a panel is up or the user is typing.
         guard case .ready = store.phase else { return false }
+        if store.isCleaningUp {
+            // Command shortcuts continue to the menu bar, whose mutating
+            // actions are disabled/guarded. Keep only view controls live.
+            if event.modifierFlags.contains(.command) { return false }
+            if event.keyCode == 48 { store.toggleViewMode(); return true }
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "q": withAnimation { store.showFilmstrip.toggle() }; return true
+            case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
+            case "g": store.toggleViewMode(); return true
+            default: return true
+            }
+        }
         if store.isExportPresented { return false }
         // Don't steal letters while the filter popover is up (search typing).
         if store.isFilterPresented { return false }
@@ -439,38 +464,23 @@ struct CleanUpMenuItems: View {
 
     var body: some View {
         Button(store.selectionCleanUpTitle) {
-            store.pendingCleanUp = .selection
+            store.requestCleanUp(.selection)
         }
-        .disabled(!store.hasCleanUpTargets(for: .selection))
+        .disabled(store.isCleaningUp || !store.hasCleanUpTargets(for: .selection))
         Divider()
         Button("Move “No” to Trash…") {
-            store.pendingCleanUp = .trashNo
+            store.requestCleanUp(.trashNo)
         }
-        .disabled(!store.hasCleanUpTargets(for: .trashNo))
+        .disabled(store.isCleaningUp || !store.hasCleanUpTargets(for: .trashNo))
         Button("Keep Only “Yes”…") {
-            store.pendingCleanUp = .keepOnlyYes
+            store.requestCleanUp(.keepOnlyYes)
         }
-        .disabled(!store.hasCleanUpTargets(for: .keepOnlyYes))
+        .disabled(store.isCleaningUp || !store.hasCleanUpTargets(for: .keepOnlyYes))
         // Scope toggle — only meaningful while a filter is active (without
         // one, "filtered" and "everything" are the same set).
         if store.filter.isActive {
             Divider()
             Toggle("Limit to Filtered Photos", isOn: $store.cleanUpFilteredOnly)
-        }
-    }
-}
-
-/// Removes the window's "full-size content" flag so the content area starts
-/// below the toolbar rather than extending under it. The toolbar itself keeps
-/// its standard translucent glass appearance.
-struct BelowToolbarLayout: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { Configurator() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class Configurator: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            window?.styleMask.remove(.fullSizeContentView)
         }
     }
 }

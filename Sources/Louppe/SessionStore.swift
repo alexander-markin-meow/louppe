@@ -42,15 +42,39 @@ final class SessionStore: ObservableObject {
     /// The toolbar filter. Views only render `visibleIndices`; `items` stays
     /// the full list so ratings and the sidecar are never affected by filtering.
     @Published var filter = PhotoFilter() {
-        didSet { if filter != oldValue { applyFilter() } }
+        didSet {
+            guard filter != oldValue else { return }
+            var newNonSearch = filter
+            var oldNonSearch = oldValue
+            newNonSearch.searchText = ""
+            oldNonSearch.searchText = ""
+            if newNonSearch == oldNonSearch {
+                scheduleSearchFilter()
+            } else {
+                filterDebounce?.cancel()
+                filterDebounce = nil
+                applyFilter()
+            }
+        }
     }
     /// The toolbar sort menu. Reorders `visibleIndices` only — `items` keeps
     /// its scan order, so undo indices and the sidecar are unaffected.
     @Published var sort = PhotoSort() {
-        didSet { if sort != oldValue { applyFilter() } }
+        didSet {
+            if sort != oldValue {
+                filterDebounce?.cancel()
+                filterDebounce = nil
+                rebuildSortedIndices()
+                applyFilter()
+            }
+        }
     }
     /// Indices into `items` that pass the current filter, in the chosen sort order.
     @Published private(set) var visibleIndices: [Int] = []
+    /// Same visible order, split into day runs for the light table. Rebuilt
+    /// only when filter/sort/session structure changes, not on selection drag.
+    @Published private(set) var visibleDayGroups: [[Int]] = []
+    @Published private(set) var visibleDayStartIndices: Set<Int> = []
 
     /// The multi-selection (absolute indices into `items`). Empty is the
     /// normal single-photo state: the selection is just `currentIndex`.
@@ -68,10 +92,10 @@ final class SessionStore: ObservableObject {
     }
     /// A photo removed by Clean Up, with everything needed to bring it back:
     /// its former position in `items` and where each file landed in the Trash.
-    private struct RemovedPhoto {
+    private struct RemovedPhoto: Sendable {
         let index: Int
         let item: PhotoItem
-        let trashedFiles: [(original: URL, trash: URL)]
+        let trashedFiles: [TrashedFile]
     }
     private enum UndoStep {
         case ratings([RatingChange], previousIndex: Int)
@@ -79,8 +103,26 @@ final class SessionStore: ObservableObject {
     }
     private var undoStack: [UndoStep] = []
     private var saveDebounce: DispatchWorkItem?
+    private var pendingPersistenceTask: Task<Void, Never>?
+    private var filterDebounce: DispatchWorkItem?
+    private var prefetchDebounce: DispatchWorkItem?
+    private var scanTask: Task<Void, Never>?
+    private let persistence = SessionPersistence()
+    private var saveSequence: UInt64 = 0
+    private var scanGeneration: UInt64 = 0
+    private var cleanUpGeneration: UInt64 = 0
+    private var sortedIndices: [Int] = []
+    private var ratingTally = (yes: 0, no: 0, undecided: 0)
 
-    nonisolated static let sidecarName = ".louppe_session.json"
+    @Published private(set) var availableTypes: [String] = []
+    @Published private(set) var availableCameras: [String] = []
+    @Published private(set) var availableLenses: [String] = []
+    @Published private(set) var captureDateRange: ClosedRange<Date>?
+    @Published private(set) var typeCounts: [String: Int] = [:]
+    @Published private(set) var cameraCounts: [String: Int] = [:]
+    @Published private(set) var lensCounts: [String: Int] = [:]
+
+    nonisolated static let sidecarName = SessionConstants.sidecarName
 
     init() {
         loadRecents()
@@ -88,9 +130,9 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Counts
 
-    var yesCount: Int { items.filter { $0.rating == .yes }.count }
-    var noCount: Int { items.filter { $0.rating == .no }.count }
-    var undecidedCount: Int { items.filter { $0.rating == .undecided }.count }
+    var yesCount: Int { ratingTally.yes }
+    var noCount: Int { ratingTally.no }
+    var undecidedCount: Int { ratingTally.undecided }
 
     var currentItem: PhotoItem? {
         guard items.indices.contains(currentIndex) else { return nil }
@@ -99,39 +141,11 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Filtering
 
-    /// The photos the views should show, each with its absolute index into `items`.
-    /// Defensive bounds check: even if an index momentarily goes stale while
-    /// `items` is being replaced, render fewer tiles instead of crashing.
-    var visibleItems: [(index: Int, item: PhotoItem)] {
-        visibleIndices.compactMap { i in
-            items.indices.contains(i) ? (i, items[i]) : nil
-        }
-    }
-
-    /// Distinct file-type labels present in this session, for the filter menu.
-    var availableTypes: [String] {
-        Set(items.map(\.fileTypeLabel)).sorted()
-    }
-
-    /// Distinct camera / lens labels in this session, for the filter menu.
-    var availableCameras: [String] {
-        Set(items.map(\.cameraLabel)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-    }
-    var availableLenses: [String] {
-        Set(items.map(\.lensLabel)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-    }
-
-    /// Span of capture dates in this session — seeds the filter's date pickers.
-    var captureDateRange: ClosedRange<Date>? {
-        let dates = items.compactMap(\.captureDate)
-        guard let first = dates.min(), let last = dates.max() else { return nil }
-        return first...last
-    }
-
     private func applyFilter() {
-        visibleIndices = items.indices
-            .filter { filter.matches(items[$0]) }
-            .sorted { sort.areInOrder(items[$0], items[$1]) }
+        let prepared = PreparedPhotoFilter(filter)
+        visibleIndices = sortedIndices.filter { prepared.matches(items[$0]) }
+        visibleDayGroups = makeVisibleDayGroups()
+        visibleDayStartIndices = Set(visibleDayGroups.dropFirst().compactMap(\.first))
         // Photos that just got filtered out must leave the selection too —
         // an invisible photo shouldn't silently receive a rating.
         if !selectedIndices.isEmpty {
@@ -145,24 +159,106 @@ final class SessionStore: ObservableObject {
         prefetchAroundCurrent()
     }
 
-    /// True when the photo at visible position `pos` was taken on a different
-    /// day than the visible one before it — the filmstrip and light table
-    /// draw a separator there.
-    func startsNewDay(atVisiblePosition pos: Int) -> Bool {
-        // Day separators only make sense while photos are in date order —
-        // sorted by name, neighbours can hop between days arbitrarily.
-        guard sort.key == .captureDate else { return false }
-        guard pos > 0, visibleIndices.indices.contains(pos),
-              items.indices.contains(visibleIndices[pos - 1]),
-              items.indices.contains(visibleIndices[pos]) else { return false }
-        guard let previous = items[visibleIndices[pos - 1]].captureDate,
-              let current = items[visibleIndices[pos]].captureDate else { return false }
-        return !Calendar.current.isDate(previous, inSameDayAs: current)
+    private func scheduleSearchFilter() {
+        filterDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.filterDebounce = nil
+            self.applyFilter()
+        }
+        filterDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    /// Destructive actions must use the filter text currently on screen, not
+    /// the results from up to 150 ms ago while search typing is debounced.
+    private func flushPendingFilter() {
+        guard filterDebounce != nil else { return }
+        filterDebounce?.cancel()
+        filterDebounce = nil
+        applyFilter()
+    }
+
+    private func rebuildSortedIndices() {
+        sortedIndices = items.indices.sorted { sort.areInOrder(items[$0], items[$1]) }
+    }
+
+    private func makeVisibleDayGroups() -> [[Int]] {
+        guard !visibleIndices.isEmpty else { return [] }
+        guard sort.key == .captureDate else { return [visibleIndices] }
+        let calendar = Calendar.current
+        var groups: [[Int]] = []
+        var previousDate: Date?
+        for index in visibleIndices {
+            let date = items[index].captureDate
+            let startsGroup: Bool
+            if groups.isEmpty {
+                startsGroup = true
+            } else if let previousDate, let date {
+                startsGroup = !calendar.isDate(previousDate, inSameDayAs: date)
+            } else {
+                startsGroup = previousDate != nil || date != nil
+            }
+            if startsGroup { groups.append([]) }
+            groups[groups.count - 1].append(index)
+            previousDate = date
+        }
+        return groups
+    }
+
+    /// Rebuild all values derived from session structure in one pass. Ratings
+    /// use incremental updates during normal culling; structural operations are
+    /// rare enough that a single complete rebuild is clearer and safer.
+    private func rebuildDerivedData() {
+        var tally = (yes: 0, no: 0, undecided: 0)
+        var types: [String: Int] = [:]
+        var cameras: [String: Int] = [:]
+        var lenses: [String: Int] = [:]
+        var earliest: Date?
+        var latest: Date?
+        for item in items {
+            switch item.rating {
+            case .yes: tally.yes += 1
+            case .no: tally.no += 1
+            case .undecided: tally.undecided += 1
+            }
+            types[item.fileTypeLabel, default: 0] += 1
+            cameras[item.cameraLabel, default: 0] += 1
+            lenses[item.lensLabel, default: 0] += 1
+            if let date = item.captureDate {
+                earliest = earliest.map { min($0, date) } ?? date
+                latest = latest.map { max($0, date) } ?? date
+            }
+        }
+        ratingTally = tally
+        typeCounts = types
+        cameraCounts = cameras
+        lensCounts = lenses
+        availableTypes = types.keys.sorted()
+        availableCameras = cameras.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        availableLenses = lenses.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        captureDateRange = earliest.flatMap { first in latest.map { first...$0 } }
+        rebuildSortedIndices()
+    }
+
+    private func resetDerivedData() {
+        sortedIndices = []
+        visibleDayGroups = []
+        visibleDayStartIndices = []
+        ratingTally = (0, 0, 0)
+        availableTypes = []
+        availableCameras = []
+        availableLenses = []
+        captureDateRange = nil
+        typeCounts = [:]
+        cameraCounts = [:]
+        lensCounts = [:]
     }
 
     // MARK: - Opening a folder
 
     func promptForSourceFolder() {
+        guard !isCleaningUp else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -175,33 +271,59 @@ final class SessionStore: ObservableObject {
     }
 
     func openFolder(_ url: URL) {
+        guard !isCleaningUp else { return }
+        scanTask?.cancel()
+        scanGeneration &+= 1
+        let generation = scanGeneration
+        cleanUpGeneration &+= 1
         sourceFolder = url
         scanError = nil
         phase = .scanning(found: 0)
         // visibleIndices must be cleared in the same turn items is emptied —
         // stale indices into a shrunk array crash any view that renders first.
         visibleIndices = []
+        filterDebounce?.cancel()
+        filterDebounce = nil
+        prefetchDebounce?.cancel()
+        prefetchDebounce = nil
         selectedIndices = []
         items = []
+        resetDerivedData()
         undoStack = []
         pendingCleanUp = nil
         addToRecents(url)
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        scanTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do {
-                let scanned = try FolderScanner.scan(url) { count in
-                    Task { @MainActor in
+                let scanned = try FolderScanner.scan(url, isCancelled: { Task.isCancelled }) { count in
+                    Task { @MainActor [weak self] in
+                        guard let self,
+                              self.scanGeneration == generation,
+                              self.sourceFolder == url else { return }
                         if case .scanning = self.phase {
                             self.phase = .scanning(found: count)
                         }
                     }
                 }
+                try Task.checkCancellation()
+                let savedSession = await self.persistence.read(for: url)
+                try Task.checkCancellation()
                 await MainActor.run {
-                    self.finishScan(url: url, scanned: scanned)
+                    guard self.scanGeneration == generation else { return }
+                    self.scanTask = nil
+                    self.finishScan(
+                        url: url,
+                        generation: generation,
+                        scanned: scanned,
+                        savedSession: savedSession
+                    )
                 }
             } catch {
                 await MainActor.run {
+                    guard self.scanGeneration == generation, self.sourceFolder == url else { return }
+                    self.scanTask = nil
+                    guard !(error is CancellationError) else { return }
                     self.scanError = error.localizedDescription
                     self.phase = .welcome
                 }
@@ -209,10 +331,16 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    private func finishScan(url: URL, scanned: [PhotoItem]) {
+    private func finishScan(
+        url: URL,
+        generation: UInt64,
+        scanned: [PhotoItem],
+        savedSession: SessionFile?
+    ) {
+        guard sourceFolder == url, scanGeneration == generation else { return }
         var loaded = scanned
         // Restore prior ratings from the sidecar file, if present.
-        if let session = readSessionFile(for: url) {
+        if let session = savedSession {
             var ratingByFilename: [String: (Rating, Date?)] = [:]
             for entry in session.entries {
                 ratingByFilename[entry.filename] = (Rating(rawValue: entry.rating) ?? .undecided, entry.ratedAt)
@@ -225,6 +353,7 @@ final class SessionStore: ObservableObject {
             }
         }
         items = loaded
+        rebuildDerivedData()
         // Resume from the first undecided photo.
         currentIndex = loaded.firstIndex(where: { $0.rating == .undecided }) ?? 0
         // Recompute visibility (a re-scan keeps the active filter; it may
@@ -235,7 +364,6 @@ final class SessionStore: ObservableObject {
             scanError = "No supported photos (.NEF, .RAF, .JPG, .JPEG, .TIF) were found in that folder."
         } else {
             saveSession()
-            prefetchAroundCurrent()
         }
     }
 
@@ -243,10 +371,17 @@ final class SessionStore: ObservableObject {
     /// Existing ratings survive: they're saved to the sidecar first,
     /// and the scan restores them by filename.
     func rescan() {
-        guard let folder = sourceFolder else { return }
+        guard !isCleaningUp, let folder = sourceFolder else { return }
         saveDebounce?.cancel()
-        saveSession()
-        openFolder(folder)
+        guard let request = makeSaveRequest() else {
+            openFolder(folder)
+            return
+        }
+        Task {
+            await persistence.save(request.session, for: request.folder, sequence: request.sequence)
+            guard sourceFolder == folder else { return }
+            openFolder(folder)
+        }
     }
 
     // MARK: - Multi-selection
@@ -266,6 +401,7 @@ final class SessionStore: ObservableObject {
     /// the light table so both respond identically. `plainClick` runs when no
     /// modifier is held (the filmstrip jumps; the light table cycles rating).
     func handleThumbnailClick(at index: Int, plainClick: () -> Void) {
+        guard !isCleaningUp else { return }
         if NSEvent.modifierFlags.contains(.shift) {
             selectRange(to: index)
         } else if NSEvent.modifierFlags.contains(.command) {
@@ -279,6 +415,7 @@ final class SessionStore: ObservableObject {
     /// anchor) and the clicked one, both included. The anchor stays current,
     /// so another ⇧-click re-ranges from the same photo.
     func selectRange(to index: Int) {
+        guard !isCleaningUp else { return }
         guard let target = visibleIndices.firstIndex(of: index) else { return }
         let anchor = visibleIndices.firstIndex(of: currentIndex) ?? target
         selectedIndices = Set(visibleIndices[min(anchor, target)...max(anchor, target)])
@@ -286,6 +423,7 @@ final class SessionStore: ObservableObject {
 
     /// ⌘-click: add or remove a single photo.
     func toggleSelection(of index: Int) {
+        guard !isCleaningUp else { return }
         guard items.indices.contains(index) else { return }
         var set = effectiveSelection
         if set.contains(index), set.count > 1 {
@@ -305,12 +443,14 @@ final class SessionStore: ObservableObject {
     /// ⌘⇧← / ⌘⇧→: select from the current photo to the first or last
     /// visible photo, current one included.
     func selectToEdge(forward: Bool) {
+        guard !isCleaningUp else { return }
         guard let pos = visibleIndices.firstIndex(of: currentIndex) else { return }
         selectedIndices = Set(forward ? visibleIndices[pos...] : visibleIndices[...pos])
     }
 
     /// ⌘A: select every photo that passes the current filter.
     func selectAllVisible() {
+        guard !isCleaningUp else { return }
         selectedIndices = Set(visibleIndices)
     }
 
@@ -318,6 +458,7 @@ final class SessionStore: ObservableObject {
     /// rectangle live. `currentIndex` is deliberately left alone here —
     /// moving it mid-drag would auto-scroll the grid under the cursor.
     func setSelection(_ indices: Set<Int>) {
+        guard !isCleaningUp else { return }
         let valid = indices.filter { items.indices.contains($0) }
         // Called on every drag tick; skip the publish (and the grid/toolbar
         // rebuilds it triggers) when the hit-tested set hasn't changed.
@@ -328,6 +469,7 @@ final class SessionStore: ObservableObject {
     /// After a rubber-band drag ends, park the current photo on a selected
     /// one so the keyboard rates what the user just outlined.
     func commitSelectionAnchor() {
+        guard !isCleaningUp else { return }
         guard !selectedIndices.isEmpty, !selectedIndices.contains(currentIndex),
               let first = selectedIndices.min() else { return }
         currentIndex = first
@@ -340,6 +482,7 @@ final class SessionStore: ObservableObject {
     /// selected photo at once (one ⌘Z reverts the whole batch) — then jumps
     /// to the next undecided photo.
     func rate(_ rating: Rating) {
+        guard !isCleaningUp else { return }
         applyRating(rating, to: effectiveSelection.sorted())
         selectedIndices = []
         advanceToNextUndecided()
@@ -350,6 +493,7 @@ final class SessionStore: ObservableObject {
     /// photo's next rating in one undoable step; the selection stays so the
     /// user can keep cycling.
     func toggleRating(at index: Int) {
+        guard !isCleaningUp else { return }
         guard items.indices.contains(index) else { return }
         let next: Rating
         switch items[index].rating {
@@ -375,6 +519,7 @@ final class SessionStore: ObservableObject {
         pushUndo(.ratings(changes, previousIndex: currentIndex))
         let now = Date()
         for index in valid {
+            transitionRatingCount(from: items[index].rating, to: rating)
             items[index].rating = rating
             items[index].ratedAt = now
         }
@@ -387,6 +532,7 @@ final class SessionStore: ObservableObject {
             let change = RatingChange(index: index, previousRating: items[index].rating, previousRatedAt: items[index].ratedAt)
             pushUndo(.ratings([change], previousIndex: currentIndex))
         }
+        transitionRatingCount(from: items[index].rating, to: rating)
         items[index].rating = rating
         items[index].ratedAt = Date()
         scheduleSave()
@@ -394,6 +540,7 @@ final class SessionStore: ObservableObject {
 
     /// Reset every photo to undecided — one undo step brings all ratings back.
     func clearAllRatings() {
+        guard !isCleaningUp else { return }
         let changes = items.indices.compactMap { i -> RatingChange? in
             guard items[i].rating != .undecided else { return nil }
             return RatingChange(index: i, previousRating: items[i].rating, previousRatedAt: items[i].ratedAt)
@@ -404,7 +551,22 @@ final class SessionStore: ObservableObject {
             items[i].rating = .undecided
             items[i].ratedAt = nil
         }
+        ratingTally = (0, 0, items.count)
         scheduleSave()
+    }
+
+    private func transitionRatingCount(from old: Rating, to new: Rating) {
+        guard old != new else { return }
+        switch old {
+        case .yes: ratingTally.yes -= 1
+        case .no: ratingTally.no -= 1
+        case .undecided: ratingTally.undecided -= 1
+        }
+        switch new {
+        case .yes: ratingTally.yes += 1
+        case .no: ratingTally.no += 1
+        case .undecided: ratingTally.undecided += 1
+        }
     }
 
     /// Whether ⌘Z has anything to undo — drives the toolbar button's state.
@@ -418,13 +580,14 @@ final class SessionStore: ObservableObject {
     }
 
     func undo() {
-        guard let step = undoStack.popLast() else { return }
+        guard !isCleaningUp, let step = undoStack.popLast() else { return }
         // Undo moves the session back in time; a live selection would no
         // longer mean what the user built it for.
         selectedIndices = []
         switch step {
         case .ratings(let changes, let previousIndex):
             for change in changes where items.indices.contains(change.index) {
+                transitionRatingCount(from: items[change.index].rating, to: change.previousRating)
                 items[change.index].rating = change.previousRating
                 items[change.index].ratedAt = change.previousRatedAt
             }
@@ -449,6 +612,10 @@ final class SessionStore: ObservableObject {
     /// considers the photos the filter currently shows — hidden photos stay
     /// untouched. Off means the whole folder is considered.
     @Published var cleanUpFilteredOnly = true
+    /// While true, photo/session mutations are blocked but scrolling and
+    /// inspection remain available. File I/O itself runs off the main actor.
+    @Published private(set) var isCleaningUp = false
+    @Published private(set) var cleanUpProgress: CleanUpProgress?
 
     /// Whether the next clean-up is actually limited to the filtered photos
     /// (the toggle only matters while a filter is active).
@@ -502,60 +669,75 @@ final class SessionStore: ObservableObject {
         return count > 1 ? "Move \(count) Selected to Trash…" : "Move Selected to Trash…"
     }
 
+    /// Flushes a pending search debounce before presenting counts, ensuring
+    /// the confirmation describes the exact set that will be moved.
+    func requestCleanUp(_ mode: CleanUpMode) {
+        guard !isCleaningUp else { return }
+        flushPendingFilter()
+        pendingCleanUp = mode
+    }
+
     /// Moves every photo the mode rejects (within the scope the toggle
     /// chose: filtered photos only, or the whole folder) to the macOS Trash
     /// — never a permanent delete. One ⌘Z brings the whole batch back. A
     /// photo is only removed if *all* its files could be trashed; on a
-    /// partial failure its already-trashed files are put back so RAW+JPEG
-    /// pairs stay together.
+    /// partial failure its already-trashed files are put back. If that
+    /// rollback also fails, the app reports the inconsistent pair explicitly.
     func performCleanUp(_ mode: CleanUpMode) {
+        guard !isCleaningUp else { return }
+        flushPendingFilter()
         // Resolve targets first — .selection reads the live selection —
         // then drop it: indices are about to shift.
         let targets = cleanUpTargets(for: mode)
-        selectedIndices = []
-        let fm = FileManager.default
-        var removed: [RemovedPhoto] = []
-        var failedPhotos = 0
-
-        for index in targets where items.indices.contains(index) {
-            var trashed: [(original: URL, trash: URL)] = []
-            var failed = false
-            for url in items[index].allURLs {
-                var trashURL: NSURL?
-                try? fm.trashItem(at: url, resultingItemURL: &trashURL)
-                guard let landed = trashURL as URL? else { failed = true; break }
-                trashed.append((url, landed))
-            }
-            if failed {
-                for (original, trash) in trashed.reversed() {
-                    try? fm.moveItem(at: trash, to: original)
-                }
-                failedPhotos += 1
-            } else {
-                removed.append(RemovedPhoto(index: index, item: items[index], trashedFiles: trashed))
-            }
+        let snapshots = targets.compactMap { index in
+            items.indices.contains(index) ? CleanUpPhotoSnapshot(index: index, item: items[index]) : nil
         }
+        guard !snapshots.isEmpty else { return }
+        let previousIndex = currentIndex
+        cleanUpGeneration &+= 1
+        let generation = cleanUpGeneration
+        pendingCleanUp = nil
+        selectedIndices = []
+        isCleaningUp = true
+        let total = snapshots.reduce(0) { $0 + $1.item.allURLs.count }
+        cleanUpProgress = CleanUpProgress(action: .movingToTrash, done: 0, total: total)
+        let progressReporter = makeCleanUpProgressReporter(action: .movingToTrash, generation: generation)
 
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = CleanUpWorker.moveToTrash(snapshots, progress: progressReporter)
+            await self?.finishCleanUp(result, previousIndex: previousIndex, generation: generation)
+        }
+    }
+
+    private func finishCleanUp(_ result: TrashBatchResult, previousIndex: Int, generation: UInt64) {
+        guard generation == cleanUpGeneration, isCleaningUp else { return }
+        let removed = result.succeeded.map {
+            RemovedPhoto(index: $0.index, item: $0.item, trashedFiles: $0.files)
+        }
         if !removed.isEmpty {
-            let previousIndex = currentIndex
             let removedIndices = Set(removed.map(\.index))
             items = items.enumerated().filter { !removedIndices.contains($0.offset) }.map(\.element)
-            // The photo that was selected keeps its place: its new index is the
-            // old one minus however many removed photos sat before it.
             let removedBefore = removed.filter { $0.index < previousIndex }.count
             currentIndex = min(max(previousIndex - removedBefore, 0), max(items.count - 1, 0))
             pushUndo(.cleanUp(removed, previousIndex: previousIndex))
+            rebuildDerivedData()
             applyFilter()
-            // Files just left the folder — update the sidecar right away,
-            // not after the usual debounce.
             saveDebounce?.cancel()
             saveSession()
         }
-
-        if failedPhotos > 0 {
-            cleanUpError = failedPhotos == 1
-                ? "1 photo couldn't be moved to the Trash and stayed in the folder."
-                : "\(failedPhotos) photos couldn't be moved to the Trash and stayed in the folder."
+        isCleaningUp = false
+        cleanUpProgress = nil
+        if result.failedPhotos > 0 {
+            let message: String
+            if result.inconsistentPhotos > 0 {
+                message = "\(result.failedPhotos) photo\(result.failedPhotos == 1 ? "" : "s") couldn't be moved completely. "
+                    + "For \(result.inconsistentPhotos), rollback also failed; check both the source folder and Trash."
+            } else {
+                message = result.failedPhotos == 1
+                    ? "1 photo couldn't be moved to the Trash and stayed in the folder."
+                    : "\(result.failedPhotos) photos couldn't be moved to the Trash and stayed in the folder."
+            }
+            cleanUpError = message
         }
     }
 
@@ -563,45 +745,73 @@ final class SessionStore: ObservableObject {
     /// reinserts the photos at their original positions (ascending index
     /// order, so every photo lands exactly where it was).
     private func undoCleanUp(_ removed: [RemovedPhoto], previousIndex: Int) {
-        let fm = FileManager.default
-        var lost = 0
-        for photo in removed.sorted(by: { $0.index < $1.index }) {
-            var restored: [(original: URL, trash: URL)] = []
-            var failed = false
-            for (original, trash) in photo.trashedFiles {
-                do {
-                    try fm.moveItem(at: trash, to: original)
-                    restored.append((original, trash))
-                } catch {
-                    failed = true
-                    break
-                }
-            }
-            if failed {
-                // Re-trash what did come back, so the photo isn't half-restored.
-                for (original, trash) in restored.reversed() {
-                    try? fm.moveItem(at: original, to: trash)
-                }
-                lost += 1
-            } else {
-                items.insert(photo.item, at: min(photo.index, items.count))
+        guard !isCleaningUp else { return }
+        let snapshots = removed.map {
+            TrashedPhotoSnapshot(index: $0.index, item: $0.item, files: $0.trashedFiles)
+        }
+        cleanUpGeneration &+= 1
+        let generation = cleanUpGeneration
+        isCleaningUp = true
+        let total = snapshots.reduce(0) { $0 + $1.files.count }
+        cleanUpProgress = CleanUpProgress(action: .restoring, done: 0, total: total)
+        let progressReporter = makeCleanUpProgressReporter(action: .restoring, generation: generation)
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = CleanUpWorker.restore(snapshots, progress: progressReporter)
+            await self?.finishUndoCleanUp(
+                result,
+                allRemovedIndices: Set(removed.map(\.index)),
+                previousIndex: previousIndex,
+                generation: generation
+            )
+        }
+    }
+
+    private func makeCleanUpProgressReporter(
+        action: CleanUpProgress.Action,
+        generation: UInt64
+    ) -> CleanUpWorker.Progress {
+        { [weak self] done, total in
+            Task { @MainActor [weak self] in
+                guard let self, self.cleanUpGeneration == generation, self.isCleaningUp else { return }
+                self.cleanUpProgress = CleanUpProgress(action: action, done: done, total: total)
             }
         }
-        if lost > 0 {
+    }
+
+    private func finishUndoCleanUp(
+        _ result: RestoreBatchResult,
+        allRemovedIndices: Set<Int>,
+        previousIndex: Int,
+        generation: UInt64
+    ) {
+        guard generation == cleanUpGeneration, isCleaningUp else { return }
+        items = CleanUpWorker.mergeRestoredItems(
+            survivors: items,
+            allRemovedIndices: allRemovedIndices,
+            restored: result.restored
+        )
+        if result.lostPhotos > 0 {
             // Some photos are gone for good (Trash emptied?). Older undo steps'
             // indices no longer line up with `items`, so drop them rather than
             // risk restoring a rating onto the wrong photo.
             undoStack.removeAll()
-            cleanUpError = lost == 1
+            cleanUpError = result.lostPhotos == 1
                 ? "1 photo couldn't be restored from the Trash — it may have been deleted there."
-                : "\(lost) photos couldn't be restored from the Trash — they may have been deleted there."
+                : "\(result.lostPhotos) photos couldn't be restored from the Trash — they may have been deleted there."
+            if result.inconsistentPhotos > 0 {
+                cleanUpError? += " For \(result.inconsistentPhotos), rollback also failed; check both the source folder and Trash."
+            }
         }
         if !items.isEmpty {
             currentIndex = min(max(previousIndex, 0), items.count - 1)
         }
+        rebuildDerivedData()
         applyFilter()
         saveDebounce?.cancel()
         saveSession()
+        isCleaningUp = false
+        cleanUpProgress = nil
     }
 
     // MARK: - Navigation (moves through *visible* photos only)
@@ -620,7 +830,7 @@ final class SessionStore: ObservableObject {
     }
 
     func setIndex(_ index: Int) {
-        guard !items.isEmpty else { return }
+        guard !isCleaningUp, !items.isEmpty else { return }
         // Plain navigation (click, arrow key) collapses any multi-selection.
         selectedIndices = []
         let clamped = min(max(index, 0), items.count - 1)
@@ -661,6 +871,8 @@ final class SessionStore: ObservableObject {
     }
 
     private func prefetchAroundCurrent() {
+        prefetchDebounce?.cancel()
+        prefetchDebounce = nil
         // Prefetch the neighbouring *visible* photos, so filtered-out files
         // in between don't waste the warm-up window.
         guard let pos = visibleIndices.firstIndex(of: currentIndex) else { return }
@@ -671,7 +883,13 @@ final class SessionStore: ObservableObject {
             let item = items[visibleIndices[p]]
             return item.isSupported ? item.primaryURL : nil
         }
-        ImagePipeline.shared.prefetchFullImages(urls: urls)
+        // Collapse repeated navigation/filter updates into one neighbourhood
+        // warm-up. The visible image itself still starts immediately.
+        let work = DispatchWorkItem {
+            ImagePipeline.shared.prefetchFullImages(urls: urls)
+        }
+        prefetchDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
     }
 
     // MARK: - Session persistence
@@ -686,7 +904,48 @@ final class SessionStore: ObservableObject {
     }
 
     func saveSession() {
-        guard let folder = sourceFolder, !items.isEmpty else { return }
+        guard let request = makeSaveRequest() else { return }
+        pendingPersistenceTask = Task.detached { [persistence] in
+            await persistence.save(request.session, for: request.folder, sequence: request.sequence)
+        }
+    }
+
+    /// `willTerminate` cannot await an actor. Queue the final, newest snapshot
+    /// through the same persistence actor and briefly hold termination so a
+    /// last-second rating is not lost or overwritten by an older queued save.
+    func saveSessionBeforeTermination() {
+        let finalTask: Task<Void, Never>?
+        if let request = makeSaveRequest() {
+            let task = Task.detached { [persistence] in
+                await persistence.save(request.session, for: request.folder, sequence: request.sequence)
+            }
+            pendingPersistenceTask = task
+            finalTask = task
+        } else {
+            // `closeSession` captures its snapshot before clearing UI state.
+            // If Quit follows immediately, wait for that already-queued save
+            // even though there is no longer a live session to snapshot.
+            finalTask = pendingPersistenceTask
+        }
+        guard let finalTask else { return }
+        let completion = DispatchSemaphore(value: 0)
+        Task.detached {
+            await finalTask.value
+            completion.signal()
+        }
+        _ = completion.wait(timeout: .now() + 3)
+    }
+
+    private struct SaveRequest: Sendable {
+        let folder: URL
+        let session: SessionFile
+        let sequence: UInt64
+    }
+
+    /// Capture value-semantic session data on the main actor, then let the
+    /// persistence actor perform the expensive encoding and file I/O.
+    private func makeSaveRequest() -> SaveRequest? {
+        guard let folder = sourceFolder, case .ready = phase else { return nil }
         let session = SessionFile(
             version: 1,
             sourcePath: folder.path,
@@ -700,46 +959,8 @@ final class SessionStore: ObservableObject {
                 )
             }
         )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(session) else { return }
-
-        // Prefer a sidecar in the source folder; fall back to Application Support
-        // when the volume is read-only (e.g., a locked SD card).
-        let sidecar = folder.appendingPathComponent(Self.sidecarName)
-        do {
-            try data.write(to: sidecar, options: .atomic)
-        } catch {
-            try? data.write(to: fallbackSessionURL(for: folder), options: .atomic)
-        }
-    }
-
-    private func readSessionFile(for folder: URL) -> SessionFile? {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let sidecar = folder.appendingPathComponent(Self.sidecarName)
-        if let data = try? Data(contentsOf: sidecar),
-           let session = try? decoder.decode(SessionFile.self, from: data) {
-            return session
-        }
-        if let data = try? Data(contentsOf: fallbackSessionURL(for: folder)),
-           let session = try? decoder.decode(SessionFile.self, from: data) {
-            return session
-        }
-        return nil
-    }
-
-    private func fallbackSessionURL(for folder: URL) -> URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = support.appendingPathComponent("Louppe/Sessions", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        var hash: UInt64 = 14695981039346656037
-        for byte in folder.path.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 1099511628211
-        }
-        return dir.appendingPathComponent(String(format: "%016llx.json", hash))
+        saveSequence &+= 1
+        return SaveRequest(folder: folder, session: session, sequence: saveSequence)
     }
 
     // MARK: - Recent folders
@@ -762,9 +983,19 @@ final class SessionStore: ObservableObject {
     // MARK: - Going back to the welcome screen
 
     func closeSession() {
+        guard !isCleaningUp else { return }
+        scanTask?.cancel()
+        scanTask = nil
+        scanGeneration &+= 1
+        cleanUpGeneration &+= 1
         saveDebounce?.cancel()
+        filterDebounce?.cancel()
+        filterDebounce = nil
+        prefetchDebounce?.cancel()
+        prefetchDebounce = nil
         saveSession()
         items = []
+        resetDerivedData()
         sourceFolder = nil
         undoStack = []
         selectedIndices = []

@@ -74,7 +74,9 @@ folder itself:
   photos) leaves the folder.
 
 Both options ask for confirmation first and show exactly how many files will
-move. Files go to the macOS Trash — never deleted permanently — and a
+move. A progress overlay keeps the app responsive during large batches; folder
+changes and rating edits are briefly disabled so undo remains exact. Files go
+to the macOS Trash — never deleted permanently — and a
 RAW+JPEG pair always moves together. Press **⌘Z** to put everything back in
 place, or recover the files from the Trash later.
 
@@ -101,12 +103,19 @@ Requires Apple's Command Line Tools (already installed). From this folder:
 
 The fresh app appears at `dist/Louppe.app`. Copy it to `/Applications` to install.
 
+Run the focused logic checks with `./Tests/run_performance_checks.sh`. They use
+only Apple Command Line Tools and no external test framework. After any app change, also launch
+the installed build with `-openFolder` as described in
+[`AGENTS.md`](AGENTS.md); a compile-only check is not enough.
+
 ## Source layout
 
 Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 
 - `LouppeApp.swift` — app entry point, menu commands
 - `SessionStore.swift` — ratings, undo, navigation, session persistence
+- `SessionPersistence.swift` — serialized background sidecar encoding and I/O
+- `CleanUpWorker.swift` — background Trash/restore operations and linear merge
 - `FolderScanner.swift` — recursive folder scan, RAW+JPEG pairing, sorting
 - `ImagePipeline.swift` — image decoding (ImageIO), thumbnail caches, prefetching
 - `MetadataExtractor.swift` — EXIF extraction (capture dates, info panel fields)
@@ -117,6 +126,8 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 
 See `AGENTS.md` for a full architecture map, build/verify instructions, and
 project invariants (useful for both humans and AI assistants).
+See [`Docs/PERFORMANCE.md`](Docs/PERFORMANCE.md) for cache budgets, concurrency
+boundaries, derived-data rules, and performance regression checks.
 
 Supported formats:
 

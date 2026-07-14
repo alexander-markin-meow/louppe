@@ -51,8 +51,19 @@ enum FolderScanner {
     /// but not endlessly, in case of symlink loops or pathological trees.
     static let maxScanDepth = 5
 
-    /// `progress` is called periodically with the running file count.
-    static func scan(_ root: URL, progress: (Int) -> Void) throws -> [PhotoItem] {
+    private struct FileFacts {
+        let size: Int64
+        let creationDate: Date?
+    }
+
+    /// `progress` is called periodically with the running file count. The
+    /// cancellation hook lets a superseded scan stop before it walks or opens
+    /// the rest of a large card.
+    static func scan(
+        _ root: URL,
+        isCancelled: () -> Bool = { false },
+        progress: (Int) -> Void
+    ) throws -> [PhotoItem] {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: root,
@@ -61,24 +72,35 @@ enum FolderScanner {
         ) else {
             throw NSError(domain: "Louppe", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not read that folder."])
         }
+        if isCancelled() { throw CancellationError() }
 
         var files: [URL] = []
+        var factsByURL: [URL: FileFacts] = [:]
         for case let url as URL in enumerator {
+            if isCancelled() { throw CancellationError() }
             if enumerator.level > maxScanDepth {
                 enumerator.skipDescendants()
                 continue
             }
             let ext = url.pathExtension.lowercased()
             guard recognizedExtensions.contains(ext) else { continue }
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            // These keys were prefetched by the enumerator above. Keep their
+            // values now instead of issuing separate attributes/resource calls
+            // for every primary photo later in the scan.
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .creationDateKey])
             guard values?.isRegularFile == true else { continue }
             files.append(url)
+            factsByURL[url] = FileFacts(
+                size: Int64(values?.fileSize ?? 0),
+                creationDate: values?.creationDate
+            )
             if files.count % 25 == 0 { progress(files.count) }
         }
 
         // Group RAW+JPEG pairs: same folder, same base filename.
         var groups: [String: [URL]] = [:]
         for url in files {
+            if isCancelled() { throw CancellationError() }
             let key = url.deletingPathExtension().path.lowercased()
             groups[key, default: []].append(url)
         }
@@ -86,6 +108,7 @@ enum FolderScanner {
         var result: [PhotoItem] = []
         let rootPath = root.standardizedFileURL.path
         for (_, urls) in groups {
+            if isCancelled() { throw CancellationError() }
             let raws = urls.filter { rawExtensions.contains($0.pathExtension.lowercased()) }
             let nonRaws = urls.filter { !rawExtensions.contains($0.pathExtension.lowercased()) }
 
@@ -100,10 +123,10 @@ enum FolderScanner {
             }
 
             for (primary, paired) in pairs {
-                let size = (try? fm.attributesOfItem(atPath: primary.path)[.size] as? Int64) ?? 0
+                if isCancelled() { throw CancellationError() }
+                let facts = factsByURL[primary]
                 let info = MetadataExtractor.scanInfo(for: primary)
-                let captureDate = info.captureDate
-                    ?? (try? primary.resourceValues(forKeys: [.creationDateKey]).creationDate)
+                let captureDate = info.captureDate ?? facts?.creationDate
                 result.append(PhotoItem(
                     id: relativePath(of: primary, under: rootPath),
                     primaryURL: primary,
@@ -111,7 +134,7 @@ enum FolderScanner {
                     captureDate: captureDate,
                     cameraModel: info.cameraModel,
                     lensModel: info.lensModel,
-                    fileSize: size
+                    fileSize: facts?.size ?? 0
                 ))
             }
         }

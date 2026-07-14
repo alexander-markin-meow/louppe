@@ -1,8 +1,9 @@
 # Louppe — guidance for AI assistants
 
 Native macOS photo-culling app. Swift/SwiftUI, plain SwiftPM executable —
-**no Xcode project**. Only Apple Command Line Tools are installed on this
-machine (no full Xcode).
+**no Xcode project**. Apple Command Line Tools 26.6 are selected; full Xcode
+26.6 is also installed but is not required. Both currently expose Swift 6.3.3
+and the macOS 26.5 SDK.
 
 The owner is a photographer, not a programmer: do the technical work for him,
 explain results in plain language, and always verify the app actually launches
@@ -13,16 +14,32 @@ after changes.
 ```sh
 ./build_app.sh                          # release build → dist/Louppe.app
 cp -R dist/Louppe.app /Applications/    # install (remove old copy first)
-swift build                             # quick compile check (debug)
+xattr -cr /Applications/Louppe.app      # copy can attach Finder metadata
+codesign --verify --deep --strict /Applications/Louppe.app
+swift build                             # quick debug check with the selected Xcode toolchain
 ```
 
-`build_app.sh` bundles the binary + icon + Info.plist, strips extended
-attributes (`xattr -cr` — REQUIRED, or codesign fails with a "detritus"
-error), and ad-hoc codesigns.
+`build_app.sh` bundles the binary + icon + Info.plist in `/private/tmp`, strips
+extended attributes, ad-hoc signs, verifies there, then copies the result to
+`dist/`. Staging outside the File Provider-managed workspace is required:
+Finder metadata may otherwise reappear between signing and verification. Still
+run `xattr -cr` after copying into `/Applications`.
+
+Always build against the current macOS SDK. Do not work around toolchain errors
+with an older SDK: doing so compiles out current SwiftUI features such as macOS
+26 liquid-glass toolbar styling.
 
 ## Testing a build
 
-There are no automated tests. Verify by launching with a folder:
+Run the focused logic tests first, then verify by launching with a folder:
+
+```sh
+./Tests/run_performance_checks.sh
+```
+
+The last two checks use disposable files for a real Trash/restore round trip.
+In a restricted agent sandbox, rerun the script with permission to access the
+macOS Trash if those checks report that the paired photo could not move.
 
 ```sh
 open /Applications/Louppe.app --args -openFolder /path/to/photos
@@ -46,7 +63,9 @@ truth, created in `LouppeApp` and passed to every view.
 | File | Responsibility |
 |---|---|
 | `Sources/Louppe/LouppeApp.swift` | `@main`, window scene, menu-bar commands |
-| `Sources/Louppe/SessionStore.swift` | Session state: ratings, undo (batched; ratings + clean-ups), navigation, multi-selection (`selectedIndices`), filtering + sorting (`visibleIndices`), clean-up (trash + restore), sidecar persistence, recents |
+| `Sources/Louppe/SessionStore.swift` | Main-actor session state: ratings/cached counts, undo, navigation, selection, prepared filtering + cached sort/day groups, clean-up orchestration, persistence snapshots, recents |
+| `Sources/Louppe/SessionPersistence.swift` | Actor that serializes sidecar JSON encoding, reading, and atomic/fallback writes off-main |
+| `Sources/Louppe/CleanUpWorker.swift` | Background Trash/restore file loops, progress throttling, pair rollback, O(n+k) restoration merge |
 | `Sources/Louppe/FolderScanner.swift` | Recursive folder scan, RAW+JPEG pairing, chronological sort |
 | `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding, thumbnail memory+disk caches, prefetching |
 | `Sources/Louppe/MetadataExtractor.swift` | EXIF reading for capture dates + info panel |
@@ -63,6 +82,10 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Views/ThumbnailView.swift` | Async thumbnail tile + rating badge |
 | `Sources/Louppe/Views/FullImageView.swift` | Large photo with fit / 100% / phone-size zoom |
 | `Sources/Louppe/Views/ExportView.swift` | Export dialog (summary → progress → done) |
+| `Tests/PerformanceChecks/main.swift` | Dependency-free search, ordered persistence, and restoration-merge regression checks |
+
+See `Docs/PERFORMANCE.md` before changing concurrency, caching, filtering, or
+Clean Up. It records ownership boundaries, cache budgets, and verification.
 
 ## Invariants — do not change
 
@@ -90,10 +113,11 @@ truth, created in `LouppeApp` and passed to every view.
 
 ## Known gotchas
 
-- **Don't try to regroup the left-toolbar glass capsules.** `ToolbarSpacer`
-  is silently ignored in the `.navigation` placement on macOS 26 (tried
-  2026-07-12, including an invisible-item workaround — the owner found every
-  variant worse and asked to keep the default automatic grouping).
+- Toolbar Liquid Glass groups follow the owner's arrangement in
+  `SessionView.toolbarContent` and use Apple's native fixed `ToolbarSpacer`.
+  macOS 26 may show little or no extra separation in the `.navigation`
+  placement and wider trailing gaps; the owner explicitly prefers that native
+  result to custom equal-width spacing. Do not add custom spacer views.
 
 - **`visibleIndices` must never outlive `items`**: any place that replaces or
   empties `items` must reset/recompute `visibleIndices` in the same turn
@@ -103,9 +127,21 @@ truth, created in `LouppeApp` and passed to every view.
   `ImagePipeline.decode` asks for the fast embedded path first and falls back
   to a full decode when the result is undersized — removing that fallback
   brings back blurry/pixelated previews.
-- The window content is deliberately laid out *below* the liquid-glass
-  toolbar (`BelowToolbarLayout` removes `.fullSizeContentView`) so thumbnails
-  can't scroll behind it.
+- **Derived session data is explicit**: rating counts update incrementally;
+  filter facets and sorted indices rebuild after structural `items` changes.
+  Any new code that inserts/removes/replaces photos must call
+  `rebuildDerivedData()` before `applyFilter()`.
+- **Clean Up has a three-phase boundary**: snapshot on `SessionStore`, file I/O
+  in `CleanUpWorker`, apply on `SessionStore`. Do not put `trashItem`/`moveItem`
+  loops back on the main actor. While `isCleaningUp`, keep item-index mutations
+  blocked, folder switching disabled, and Quit refused so pair rollback and ⌘Z
+  remain exact.
+- `RootView` owns the persistent window's phase-aware content layout through
+  `WindowContentLayout`: Welcome/Scanning use `.fullSizeContentView`, while
+  Ready removes it so photos cannot scroll behind the liquid-glass toolbar.
+  This flag does not choose the window radius. Welcome and Scanning include a
+  real unified toolbar (`LaunchToolbarTitle`) so macOS 26 supplies its larger
+  native toolbar-window corners; never fake them with a custom window mask.
 - Thumbnails letterbox (`fit`) inside square tiles on purpose — fill-mode
   cropping both hid parts of the photo and let portrait images overflow
   their tiles.

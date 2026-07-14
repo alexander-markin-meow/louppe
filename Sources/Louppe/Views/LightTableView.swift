@@ -25,20 +25,6 @@ struct LightTableView: View {
         [GridItem(.adaptive(minimum: store.gridThumbSize, maximum: store.gridThumbSize * 1.4), spacing: 10)]
     }
 
-    /// Photos grouped into runs of consecutive same-day shots, in session
-    /// order. Each group renders as its own grid, so a new day always starts
-    /// on a fresh row. Each element keeps its global index for rating/jumping.
-    private var dayGroups: [[(index: Int, item: PhotoItem)]] {
-        var groups: [[(index: Int, item: PhotoItem)]] = []
-        for (position, entry) in store.visibleItems.enumerated() {
-            if position == 0 || store.startsNewDay(atVisiblePosition: position) {
-                groups.append([])
-            }
-            groups[groups.count - 1].append(entry)
-        }
-        return groups
-    }
-
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -51,7 +37,7 @@ struct LightTableView: View {
                     .padding(.top, 80)
                 }
                 LazyVStack(spacing: 14) {
-                    ForEach(Array(dayGroups.enumerated()), id: \.offset) { groupIndex, group in
+                    ForEach(Array(store.visibleDayGroups.enumerated()), id: \.offset) { groupIndex, group in
                         if groupIndex > 0 {
                             RoundedRectangle(cornerRadius: 1)
                                 .fill(.secondary.opacity(0.4))
@@ -59,8 +45,10 @@ struct LightTableView: View {
                                 .padding(.horizontal, 4)
                         }
                         LazyVGrid(columns: columns, spacing: 10) {
-                            ForEach(group, id: \.item.id) { index, item in
-                                cell(index: index, item: item)
+                            ForEach(group, id: \.self) { index in
+                                if store.items.indices.contains(index) {
+                                    cell(index: index, item: store.items[index])
+                                }
                             }
                         }
                     }

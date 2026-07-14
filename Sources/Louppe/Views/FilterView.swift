@@ -54,7 +54,7 @@ struct FilterView: View {
                 .font(.subheadline.weight(.semibold))
             ForEach(store.availableTypes, id: \.self) { type in
                 Toggle(isOn: exclusionBinding(type, \.excludedTypes)) {
-                    labeledCount(type, store.items.filter { $0.fileTypeLabel == type }.count)
+                    labeledCount(type, store.typeCounts[type, default: 0])
                 }
             }
 
@@ -66,7 +66,7 @@ struct FilterView: View {
                     .font(.subheadline.weight(.semibold))
                 ForEach(store.availableCameras, id: \.self) { camera in
                     Toggle(isOn: exclusionBinding(camera, \.excludedCameras)) {
-                        labeledCount(camera, store.items.filter { $0.cameraLabel == camera }.count)
+                        labeledCount(camera, store.cameraCounts[camera, default: 0])
                     }
                 }
             }
@@ -77,7 +77,7 @@ struct FilterView: View {
                     .font(.subheadline.weight(.semibold))
                 ForEach(store.availableLenses, id: \.self) { lens in
                     Toggle(isOn: exclusionBinding(lens, \.excludedLenses)) {
-                        labeledCount(lens, store.items.filter { $0.lensLabel == lens }.count)
+                        labeledCount(lens, store.lensCounts[lens, default: 0])
                     }
                 }
             }

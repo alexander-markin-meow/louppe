@@ -79,6 +79,11 @@ struct FullImageView: View {
         }
         .task(id: item.id) {
             guard item.isSupported, image == nil else { return }
+            // Key repeat can create and cancel several view tasks in a few
+            // milliseconds. Let those stale tasks disappear before they add
+            // expensive full-image work to the bounded decode queue.
+            try? await Task.sleep(nanoseconds: 40_000_000)
+            guard !Task.isCancelled else { return }
             failedToLoad = false
             onLoading(true)
             defer { onLoading(false) }

@@ -83,6 +83,8 @@ struct WelcomeView: View {
             }
         }
         .padding(40)
+        .toolbar { LaunchToolbarTitle() }
+        .navigationTitle("")
     }
 }
 
@@ -96,6 +98,29 @@ struct ScanningView: View {
                 .controlSize(.large)
             Text(found > 0 ? "Scanning… \(found) photos found" : "Scanning folder…")
                 .foregroundStyle(.secondary)
+        }
+        .toolbar { LaunchToolbarTitle() }
+        .navigationTitle("")
+    }
+}
+
+/// Welcome and Scanning deliberately use a real unified toolbar rather than a
+/// custom rounded window. On macOS 26 this gives the launch window Apple's
+/// larger native toolbar-window corners while preserving the centered title.
+private struct LaunchToolbarTitle: ToolbarContent {
+    @ToolbarContentBuilder
+    var body: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .principal) {
+                Text("Louppe")
+                    .font(.headline)
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .principal) {
+                Text("Louppe")
+                    .font(.headline)
+            }
         }
     }
 }

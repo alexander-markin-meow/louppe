@@ -32,8 +32,58 @@ struct RootView: View {
         // progress bars — including sheets and popovers) with the brand purple.
         .tint(Color.louppeAccent)
         .frame(minWidth: 900, minHeight: 600)
+        // The same NSWindow survives all three phases. Welcome/Scanning use
+        // full-size content; only the active session opts out so photos cannot
+        // scroll behind the glass toolbar. This controls layout, not rounding.
+        .background(WindowContentLayout(fullSizeContent: usesFullSizeWindowContent))
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            store.saveSession()
+            store.saveSessionBeforeTermination()
+        }
+    }
+
+    private var usesFullSizeWindowContent: Bool {
+        switch store.phase {
+        case .welcome, .scanning:
+            return true
+        case .ready:
+            return false
+        }
+    }
+}
+
+/// Keeps the persistent app window's content layout in sync with the current
+/// SwiftUI phase. Window corner geometry remains entirely system-owned.
+private struct WindowContentLayout: NSViewRepresentable {
+    let fullSizeContent: Bool
+
+    func makeNSView(context: Context) -> NSView {
+        let view = Configurator()
+        view.fullSizeContent = fullSizeContent
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let view = nsView as? Configurator else { return }
+        view.fullSizeContent = fullSizeContent
+        view.apply()
+    }
+
+    private final class Configurator: NSView {
+        var fullSizeContent = true
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+        }
+
+        func apply() {
+            guard let window else { return }
+            guard window.styleMask.contains(.fullSizeContentView) != fullSizeContent else { return }
+            if fullSizeContent {
+                window.styleMask.insert(.fullSizeContentView)
+            } else {
+                window.styleMask.remove(.fullSizeContentView)
+            }
         }
     }
 }
