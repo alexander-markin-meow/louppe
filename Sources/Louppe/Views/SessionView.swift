@@ -174,8 +174,8 @@ struct SessionView: View {
 
     // MARK: - Toolbar
 
-    /// Toolbar order and Liquid Glass groups (2026-07-14):
-    /// {folder · re-scan · clean up} {filter · sort · view picker} = status =
+    /// Toolbar order and Liquid Glass groups (2026-07-15):
+    /// {folder · clean up} {filter · sort · view picker} = status =
     /// {undo · clear all} {browser · info} {export}.
     /// On macOS 26, fixed ToolbarSpacers are Apple's native separator between
     /// neighbouring glass groups. Earlier systems keep the same control order.
@@ -192,14 +192,6 @@ struct SessionView: View {
             }
             .disabled(store.isCleaningUp)
             .help("Choose another photo folder (⌘O)")
-
-            Button {
-                store.rescan()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .disabled(store.isCleaningUp)
-            .help("Re-scan the current folder for new photos (⌘R)")
 
             // The menu body is shared with the File menu. Clean Up is the
             // only feature that touches originals, and only moves them to
