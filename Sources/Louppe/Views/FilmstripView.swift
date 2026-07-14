@@ -17,11 +17,18 @@ struct FilmstripView: View {
                                     .frame(width: 64, height: 2)
                                     .padding(.vertical, 3)
                             }
-                            ThumbnailView(item: entry.item, isCurrent: entry.index == store.currentIndex)
-                                .frame(width: 102, height: 102)
-                                .onTapGesture {
+                            ThumbnailView(
+                                item: entry.item,
+                                isCurrent: entry.index == store.currentIndex,
+                                isSelected: store.selectedIndices.contains(entry.index)
+                            )
+                            .frame(width: 102, height: 102)
+                            .onTapGesture {
+                                // ⇧-click: range · ⌘-click: add/remove · click: jump.
+                                store.handleThumbnailClick(at: entry.index) {
                                     store.setIndex(entry.index)
                                 }
+                            }
                         }
                         .id(entry.item.id)
                     }

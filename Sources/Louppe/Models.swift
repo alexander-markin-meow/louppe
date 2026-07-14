@@ -72,6 +72,20 @@ struct PhotoItem: Identifiable {
     }()
 }
 
+// MARK: - Clean up
+
+/// The clean-up actions. All of them move files to the macOS Trash — never a
+/// permanent delete — so they're recoverable with ⌘Z or from the Trash itself.
+/// Which photos each mode targets is decided in `SessionStore.cleanUpTargets`.
+enum CleanUpMode {
+    /// Trash the currently selected photo(s).
+    case selection
+    /// Trash the photos marked No; Yes and unrated photos stay in the folder.
+    case trashNo
+    /// Keep only the photos marked Yes; everything else is trashed.
+    case keepOnlyYes
+}
+
 // MARK: - Session sort
 
 /// How the toolbar sort menu orders the visible photos.

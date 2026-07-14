@@ -6,6 +6,8 @@ import AppKit
 struct ThumbnailView: View {
     let item: PhotoItem
     var isCurrent: Bool
+    /// Part of a multi-selection: same accent as the current photo, dimmed.
+    var isSelected: Bool = false
 
     @State private var image: NSImage?
 
@@ -30,7 +32,7 @@ struct ThumbnailView: View {
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(isCurrent ? Color.louppeAccent : .clear, lineWidth: 3)
+                    .strokeBorder(borderColor, lineWidth: 3)
             }
 
             RatingBadge(rating: item.rating)
@@ -40,6 +42,12 @@ struct ThumbnailView: View {
             guard item.isSupported else { return }
             image = await ImagePipeline.shared.thumbnail(for: item.primaryURL)
         }
+    }
+
+    private var borderColor: Color {
+        if isCurrent { return .louppeAccent }
+        if isSelected { return .louppeAccent.opacity(0.45) }
+        return .clear
     }
 }
 

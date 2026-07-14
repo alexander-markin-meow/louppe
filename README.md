@@ -2,7 +2,9 @@
 
 Fast, keyboard-driven open source macOS app for reviewing a folder of photos and marking
 each one **Yes** (keep) or **No** (reject), then exporting the keepers to a new
-folder. Originals are never modified, moved, or deleted.
+folder. Originals are never modified or deleted — the only thing that can move
+them is the explicit **Clean Up** command, which sends rejects to the macOS
+Trash (recoverable, and undoable with ⌘Z).
 
 ## Download
 
@@ -21,8 +23,8 @@ Pick a folder (an SD card works), review, then press **⌘E** to export.
 | → | Next photo |
 | ← | Previous photo |
 | Space | Next photo without rating |
-| F | Mark Yes, jump to next undecided |
-| D | Mark No, jump to next undecided |
+| F | Mark Yes (all selected photos), jump to next undecided |
+| D | Mark No (all selected photos), jump to next undecided |
 | S | Toggle 100% zoom / fit |
 | A | Toggle phone-sized preview / fit |
 | Tab / G | Switch Main ↔ Light Table view |
@@ -32,12 +34,55 @@ Pick a folder (an SD card works), review, then press **⌘E** to export.
 | R | Clear all ratings (one ⌘Z brings them all back) |
 | ⌘R | Re-scan folder for new photos |
 | ⌘+ / ⌘− | Bigger / smaller thumbnails in the Light Table |
-| ⌘Z | Undo last rating |
+| Z or ⌘Z | Undo last rating or clean-up |
 | ⌘E | Export |
 | ⌘O | Open a different folder |
+| ⌘A | Select all photos (respects the filter) |
+| ⌘⇧← / ⌘⇧→ | Select from the current photo to the first / last |
+| Esc | Clear the selection |
+| ⌘⌫ | Move selected photo(s) to the Trash — instant, no dialog (⌘Z restores) |
 
 In the **Light Table** grid: single-click a photo to cycle its rating
 (undecided → yes → no), double-click to open it big in the main view.
+
+### Selecting several photos
+
+- **⇧-click** a thumbnail (in the browser or the Light Table) to select the
+  whole range between the current photo and the clicked one.
+- **⌘-click** adds or removes a single photo.
+- In the **Light Table**, click and **drag** — every photo touched by the
+  selection rectangle gets selected.
+- **⌘A** selects everything currently shown (filtered-out photos stay out).
+- **⌘⇧← / ⌘⇧→** select everything from the current photo to the first / last.
+- With several photos selected, **F** and **D** rate them all at once and jump
+  to the next undecided photo — one ⌘Z undoes the whole batch. In the Light
+  Table, clicking any photo inside the selection cycles the rating for all of
+  them. The toolbar counter shows how many photos are selected.
+- **Esc**, a plain click, or an arrow key drops the selection.
+
+### Cleaning up the folder
+
+The trash button in the toolbar (also **File → Clean Up**) tidies the photo
+folder itself:
+
+- **Move selected photo(s) to Trash** — exactly the photos you have selected
+  (or just the current one) leave the folder. **⌘⌫** does the same instantly,
+  without a confirmation — like in Finder — and ⌘Z brings them right back.
+- **Move "No" photos to Trash** — rejects leave the folder; "Yes" and unrated
+  photos stay.
+- **Keep only "Yes" photos** — everything not marked "Yes" (including unrated
+  photos) leaves the folder.
+
+Both options ask for confirmation first and show exactly how many files will
+move. Files go to the macOS Trash — never deleted permanently — and a
+RAW+JPEG pair always moves together. Press **⌘Z** to put everything back in
+place, or recover the files from the Trash later.
+
+When a filter is active, a **Limit to Filtered Photos** switch appears in the
+clean-up menu. Leave it on (the default) to clean only among the photos the
+filter shows; switch it off to consider every photo in the folder, including
+hidden ones. Either way, the confirmation message spells out exactly which
+photos are affected before anything moves.
 
 ### Where things are stored
 

@@ -46,7 +46,7 @@ truth, created in `LouppeApp` and passed to every view.
 | File | Responsibility |
 |---|---|
 | `Sources/Louppe/LouppeApp.swift` | `@main`, window scene, menu-bar commands |
-| `Sources/Louppe/SessionStore.swift` | Session state: ratings, undo (batched), navigation, filtering + sorting (`visibleIndices`), sidecar persistence, recents |
+| `Sources/Louppe/SessionStore.swift` | Session state: ratings, undo (batched; ratings + clean-ups), navigation, multi-selection (`selectedIndices`), filtering + sorting (`visibleIndices`), clean-up (trash + restore), sidecar persistence, recents |
 | `Sources/Louppe/FolderScanner.swift` | Recursive folder scan, RAW+JPEG pairing, chronological sort |
 | `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding, thumbnail memory+disk caches, prefetching |
 | `Sources/Louppe/MetadataExtractor.swift` | EXIF reading for capture dates + info panel |
@@ -58,7 +58,7 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, file-type / camera / lens toggles |
 | `Sources/Louppe/Views/CullingView.swift` | Single-photo layout: filmstrip / photo / info panel |
 | `Sources/Louppe/Views/FilmstripView.swift` | Vertical thumbnail browser with day separators |
-| `Sources/Louppe/Views/LightTableView.swift` | Grid view, day-grouped rows, click-to-rate |
+| `Sources/Louppe/Views/LightTableView.swift` | Grid view, day-grouped rows, click-to-rate, rubber-band selection |
 | `Sources/Louppe/Views/MetadataPanel.swift` | Info panel (filename header, camera, exposure row, fields) |
 | `Sources/Louppe/Views/ThumbnailView.swift` | Async thumbnail tile + rating badge |
 | `Sources/Louppe/Views/FullImageView.swift` | Large photo with fit / 100% / phone-size zoom |
@@ -72,6 +72,13 @@ truth, created in `LouppeApp` and passed to every view.
   were intentionally abandoned. Don't rename again without asking: it resets
   saved ratings and macOS folder permissions.)
 - **Originals are never modified, moved, or deleted.** Export only copies.
+  The single sanctioned exception (added 2026-07-13 at the owner's request) is
+  Clean Up in `SessionStore`: it moves rejected files to the macOS Trash via
+  `FileManager.trashItem` — never a permanent delete — behind a confirmation
+  dialog, and ⌘Z restores the whole batch. Keep it that way: no hard deletes,
+  no moves anywhere but the Trash, and no *single-key* hotkey for it (⌘⌫
+  trashing the selection without a dialog is the one sanctioned shortcut,
+  added 2026-07-13 at the owner's request — Finder parallel, ⌘Z restores).
 - The hotkey map lives in `SessionView.handleKey` and is documented in
   README's shortcut table — keep the two in sync when changing keys.
 - One background gray everywhere: `Color.appBackground`. Don't introduce
@@ -102,6 +109,13 @@ truth, created in `LouppeApp` and passed to every view.
 - Thumbnails letterbox (`fit`) inside square tiles on purpose — fill-mode
   cropping both hid parts of the photo and let portrait images overflow
   their tiles.
+- **Multi-selection model**: `selectedIndices` empty = "just the current
+  photo" (`effectiveSelection` handles both cases). Anything that mutates or
+  reorders `items` (open/re-scan, clean-up, undo) must clear the selection;
+  `applyFilter` intersects it with `visibleIndices`. The light-table rubber
+  band hit-tests tile frames collected via a `PreferenceKey`, so only
+  *rendered* (on-screen) lazy-grid tiles can be caught by the rectangle —
+  fine in practice, but don't "fix" it by de-lazifying the grid.
 - If the app ever launches with no window visible, suspect corrupted window
   restoration state: `defaults delete com.alexandermarkin.louppe` and
   `rm -rf ~/Library/Saved\ Application\ State/com.alexandermarkin.louppe.savedState`.

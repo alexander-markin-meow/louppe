@@ -52,6 +52,11 @@ final class SessionStore: ObservableObject {
     /// Indices into `items` that pass the current filter, in the chosen sort order.
     @Published private(set) var visibleIndices: [Int] = []
 
+    /// The multi-selection (absolute indices into `items`). Empty is the
+    /// normal single-photo state: the selection is just `currentIndex`.
+    /// Selection gestures keep `currentIndex` inside the set as the anchor.
+    @Published private(set) var selectedIndices: Set<Int> = []
+
     private(set) var sourceFolder: URL?
 
     /// One undo step can hold several photo changes (e.g. "clear all"),
@@ -61,7 +66,18 @@ final class SessionStore: ObservableObject {
         let previousRating: Rating
         let previousRatedAt: Date?
     }
-    private var undoStack: [(changes: [RatingChange], previousIndex: Int)] = []
+    /// A photo removed by Clean Up, with everything needed to bring it back:
+    /// its former position in `items` and where each file landed in the Trash.
+    private struct RemovedPhoto {
+        let index: Int
+        let item: PhotoItem
+        let trashedFiles: [(original: URL, trash: URL)]
+    }
+    private enum UndoStep {
+        case ratings([RatingChange], previousIndex: Int)
+        case cleanUp([RemovedPhoto], previousIndex: Int)
+    }
+    private var undoStack: [UndoStep] = []
     private var saveDebounce: DispatchWorkItem?
 
     nonisolated static let sidecarName = ".louppe_session.json"
@@ -116,6 +132,11 @@ final class SessionStore: ObservableObject {
         visibleIndices = items.indices
             .filter { filter.matches(items[$0]) }
             .sorted { sort.areInOrder(items[$0], items[$1]) }
+        // Photos that just got filtered out must leave the selection too —
+        // an invisible photo shouldn't silently receive a rating.
+        if !selectedIndices.isEmpty {
+            selectedIndices.formIntersection(visibleIndices)
+        }
         // Keep the current photo visible: snap to the nearest photo that
         // passes the filter (forward first, else the last visible one).
         if !visibleIndices.isEmpty, !visibleIndices.contains(currentIndex) {
@@ -160,8 +181,10 @@ final class SessionStore: ObservableObject {
         // visibleIndices must be cleared in the same turn items is emptied —
         // stale indices into a shrunk array crash any view that renders first.
         visibleIndices = []
+        selectedIndices = []
         items = []
         undoStack = []
+        pendingCleanUp = nil
         addToRecents(url)
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -226,13 +249,106 @@ final class SessionStore: ObservableObject {
         openFolder(folder)
     }
 
+    // MARK: - Multi-selection
+
+    /// What a rating (F/D) applies to: the multi-selection when one is
+    /// active, otherwise just the current photo.
+    var effectiveSelection: Set<Int> {
+        if !selectedIndices.isEmpty { return selectedIndices }
+        return items.indices.contains(currentIndex) ? [currentIndex] : []
+    }
+
+    func clearSelection() {
+        selectedIndices = []
+    }
+
+    /// Routes a thumbnail click by modifier key — shared by the filmstrip and
+    /// the light table so both respond identically. `plainClick` runs when no
+    /// modifier is held (the filmstrip jumps; the light table cycles rating).
+    func handleThumbnailClick(at index: Int, plainClick: () -> Void) {
+        if NSEvent.modifierFlags.contains(.shift) {
+            selectRange(to: index)
+        } else if NSEvent.modifierFlags.contains(.command) {
+            toggleSelection(of: index)
+        } else {
+            plainClick()
+        }
+    }
+
+    /// ⇧-click: select every visible photo between the current one (the
+    /// anchor) and the clicked one, both included. The anchor stays current,
+    /// so another ⇧-click re-ranges from the same photo.
+    func selectRange(to index: Int) {
+        guard let target = visibleIndices.firstIndex(of: index) else { return }
+        let anchor = visibleIndices.firstIndex(of: currentIndex) ?? target
+        selectedIndices = Set(visibleIndices[min(anchor, target)...max(anchor, target)])
+    }
+
+    /// ⌘-click: add or remove a single photo.
+    func toggleSelection(of index: Int) {
+        guard items.indices.contains(index) else { return }
+        var set = effectiveSelection
+        if set.contains(index), set.count > 1 {
+            set.remove(index)
+        } else {
+            set.insert(index)
+        }
+        // A selection of just the current photo is the normal single state.
+        selectedIndices = (set == [currentIndex]) ? [] : set
+        // Keep the current photo inside the selection so F/D act where expected.
+        if !selectedIndices.isEmpty, !selectedIndices.contains(currentIndex) {
+            currentIndex = selectedIndices.contains(index) ? index : (selectedIndices.min() ?? currentIndex)
+            prefetchAroundCurrent()
+        }
+    }
+
+    /// ⌘⇧← / ⌘⇧→: select from the current photo to the first or last
+    /// visible photo, current one included.
+    func selectToEdge(forward: Bool) {
+        guard let pos = visibleIndices.firstIndex(of: currentIndex) else { return }
+        selectedIndices = Set(forward ? visibleIndices[pos...] : visibleIndices[...pos])
+    }
+
+    /// ⌘A: select every photo that passes the current filter.
+    func selectAllVisible() {
+        selectedIndices = Set(visibleIndices)
+    }
+
+    /// Rubber-band drag in the light table: the selection follows the
+    /// rectangle live. `currentIndex` is deliberately left alone here —
+    /// moving it mid-drag would auto-scroll the grid under the cursor.
+    func setSelection(_ indices: Set<Int>) {
+        let valid = indices.filter { items.indices.contains($0) }
+        // Called on every drag tick; skip the publish (and the grid/toolbar
+        // rebuilds it triggers) when the hit-tested set hasn't changed.
+        guard valid != selectedIndices else { return }
+        selectedIndices = valid
+    }
+
+    /// After a rubber-band drag ends, park the current photo on a selected
+    /// one so the keyboard rates what the user just outlined.
+    func commitSelectionAnchor() {
+        guard !selectedIndices.isEmpty, !selectedIndices.contains(currentIndex),
+              let first = selectedIndices.min() else { return }
+        currentIndex = first
+        prefetchAroundCurrent()
+    }
+
     // MARK: - Rating
 
+    /// Rates the current photo — or, when a multi-selection is active, every
+    /// selected photo at once (one ⌘Z reverts the whole batch) — then jumps
+    /// to the next undecided photo.
     func rate(_ rating: Rating) {
-        setRating(rating, atIndex: currentIndex, recordUndo: true)
+        applyRating(rating, to: effectiveSelection.sorted())
+        selectedIndices = []
         advanceToNextUndecided()
     }
 
+    /// Light-table click: cycle the clicked photo's rating. Clicking a photo
+    /// that's part of a multi-selection gives the whole selection the clicked
+    /// photo's next rating in one undoable step; the selection stays so the
+    /// user can keep cycling.
     func toggleRating(at index: Int) {
         guard items.indices.contains(index) else { return }
         let next: Rating
@@ -241,15 +357,35 @@ final class SessionStore: ObservableObject {
         case .yes: next = .no
         case .no: next = .undecided
         }
-        setRating(next, atIndex: index, recordUndo: true)
+        if selectedIndices.count > 1, selectedIndices.contains(index) {
+            applyRating(next, to: selectedIndices.sorted())
+        } else {
+            setIndex(index)
+            setRating(next, atIndex: index, recordUndo: true)
+        }
+    }
+
+    /// Applies one rating to several photos as a single undoable step.
+    private func applyRating(_ rating: Rating, to targets: [Int]) {
+        let valid = targets.filter { items.indices.contains($0) }
+        guard !valid.isEmpty else { return }
+        let changes = valid.map {
+            RatingChange(index: $0, previousRating: items[$0].rating, previousRatedAt: items[$0].ratedAt)
+        }
+        pushUndo(.ratings(changes, previousIndex: currentIndex))
+        let now = Date()
+        for index in valid {
+            items[index].rating = rating
+            items[index].ratedAt = now
+        }
+        scheduleSave()
     }
 
     private func setRating(_ rating: Rating, atIndex index: Int, recordUndo: Bool) {
         guard items.indices.contains(index) else { return }
         if recordUndo {
             let change = RatingChange(index: index, previousRating: items[index].rating, previousRatedAt: items[index].ratedAt)
-            undoStack.append(([change], currentIndex))
-            if undoStack.count > 500 { undoStack.removeFirst() }
+            pushUndo(.ratings([change], previousIndex: currentIndex))
         }
         items[index].rating = rating
         items[index].ratedAt = Date()
@@ -263,7 +399,7 @@ final class SessionStore: ObservableObject {
             return RatingChange(index: i, previousRating: items[i].rating, previousRatedAt: items[i].ratedAt)
         }
         guard !changes.isEmpty else { return }
-        undoStack.append((changes, currentIndex))
+        pushUndo(.ratings(changes, previousIndex: currentIndex))
         for i in items.indices {
             items[i].rating = .undecided
             items[i].ratedAt = nil
@@ -271,16 +407,201 @@ final class SessionStore: ObservableObject {
         scheduleSave()
     }
 
+    /// Whether ⌘Z has anything to undo — drives the toolbar button's state.
+    /// (Not @Published, but every undo-stack change happens alongside a
+    /// published mutation, so views re-evaluate it at the right moments.)
+    var canUndo: Bool { !undoStack.isEmpty }
+
+    private func pushUndo(_ step: UndoStep) {
+        undoStack.append(step)
+        if undoStack.count > 500 { undoStack.removeFirst() }
+    }
+
     func undo() {
-        guard let last = undoStack.popLast() else { return }
-        for change in last.changes where items.indices.contains(change.index) {
-            items[change.index].rating = change.previousRating
-            items[change.index].ratedAt = change.previousRatedAt
+        guard let step = undoStack.popLast() else { return }
+        // Undo moves the session back in time; a live selection would no
+        // longer mean what the user built it for.
+        selectedIndices = []
+        switch step {
+        case .ratings(let changes, let previousIndex):
+            for change in changes where items.indices.contains(change.index) {
+                items[change.index].rating = change.previousRating
+                items[change.index].ratedAt = change.previousRatedAt
+            }
+            if !items.isEmpty {
+                currentIndex = min(max(previousIndex, 0), items.count - 1)
+            }
+            scheduleSave()
+        case .cleanUp(let removed, let previousIndex):
+            undoCleanUp(removed, previousIndex: previousIndex)
+        }
+    }
+
+    // MARK: - Clean up (move rejected files to the Trash)
+
+    /// Which clean-up action is awaiting the user's confirmation (drives the
+    /// confirmation dialog in SessionView; set from the toolbar or menu bar).
+    @Published var pendingCleanUp: CleanUpMode?
+    /// A problem to report after a clean-up or its undo (some file couldn't
+    /// be moved). Nil means the last operation went through completely.
+    @Published var cleanUpError: String?
+    /// When true (the default) and a filter is active, Clean Up only
+    /// considers the photos the filter currently shows — hidden photos stay
+    /// untouched. Off means the whole folder is considered.
+    @Published var cleanUpFilteredOnly = true
+
+    /// Whether the next clean-up is actually limited to the filtered photos
+    /// (the toggle only matters while a filter is active).
+    var cleanUpScopeIsFiltered: Bool { cleanUpFilteredOnly && filter.isActive }
+
+    /// The photos a rating-based clean-up would consider, per the scope
+    /// toggle. Order doesn't matter downstream (undo re-sorts by index), so
+    /// no sort here — `visibleIndices` is reused as-is.
+    private var cleanUpCandidates: [Int] {
+        cleanUpScopeIsFiltered ? visibleIndices : Array(items.indices)
+    }
+
+    /// Exactly which photos a clean-up mode would remove.
+    private func cleanUpTargets(for mode: CleanUpMode) -> [Int] {
+        switch mode {
+        case .selection:
+            return effectiveSelection.sorted()
+        case .trashNo:
+            return cleanUpCandidates.filter { items[$0].rating == .no }
+        case .keepOnlyYes:
+            return cleanUpCandidates.filter { items[$0].rating != .yes }
+        }
+    }
+
+    /// Whether a clean-up mode has anything to remove — drives the menu
+    /// items' enabled state. Short-circuits instead of building and counting
+    /// the whole target list on every toolbar render.
+    func hasCleanUpTargets(for mode: CleanUpMode) -> Bool {
+        switch mode {
+        case .selection:
+            return !effectiveSelection.isEmpty
+        case .trashNo:
+            return cleanUpCandidates.contains { items[$0].rating == .no }
+        case .keepOnlyYes:
+            return cleanUpCandidates.contains { items[$0].rating != .yes }
+        }
+    }
+
+    /// How many photos (and actual files, counting RAW+JPEG pairs as two)
+    /// a clean-up mode would move to the Trash, respecting the scope toggle.
+    /// Only needed once, when the confirmation dialog opens.
+    func cleanUpCounts(for mode: CleanUpMode) -> (photos: Int, files: Int) {
+        let doomed = cleanUpTargets(for: mode).map { items[$0] }
+        return (doomed.count, doomed.reduce(0) { $0 + $1.allURLs.count })
+    }
+
+    /// Menu label for trashing the selection, with a live count. Lives on the
+    /// store so the toolbar menu and the File menu share one source of truth.
+    var selectionCleanUpTitle: String {
+        let count = effectiveSelection.count
+        return count > 1 ? "Move \(count) Selected to Trash…" : "Move Selected to Trash…"
+    }
+
+    /// Moves every photo the mode rejects (within the scope the toggle
+    /// chose: filtered photos only, or the whole folder) to the macOS Trash
+    /// — never a permanent delete. One ⌘Z brings the whole batch back. A
+    /// photo is only removed if *all* its files could be trashed; on a
+    /// partial failure its already-trashed files are put back so RAW+JPEG
+    /// pairs stay together.
+    func performCleanUp(_ mode: CleanUpMode) {
+        // Resolve targets first — .selection reads the live selection —
+        // then drop it: indices are about to shift.
+        let targets = cleanUpTargets(for: mode)
+        selectedIndices = []
+        let fm = FileManager.default
+        var removed: [RemovedPhoto] = []
+        var failedPhotos = 0
+
+        for index in targets where items.indices.contains(index) {
+            var trashed: [(original: URL, trash: URL)] = []
+            var failed = false
+            for url in items[index].allURLs {
+                var trashURL: NSURL?
+                try? fm.trashItem(at: url, resultingItemURL: &trashURL)
+                guard let landed = trashURL as URL? else { failed = true; break }
+                trashed.append((url, landed))
+            }
+            if failed {
+                for (original, trash) in trashed.reversed() {
+                    try? fm.moveItem(at: trash, to: original)
+                }
+                failedPhotos += 1
+            } else {
+                removed.append(RemovedPhoto(index: index, item: items[index], trashedFiles: trashed))
+            }
+        }
+
+        if !removed.isEmpty {
+            let previousIndex = currentIndex
+            let removedIndices = Set(removed.map(\.index))
+            items = items.enumerated().filter { !removedIndices.contains($0.offset) }.map(\.element)
+            // The photo that was selected keeps its place: its new index is the
+            // old one minus however many removed photos sat before it.
+            let removedBefore = removed.filter { $0.index < previousIndex }.count
+            currentIndex = min(max(previousIndex - removedBefore, 0), max(items.count - 1, 0))
+            pushUndo(.cleanUp(removed, previousIndex: previousIndex))
+            applyFilter()
+            // Files just left the folder — update the sidecar right away,
+            // not after the usual debounce.
+            saveDebounce?.cancel()
+            saveSession()
+        }
+
+        if failedPhotos > 0 {
+            cleanUpError = failedPhotos == 1
+                ? "1 photo couldn't be moved to the Trash and stayed in the folder."
+                : "\(failedPhotos) photos couldn't be moved to the Trash and stayed in the folder."
+        }
+    }
+
+    /// Brings a cleaned-up batch back: moves each file out of the Trash and
+    /// reinserts the photos at their original positions (ascending index
+    /// order, so every photo lands exactly where it was).
+    private func undoCleanUp(_ removed: [RemovedPhoto], previousIndex: Int) {
+        let fm = FileManager.default
+        var lost = 0
+        for photo in removed.sorted(by: { $0.index < $1.index }) {
+            var restored: [(original: URL, trash: URL)] = []
+            var failed = false
+            for (original, trash) in photo.trashedFiles {
+                do {
+                    try fm.moveItem(at: trash, to: original)
+                    restored.append((original, trash))
+                } catch {
+                    failed = true
+                    break
+                }
+            }
+            if failed {
+                // Re-trash what did come back, so the photo isn't half-restored.
+                for (original, trash) in restored.reversed() {
+                    try? fm.moveItem(at: original, to: trash)
+                }
+                lost += 1
+            } else {
+                items.insert(photo.item, at: min(photo.index, items.count))
+            }
+        }
+        if lost > 0 {
+            // Some photos are gone for good (Trash emptied?). Older undo steps'
+            // indices no longer line up with `items`, so drop them rather than
+            // risk restoring a rating onto the wrong photo.
+            undoStack.removeAll()
+            cleanUpError = lost == 1
+                ? "1 photo couldn't be restored from the Trash — it may have been deleted there."
+                : "\(lost) photos couldn't be restored from the Trash — they may have been deleted there."
         }
         if !items.isEmpty {
-            currentIndex = min(max(last.previousIndex, 0), items.count - 1)
+            currentIndex = min(max(previousIndex, 0), items.count - 1)
         }
-        scheduleSave()
+        applyFilter()
+        saveDebounce?.cancel()
+        saveSession()
     }
 
     // MARK: - Navigation (moves through *visible* photos only)
@@ -300,6 +621,8 @@ final class SessionStore: ObservableObject {
 
     func setIndex(_ index: Int) {
         guard !items.isEmpty else { return }
+        // Plain navigation (click, arrow key) collapses any multi-selection.
+        selectedIndices = []
         let clamped = min(max(index, 0), items.count - 1)
         guard clamped != currentIndex else { return }
         currentIndex = clamped
@@ -444,6 +767,9 @@ final class SessionStore: ObservableObject {
         items = []
         sourceFolder = nil
         undoStack = []
+        selectedIndices = []
+        pendingCleanUp = nil
+        cleanUpError = nil
         currentIndex = 0
         viewMode = .culling
         filter = PhotoFilter()

@@ -47,7 +47,8 @@ struct LouppeApp: App {
                 .disabled(store.sourceFolder == nil)
             }
             CommandGroup(replacing: .undoRedo) {
-                Button("Undo Rating") {
+                // Undoes ratings and clean-ups alike, so just "Undo".
+                Button("Undo") {
                     store.undo()
                 }
                 .keyboardShortcut("z")
@@ -62,6 +63,15 @@ struct LouppeApp: App {
                     store.isExportPresented = true
                 }
                 .keyboardShortcut("e")
+                .disabled(store.items.isEmpty)
+
+                Divider()
+
+                // Clean Up asks for confirmation in the session window
+                // (SessionView presents the dialog when pendingCleanUp is set).
+                Menu("Clean Up") {
+                    CleanUpMenuItems(store: store)
+                }
                 .disabled(store.items.isEmpty)
             }
             CommandGroup(after: .toolbar) {

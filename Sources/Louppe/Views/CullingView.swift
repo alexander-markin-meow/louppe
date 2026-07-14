@@ -16,7 +16,15 @@ struct CullingView: View {
 
             ZStack {
                 Color.appBackground
-                if store.visibleIndices.isEmpty && store.filter.isActive {
+                if store.items.isEmpty {
+                    // Only reachable when Clean Up emptied the whole session
+                    // (an empty scan goes back to the welcome screen instead).
+                    ContentUnavailableView(
+                        "No photos left in this folder",
+                        systemImage: "trash",
+                        description: Text("Everything was moved to the Trash. Press ⌘Z to put the photos back.")
+                    )
+                } else if store.visibleIndices.isEmpty && store.filter.isActive {
                     ContentUnavailableView(
                         "No photos match the filter",
                         systemImage: "line.3.horizontal.decrease.circle",
