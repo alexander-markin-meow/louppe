@@ -160,5 +160,9 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
 
 - GitHub: `alexander-markin-meow/louppe` (public). Commit/push only when the
   owner asks; he reviews PRs via the GitHub UI "Merge" button or asks here.
+- **Use `main` only.** Do not create or retain local or remote feature branches
+  unless the owner explicitly asks for one. Commit directly to `main` only when
+  asked; after any exceptional branch is merged, delete it both locally and on
+  GitHub.
 - `dist/` and `.build/` are gitignored build products; `AppIcon/` holds the
   source glyph and the built `.icns` (both tracked).
