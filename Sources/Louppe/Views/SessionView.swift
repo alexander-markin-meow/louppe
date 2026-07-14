@@ -1,12 +1,13 @@
 import SwiftUI
 import AppKit
 
-/// The active culling session: hosts the culling/light-table views, the
+/// The active culling session: hosts the Gallery and Grid views, the
 /// toolbar, the export sheet, and all single-key hotkeys.
 ///
 /// Hotkey map (README's table must stay in sync with `handleKey`):
 ///   F yes · D no · S 100% zoom · A phone-size zoom · R clear all
 ///   Q browser · W info panel · E export · Space next · ←/→ prev/next
+///   ↑/↓ same-column photo in the Grid view
 ///   Tab/G switch view · Z/⌘Z undo · ⌘+/⌘− grid size
 ///   ⌘A select all · ⌘⇧←/→ select to first/last · Esc clear selection
 ///   ⌘⌫ trash selection (no confirmation — ⌘Z restores)
@@ -131,15 +132,16 @@ struct SessionView: View {
                 .controlSize(.small)
                 .opacity(store.fullImageLoads > 0 ? 1 : 0)
         }
+        .help("Review progress and rating totals")
     }
 
     private var mainContent: some View {
         Group {
             switch store.viewMode {
-            case .culling:
-                CullingView(store: store)
-            case .lightTable:
-                LightTableView(store: store)
+            case .gallery:
+                GalleryView(store: store)
+            case .grid:
+                GridView(store: store)
             }
         }
     }
@@ -189,7 +191,7 @@ struct SessionView: View {
                     .labelStyle(.titleAndIcon)
             }
             .disabled(store.isCleaningUp)
-            .help("Choose another folder")
+            .help("Choose another photo folder (⌘O)")
 
             Button {
                 store.rescan()
@@ -197,7 +199,7 @@ struct SessionView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .disabled(store.isCleaningUp)
-            .help("Re-scan for new photos (⌘R)")
+            .help("Re-scan the current folder for new photos (⌘R)")
 
             // The menu body is shared with the File menu. Clean Up is the
             // only feature that touches originals, and only moves them to
@@ -213,7 +215,7 @@ struct SessionView: View {
             .disabled(store.isCleaningUp)
             .menuIndicator(.hidden)
             .tint(Color.primary)
-            .help("Clean up: move photos to the Trash")
+            .help("Choose photos to move to the Trash")
         }
 
         if #available(macOS 26.0, *) {
@@ -232,7 +234,7 @@ struct SessionView: View {
             .popover(isPresented: $store.isFilterPresented, arrowEdge: .bottom) {
                 FilterView(store: store)
             }
-            .help("Filter the photos")
+            .help("Filter photos by metadata, date, type, camera, or lens")
 
             // A native menu with check-marked pickers, like Finder's sort
             // menu. It only reorders what's shown and never touches ratings.
@@ -253,14 +255,14 @@ struct SessionView: View {
             .menuIndicator(.hidden)
             // Keep the glyph neutral — menus inherit the purple accent.
             .tint(Color.primary)
-            .help("Sort the photos")
+            .help("Sort photos by date or name")
 
             Picker("View", selection: $store.viewMode) {
-                Image(systemName: "photo").tag(ViewMode.culling)
-                Image(systemName: "square.grid.3x3").tag(ViewMode.lightTable)
+                Image(systemName: "photo").tag(ViewMode.gallery)
+                Image(systemName: "square.grid.3x3").tag(ViewMode.grid)
             }
             .pickerStyle(.segmented)
-            .help("Switch view (Tab)")
+            .help("Switch between Gallery and Grid views (Tab or G)")
         }
 
         // Session status stays centered and opts out of a glass capsule.
@@ -282,14 +284,14 @@ struct SessionView: View {
                 Image(systemName: "arrow.uturn.backward")
             }
             .disabled(store.isCleaningUp || !store.canUndo)
-            .help("Undo (Z)")
+            .help("Undo the last rating or clean-up (Z or ⌘Z)")
             Button {
                 store.clearAllRatings()
             } label: {
                 Image(systemName: "eraser")
             }
             .disabled(store.isCleaningUp)
-            .help("Clear all ratings (R)")
+            .help("Clear all photo ratings (R)")
         }
 
         if #available(macOS 26.0, *) {
@@ -298,18 +300,18 @@ struct SessionView: View {
 
         ToolbarItemGroup {
             Button {
-                withAnimation { store.showFilmstrip.toggle() }
+                withAnimation { store.showBrowser.toggle() }
             } label: {
-                Image(systemName: store.showFilmstrip ? "sidebar.squares.left" : "sidebar.left")
+                Image(systemName: store.showBrowser ? "sidebar.squares.left" : "sidebar.left")
             }
-            .help("Show/hide the browser (Q)")
+            .help("Show or hide the Browser in the Gallery view (Q)")
 
             Button {
                 withAnimation { store.showMetadataPanel.toggle() }
             } label: {
                 Image(systemName: "info.circle")
             }
-            .help("Show/hide photo info (W)")
+            .help("Show or hide photo information (W)")
         }
 
         if #available(macOS 26.0, *) {
@@ -331,7 +333,7 @@ struct SessionView: View {
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .tint(Color.louppeAccent)
-            .help("Export the “Yes” photos (E)")
+            .help("Export copies of the photos marked “Yes” (E or ⌘E)")
         }
     }
 
@@ -362,7 +364,7 @@ struct SessionView: View {
             if event.modifierFlags.contains(.command) { return false }
             if event.keyCode == 48 { store.toggleViewMode(); return true }
             switch event.charactersIgnoringModifiers?.lowercased() {
-            case "q": withAnimation { store.showFilmstrip.toggle() }; return true
+            case "q": withAnimation { store.showBrowser.toggle() }; return true
             case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
             case "g": store.toggleViewMode(); return true
             default: return true
@@ -374,8 +376,8 @@ struct SessionView: View {
         // Nor while the clean-up confirmation or its error alert is up.
         if store.pendingCleanUp != nil || store.cleanUpError != nil { return false }
 
-        // ⌘+ / ⌘− resize the light table grid.
-        if event.modifierFlags.contains(.command), store.viewMode == .lightTable {
+        // ⌘+ / ⌘− resize the Grid view.
+        if event.modifierFlags.contains(.command), store.viewMode == .grid {
             switch event.charactersIgnoringModifiers {
             case "=", "+": store.zoomGrid(larger: true); return true
             case "-": store.zoomGrid(larger: false); return true
@@ -421,6 +423,14 @@ struct SessionView: View {
         switch event.keyCode {
         case 123: store.goPrevious(); return true            // ←
         case 124: store.goNext(); return true                // →
+        case 126:                                             // ↑
+            guard store.viewMode == .grid else { return false }
+            store.goVertical(-1)
+            return true
+        case 125:                                             // ↓
+            guard store.viewMode == .grid else { return false }
+            store.goVertical(1)
+            return true
         case 48:  store.toggleViewMode(); return true        // Tab
         case 49:  store.goNext(); return true                // Space: next, no rating
         case 53:                                             // Esc: drop the selection
@@ -433,20 +443,20 @@ struct SessionView: View {
         switch event.charactersIgnoringModifiers?.lowercased() {
         case "f": store.rate(.yes); return true
         case "d": store.rate(.no); return true
-        case "q": withAnimation { store.showFilmstrip.toggle() }; return true
+        case "q": withAnimation { store.showBrowser.toggle() }; return true
         case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
         case "g": store.toggleViewMode(); return true
         case "e": store.isExportPresented = true; return true
         case "r": store.clearAllRatings(); return true
         case "z": store.undo(); return true                  // bare Z = ⌘Z
         case "s":
-            if store.viewMode == .culling {
+            if store.viewMode == .gallery {
                 store.toggleZoom(.actual)
                 return true
             }
             return false
         case "a":
-            if store.viewMode == .culling {
+            if store.viewMode == .gallery {
                 store.toggleZoom(.small)
                 return true
             }

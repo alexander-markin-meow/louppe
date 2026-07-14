@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// The big central image in the culling view, with fit / 100% / phone-size zoom.
+/// The big central image in the Gallery view, with fit / 100% / phone-size zoom.
 struct FullImageView: View {
     let item: PhotoItem
     @Binding var zoomMode: ZoomMode
@@ -10,7 +10,7 @@ struct FullImageView: View {
     var onLoading: (Bool) -> Void
 
     @State private var image: NSImage?
-    /// Low-res stand-in (the filmstrip's thumbnail) shown while the real
+    /// Low-res stand-in (the Browser thumbnail) shown while the real
     /// decode runs, so switching photos never flashes an empty pane.
     @State private var preview: NSImage?
     @State private var failedToLoad = false

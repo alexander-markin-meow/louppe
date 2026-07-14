@@ -87,13 +87,13 @@ struct LouppeApp: App {
                     store.zoomGrid(larger: true)
                 }
                 .keyboardShortcut("+")
-                .disabled(store.viewMode != .lightTable)
+                .disabled(store.viewMode != .grid)
 
                 Button("Zoom Out") {
                     store.zoomGrid(larger: false)
                 }
                 .keyboardShortcut("-")
-                .disabled(store.viewMode != .lightTable)
+                .disabled(store.viewMode != .grid)
             }
         }
     }

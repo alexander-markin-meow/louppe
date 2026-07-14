@@ -22,18 +22,19 @@ Pick a folder (an SD card works), review, then press **⌘E** to export.
 |---|---|
 | → | Next photo |
 | ← | Previous photo |
+| ↑ / ↓ | Previous / next row in the Grid view |
 | Space | Next photo without rating |
 | F | Mark Yes (all selected photos), jump to next undecided |
 | D | Mark No (all selected photos), jump to next undecided |
 | S | Toggle 100% zoom / fit |
 | A | Toggle phone-sized preview / fit |
-| Tab / G | Switch Main ↔ Light Table view |
+| Tab / G | Switch Gallery ↔ Grid view |
 | E | Export |
 | Q | Show/hide the browser (thumbnail column) |
 | W | Show/hide the info panel |
 | R | Clear all ratings (one ⌘Z brings them all back) |
 | ⌘R | Re-scan folder for new photos |
-| ⌘+ / ⌘− | Bigger / smaller thumbnails in the Light Table |
+| ⌘+ / ⌘− | Bigger / smaller thumbnails in the Grid view |
 | Z or ⌘Z | Undo last rating or clean-up |
 | ⌘E | Export |
 | ⌘O | Open a different folder |
@@ -42,15 +43,15 @@ Pick a folder (an SD card works), review, then press **⌘E** to export.
 | Esc | Clear the selection |
 | ⌘⌫ | Move selected photo(s) to the Trash — instant, no dialog (⌘Z restores) |
 
-In the **Light Table** grid: single-click a photo to cycle its rating
+In the **Grid view**: single-click a photo to cycle its rating
 (undecided → yes → no), double-click to open it big in the main view.
 
 ### Selecting several photos
 
-- **⇧-click** a thumbnail (in the browser or the Light Table) to select the
+- **⇧-click** a thumbnail (in the Browser or Grid view) to select the
   whole range between the current photo and the clicked one.
 - **⌘-click** adds or removes a single photo.
-- In the **Light Table**, click and **drag** — every photo touched by the
+- In the **Grid view**, click and **drag** — every photo touched by the
   selection rectangle gets selected.
 - **⌘A** selects everything currently shown (filtered-out photos stay out).
 - **⌘⇧← / ⌘⇧→** select everything from the current photo to the first / last.
@@ -121,8 +122,8 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `MetadataExtractor.swift` — EXIF extraction (capture dates, info panel fields)
 - `ExportManager.swift` — copying keepers, filename collision handling
 - `Models.swift` — the photo item and session file formats
-- `Views/` — welcome screen, session toolbar + hotkeys, culling view, filmstrip,
-  light table, info panel, thumbnails, export dialog
+- `Views/` — welcome screen, session toolbar + hotkeys, Gallery view, Browser,
+  Grid view, info panel, thumbnails, export dialog
 
 See `AGENTS.md` for a full architecture map, build/verify instructions, and
 project invariants (useful for both humans and AI assistants).

@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// The "browser": a vertical column of thumbnails along the left edge of the
-/// culling view, with thin separator lines between different shooting days.
-struct FilmstripView: View {
+/// The Browser: an optional vertical column of thumbnails along the left edge
+/// of the Gallery view, with thin separators between shooting days.
+struct BrowserView: View {
     @ObservedObject var store: SessionStore
+    @State private var followTask: Task<Void, Never>?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -40,16 +41,31 @@ struct FilmstripView: View {
                 .padding(.vertical, 10)
             }
             .onChange(of: store.currentIndex) {
-                if let item = store.currentItem {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        proxy.scrollTo(item.id, anchor: .center)
-                    }
-                }
+                followCurrentPhoto(using: proxy, animated: true)
             }
             .onAppear {
-                if let item = store.currentItem {
-                    proxy.scrollTo(item.id, anchor: .center)
+                followCurrentPhoto(using: proxy, animated: false)
+            }
+            .onDisappear {
+                followTask?.cancel()
+            }
+        }
+    }
+
+    private func followCurrentPhoto(using proxy: ScrollViewProxy, animated: Bool) {
+        guard let id = store.currentItem?.id else { return }
+        followTask?.cancel()
+        followTask = Task { @MainActor in
+            // Let the current-index update reach the lazy stack before asking
+            // it to resolve an item that may start outside the viewport.
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            if animated {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo(id, anchor: .center)
                 }
+            } else {
+                proxy.scrollTo(id, anchor: .center)
             }
         }
     }

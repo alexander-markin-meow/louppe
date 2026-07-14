@@ -60,8 +60,8 @@ final class ImagePipeline: @unchecked Sendable {
     // MARK: - Public API
 
     /// Synchronous memory-cache-only lookups — cheap enough to call during
-    /// view construction. They let the culling view show *something* the very
-    /// frame the photo changes (the prefetched full image, or the filmstrip's
+    /// view construction. They let the Gallery view show *something* the very
+    /// frame the photo changes (the prefetched full image, or the Browser
     /// thumbnail as a low-res preview) instead of flashing an empty pane.
     func cachedFullImage(for url: URL) -> NSImage? {
         fullCache.object(forKey: cacheKey(for: url) as NSString)

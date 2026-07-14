@@ -2,8 +2,8 @@ import Foundation
 import AppKit
 
 enum ViewMode {
-    case culling
-    case lightTable
+    case gallery
+    case grid
 }
 
 enum AppPhase {
@@ -25,11 +25,14 @@ final class SessionStore: ObservableObject {
     @Published var phase: AppPhase = .welcome
     @Published var items: [PhotoItem] = []
     @Published var currentIndex: Int = 0
-    @Published var viewMode: ViewMode = .culling
+    @Published var viewMode: ViewMode = .gallery
     @Published var showMetadataPanel = true
-    @Published var showFilmstrip = true
+    @Published var showBrowser = true
     @Published var zoomMode: ZoomMode = .fit
     @Published var gridThumbSize: CGFloat = 170
+    /// Number of adaptive columns currently visible in the Grid view.
+    /// GridView updates this from the actual available window width.
+    @Published private(set) var gridColumnCount = 1
     @Published var isExportPresented = false
     @Published var isFilterPresented = false
     /// In-flight big-photo decodes (a count, so overlapping loads during fast
@@ -71,7 +74,7 @@ final class SessionStore: ObservableObject {
     }
     /// Indices into `items` that pass the current filter, in the chosen sort order.
     @Published private(set) var visibleIndices: [Int] = []
-    /// Same visible order, split into day runs for the light table. Rebuilt
+    /// Same visible order, split into day runs for the Grid view. Rebuilt
     /// only when filter/sort/session structure changes, not on selection drag.
     @Published private(set) var visibleDayGroups: [[Int]] = []
     @Published private(set) var visibleDayStartIndices: Set<Int> = []
@@ -397,9 +400,9 @@ final class SessionStore: ObservableObject {
         selectedIndices = []
     }
 
-    /// Routes a thumbnail click by modifier key — shared by the filmstrip and
-    /// the light table so both respond identically. `plainClick` runs when no
-    /// modifier is held (the filmstrip jumps; the light table cycles rating).
+    /// Routes a thumbnail click by modifier key — shared by the Browser and
+    /// Grid views so both respond identically. `plainClick` runs when no
+    /// modifier is held (the Browser jumps; the Grid cycles rating).
     func handleThumbnailClick(at index: Int, plainClick: () -> Void) {
         guard !isCleaningUp else { return }
         if NSEvent.modifierFlags.contains(.shift) {
@@ -454,7 +457,7 @@ final class SessionStore: ObservableObject {
         selectedIndices = Set(visibleIndices)
     }
 
-    /// Rubber-band drag in the light table: the selection follows the
+    /// Rubber-band drag in the Grid view: the selection follows the
     /// rectangle live. `currentIndex` is deliberately left alone here —
     /// moving it mid-drag would auto-scroll the grid under the cursor.
     func setSelection(_ indices: Set<Int>) {
@@ -488,7 +491,7 @@ final class SessionStore: ObservableObject {
         advanceToNextUndecided()
     }
 
-    /// Light-table click: cycle the clicked photo's rating. Clicking a photo
+    /// Grid click: cycle the clicked photo's rating. Clicking a photo
     /// that's part of a multi-selection gives the whole selection the clicked
     /// photo's next rating in one undoable step; the selection stays so the
     /// user can keep cycling.
@@ -823,6 +826,59 @@ final class SessionStore: ObservableObject {
     func goNext() { stepVisible(1) }
     func goPrevious() { stepVisible(-1) }
 
+    /// Moves to the photo in the same grid column on the row above or below.
+    /// Each day group starts a new grid, so crossing a group boundary lands in
+    /// the nearest matching column of the adjacent day's first/last row.
+    func goVertical(_ delta: Int) {
+        guard !visibleDayGroups.isEmpty else { return }
+        guard let groupIndex = visibleDayGroups.firstIndex(where: { $0.contains(currentIndex) }) else {
+            setIndex(visibleIndices[0])
+            return
+        }
+        let group = visibleDayGroups[groupIndex]
+        guard let position = group.firstIndex(of: currentIndex) else { return }
+
+        let columns = max(gridColumnCount, 1)
+        let row = position / columns
+        let column = position % columns
+        let target: Int?
+
+        if delta < 0 {
+            if row > 0 {
+                target = group[min((row - 1) * columns + column, group.count - 1)]
+            } else if groupIndex > 0 {
+                let previous = visibleDayGroups[groupIndex - 1]
+                let lastRowStart = (previous.count - 1) / columns * columns
+                target = previous[min(lastRowStart + column, previous.count - 1)]
+            } else {
+                target = nil
+            }
+        } else if delta > 0 {
+            let nextRowStart = (row + 1) * columns
+            if nextRowStart < group.count {
+                target = group[min(nextRowStart + column, group.count - 1)]
+            } else if groupIndex + 1 < visibleDayGroups.count {
+                let next = visibleDayGroups[groupIndex + 1]
+                target = next[min(column, next.count - 1)]
+            } else {
+                target = nil
+            }
+        } else {
+            target = nil
+        }
+
+        if let target {
+            setIndex(target)
+        }
+    }
+
+    /// Receives the number of columns calculated by the rendered Grid view.
+    func setGridColumnCount(_ count: Int) {
+        let count = max(count, 1)
+        guard gridColumnCount != count else { return }
+        gridColumnCount = count
+    }
+
     private func stepVisible(_ delta: Int) {
         guard !visibleIndices.isEmpty else { return }
         guard let pos = visibleIndices.firstIndex(of: currentIndex) else {
@@ -861,14 +917,14 @@ final class SessionStore: ObservableObject {
     }
 
     func toggleViewMode() {
-        viewMode = (viewMode == .culling) ? .lightTable : .culling
+        viewMode = (viewMode == .gallery) ? .grid : .gallery
     }
 
     func toggleZoom(_ mode: ZoomMode) {
         zoomMode = (zoomMode == mode) ? .fit : mode
     }
 
-    /// ⌘+ / ⌘− in the light table: bigger thumbnails mean fewer per row.
+    /// ⌘+ / ⌘− in the Grid view: bigger thumbnails mean fewer per row.
     func zoomGrid(larger: Bool) {
         let next = larger ? gridThumbSize * 1.25 : gridThumbSize / 1.25
         gridThumbSize = min(max(next, 90), 400)
@@ -1006,7 +1062,7 @@ final class SessionStore: ObservableObject {
         pendingCleanUp = nil
         cleanUpError = nil
         currentIndex = 0
-        viewMode = .culling
+        viewMode = .gallery
         filter = PhotoFilter()
         sort = PhotoSort()
         visibleIndices = []

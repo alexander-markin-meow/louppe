@@ -2,8 +2,8 @@ import SwiftUI
 import AppKit
 
 extension Color {
-    /// The single background gray used everywhere in the app (filmstrip, photo
-    /// pane, info panel, light table) so there's one consistent shade.
+    /// The single background gray used everywhere in the app (Browser, photo
+    /// pane, info panel, Grid view) so there's one consistent shade.
     static let appBackground = Color(nsColor: .windowBackgroundColor)
 
     /// Louppe's brand purple (#9853A6). The one accent color for everything

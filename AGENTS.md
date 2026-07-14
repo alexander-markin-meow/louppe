@@ -75,9 +75,9 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Views/WelcomeView.swift` | Start screen + scanning progress |
 | `Sources/Louppe/Views/SessionView.swift` | Toolbar (incl. sort menu), export sheet, **all single-key hotkeys** (`handleKey`) |
 | `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, file-type / camera / lens toggles |
-| `Sources/Louppe/Views/CullingView.swift` | Single-photo layout: filmstrip / photo / info panel |
-| `Sources/Louppe/Views/FilmstripView.swift` | Vertical thumbnail browser with day separators |
-| `Sources/Louppe/Views/LightTableView.swift` | Grid view, day-grouped rows, click-to-rate, rubber-band selection |
+| `Sources/Louppe/Views/GalleryView.swift` | Gallery layout: Browser / photo / info panel |
+| `Sources/Louppe/Views/BrowserView.swift` | Optional vertical thumbnail Browser with day separators |
+| `Sources/Louppe/Views/GridView.swift` | Grid view, day-grouped rows, click-to-rate, rubber-band selection |
 | `Sources/Louppe/Views/MetadataPanel.swift` | Info panel (filename header, camera, exposure row, fields) |
 | `Sources/Louppe/Views/ThumbnailView.swift` | Async thumbnail tile + rating badge |
 | `Sources/Louppe/Views/FullImageView.swift` | Large photo with fit / 100% / phone-size zoom |
@@ -148,7 +148,7 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
 - **Multi-selection model**: `selectedIndices` empty = "just the current
   photo" (`effectiveSelection` handles both cases). Anything that mutates or
   reorders `items` (open/re-scan, clean-up, undo) must clear the selection;
-  `applyFilter` intersects it with `visibleIndices`. The light-table rubber
+  `applyFilter` intersects it with `visibleIndices`. The Grid-view rubber
   band hit-tests tile frames collected via a `PreferenceKey`, so only
   *rendered* (on-screen) lazy-grid tiles can be caught by the rectangle —
   fine in practice, but don't "fix" it by de-lazifying the grid.

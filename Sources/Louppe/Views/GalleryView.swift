@@ -1,14 +1,14 @@
 import SwiftUI
 
-/// The primary one-photo-at-a-time review screen:
-/// browser column (filmstrip) · large photo pane · info panel.
-struct CullingView: View {
+/// The one-photo-at-a-time Gallery view:
+/// Browser column · large photo pane · info panel.
+struct GalleryView: View {
     @ObservedObject var store: SessionStore
 
     var body: some View {
         HStack(spacing: 0) {
-            if store.showFilmstrip {
-                FilmstripView(store: store)
+            if store.showBrowser {
+                BrowserView(store: store)
                     .frame(width: 122)
                     .background(Color.appBackground)
                     .transition(.move(edge: .leading))
