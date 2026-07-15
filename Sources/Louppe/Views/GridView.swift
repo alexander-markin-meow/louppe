@@ -7,6 +7,13 @@ import SwiftUI
 struct GridView: View {
     @ObservedObject var store: SessionStore
 
+    /// The native scrollbar thumb is inset within its reserved gutter. A
+    /// slightly smaller trailing content inset makes the visible photo-to-thumb
+    /// gap match the 12-point window-edge-to-photo gap on the leading side.
+    private static let leadingPadding: CGFloat = 12
+    private static let trailingPadding: CGFloat = 6
+    private static let verticalPadding: CGFloat = 12
+
     /// Coordinate space of the grid content — tile frames and the rubber
     /// band both live in it, so they stay aligned while scrolling.
     private static let gridSpace = "gridView"
@@ -78,7 +85,9 @@ struct GridView: View {
                             }
                         }
                     }
-                    .padding(12)
+                    .padding(.vertical, Self.verticalPadding)
+                    .padding(.leading, Self.leadingPadding)
+                    .padding(.trailing, Self.trailingPadding)
                     .background(PersistentVerticalScroller())
                     // Make the gaps between tiles draggable too, so a rubber band
                     // can start anywhere in the grid.
@@ -136,9 +145,12 @@ struct GridView: View {
         // The legacy vertical scroller owns a real gutter inside the Grid's
         // width. Exclude it so arrow-key columns match the rendered grid.
         let contentWidth = max(
-            width - 24 - PersistentVerticalScroller.gutterWidth,
+            width
+                - Self.leadingPadding
+                - Self.trailingPadding
+                - PersistentVerticalScroller.gutterWidth,
             1
-        ) // horizontal padding: 12 on each side
+        )
         let spacing: CGFloat = 10
         let count = max(1, Int((contentWidth + spacing) / (store.gridThumbSize + spacing)))
         store.setGridColumnCount(count)
