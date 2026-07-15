@@ -11,6 +11,20 @@ struct ThumbnailView: View {
 
     @State private var image: NSImage?
 
+    init(item: PhotoItem, isCurrent: Bool, isSelected: Bool = false) {
+        self.item = item
+        self.isCurrent = isCurrent
+        self.isSelected = isSelected
+        // Reappearing lazy cells should render their memory-cached image on
+        // their first frame instead of flashing a placeholder and scheduling
+        // an otherwise unnecessary state update.
+        self._image = State(
+            initialValue: item.isSupported
+                ? ImagePipeline.shared.cachedThumbnail(for: item)
+                : nil
+        )
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Group {
@@ -39,8 +53,8 @@ struct ThumbnailView: View {
                 .padding(4)
         }
         .task(id: item.id) {
-            guard item.isSupported else { return }
-            image = await ImagePipeline.shared.thumbnail(for: item.primaryURL)
+            guard item.isSupported, image == nil else { return }
+            image = await ImagePipeline.shared.thumbnail(for: item)
         }
     }
 

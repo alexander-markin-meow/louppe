@@ -40,6 +40,21 @@ Neighbour prefetch is debounced by 60 ms, and a new full-image view waits 40 ms
 before enqueuing a decode so key repeat does not flood the bounded queue with
 views that have already disappeared.
 
+Thumbnail cache keys use each file's modification date captured by
+`FolderScanner`. Do not put a filesystem metadata lookup back in
+`ImagePipeline.cacheKey`: lazy grid cells can be recreated during scrolling,
+and synchronous `stat` calls there block the UI thread. Reappearing thumbnail
+cells also seed directly from the memory cache to avoid placeholder churn.
+
+## Grid scrolling
+
+The day-grouped Grid view uses sections inside one `LazyVGrid`. Do not nest a
+separate lazy grid for each day inside a `LazyVStack`: off-screen day heights
+become estimates that SwiftUI corrects during upward scrolling and after tile
+resizing, which makes the viewport jump. `gridColumnCount` is deliberately not
+published because it is navigation-only state; publishing it causes a second
+full grid redraw after each layout change.
+
 ## Filtering and derived data
 
 `PhotoItem.searchableText` is locale-folded once during scanning. Each filter

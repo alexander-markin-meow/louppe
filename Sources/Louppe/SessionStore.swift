@@ -32,7 +32,9 @@ final class SessionStore: ObservableObject {
     @Published var gridThumbSize: CGFloat = 170
     /// Number of adaptive columns currently visible in the Grid view.
     /// GridView updates this from the actual available window width.
-    @Published private(set) var gridColumnCount = 1
+    // Navigation reads this value, but no view renders it. Publishing it would
+    // force a redundant second grid redraw after every resize/thumbnail zoom.
+    private(set) var gridColumnCount = 1
     @Published var isExportPresented = false
     @Published var isFilterPresented = false
     /// In-flight big-photo decodes (a count, so overlapping loads during fast
@@ -955,16 +957,16 @@ final class SessionStore: ObservableObject {
         // in between don't waste the warm-up window.
         guard let pos = visibleIndices.firstIndex(of: currentIndex) else { return }
         let windowOffsets = [1, 2, 3, -1]
-        let urls = windowOffsets.compactMap { offset -> URL? in
+        let photos = windowOffsets.compactMap { offset -> PhotoItem? in
             let p = pos + offset
             guard visibleIndices.indices.contains(p) else { return nil }
             let item = items[visibleIndices[p]]
-            return item.isSupported ? item.primaryURL : nil
+            return item.isSupported ? item : nil
         }
         // Collapse repeated navigation/filter updates into one neighbourhood
         // warm-up. The visible image itself still starts immediately.
         let work = DispatchWorkItem {
-            ImagePipeline.shared.prefetchFullImages(urls: urls)
+            ImagePipeline.shared.prefetchFullImages(items: photos)
         }
         prefetchDebounce = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)

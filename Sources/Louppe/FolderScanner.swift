@@ -54,6 +54,7 @@ enum FolderScanner {
     private struct FileFacts {
         let size: Int64
         let creationDate: Date?
+        let modificationDate: Date?
     }
 
     /// `progress` is called periodically with the running file count. The
@@ -67,7 +68,12 @@ enum FolderScanner {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .creationDateKey],
+            includingPropertiesForKeys: [
+                .isRegularFileKey,
+                .fileSizeKey,
+                .creationDateKey,
+                .contentModificationDateKey,
+            ],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
             throw NSError(domain: "Louppe", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not read that folder."])
@@ -87,12 +93,18 @@ enum FolderScanner {
             // These keys were prefetched by the enumerator above. Keep their
             // values now instead of issuing separate attributes/resource calls
             // for every primary photo later in the scan.
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .creationDateKey])
+            let values = try? url.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .fileSizeKey,
+                .creationDateKey,
+                .contentModificationDateKey,
+            ])
             guard values?.isRegularFile == true else { continue }
             files.append(url)
             factsByURL[url] = FileFacts(
                 size: Int64(values?.fileSize ?? 0),
-                creationDate: values?.creationDate
+                creationDate: values?.creationDate,
+                modificationDate: values?.contentModificationDate
             )
             if files.count % 25 == 0 { progress(files.count) }
         }
@@ -134,6 +146,7 @@ enum FolderScanner {
                     captureDate: captureDate,
                     cameraModel: info.cameraModel,
                     lensModel: info.lensModel,
+                    primaryModificationDate: facts?.modificationDate,
                     fileSize: facts?.size ?? 0,
                     pairedFileSize: paired.flatMap { factsByURL[$0]?.size } ?? 0
                 ))

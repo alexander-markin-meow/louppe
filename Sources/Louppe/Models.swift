@@ -20,6 +20,10 @@ struct PhotoItem: Identifiable, Sendable {
     /// match them without re-opening every file.
     let cameraModel: String?
     let lensModel: String?
+    /// Captured during the folder scan and reused by the image cache. Keeping
+    /// it on the item avoids a synchronous filesystem lookup whenever a lazy
+    /// thumbnail cell is recreated while scrolling.
+    let primaryModificationDate: Date?
     let fileSize: Int64
     let pairedFileSize: Int64
     /// Locale-folded metadata assembled once during scanning. Search filtering
@@ -36,6 +40,7 @@ struct PhotoItem: Identifiable, Sendable {
         captureDate: Date?,
         cameraModel: String?,
         lensModel: String?,
+        primaryModificationDate: Date? = nil,
         fileSize: Int64,
         pairedFileSize: Int64 = 0,
         rating: Rating = .undecided,
@@ -47,6 +52,7 @@ struct PhotoItem: Identifiable, Sendable {
         self.captureDate = captureDate
         self.cameraModel = cameraModel
         self.lensModel = lensModel
+        self.primaryModificationDate = primaryModificationDate
         self.fileSize = fileSize
         self.pairedFileSize = pairedFileSize
         self.rating = rating

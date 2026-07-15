@@ -13,6 +13,7 @@ swiftc \
     Sources/Louppe/Models.swift \
     Sources/Louppe/FolderScanner.swift \
     Sources/Louppe/MetadataExtractor.swift \
+    Sources/Louppe/ImagePipeline.swift \
     Sources/Louppe/CleanUpWorker.swift \
     Sources/Louppe/SessionPersistence.swift \
     Tests/PerformanceChecks/main.swift \

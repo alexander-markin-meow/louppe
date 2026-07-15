@@ -63,16 +63,16 @@ final class ImagePipeline: @unchecked Sendable {
     /// view construction. They let the Gallery view show *something* the very
     /// frame the photo changes (the prefetched full image, or the Browser
     /// thumbnail as a low-res preview) instead of flashing an empty pane.
-    func cachedFullImage(for url: URL) -> NSImage? {
-        fullCache.object(forKey: cacheKey(for: url) as NSString)
+    func cachedFullImage(for item: PhotoItem) -> NSImage? {
+        fullCache.object(forKey: Self.cacheKey(for: item) as NSString)
     }
 
-    func cachedThumbnail(for url: URL) -> NSImage? {
-        thumbCache.object(forKey: cacheKey(for: url) as NSString)
+    func cachedThumbnail(for item: PhotoItem) -> NSImage? {
+        thumbCache.object(forKey: Self.cacheKey(for: item) as NSString)
     }
 
-    func thumbnail(for url: URL) async -> NSImage? {
-        let key = cacheKey(for: url)
+    func thumbnail(for item: PhotoItem) async -> NSImage? {
+        let key = Self.cacheKey(for: item)
         if let cached = thumbCache.object(forKey: key as NSString) { return cached }
         return await decodeOnce(
             kind: .thumbnail,
@@ -80,15 +80,15 @@ final class ImagePipeline: @unchecked Sendable {
             qualityOfService: .userInitiated,
             queuePriority: .normal
         ) { [self] in
-            loadThumbnailSync(url: url, key: key)
+            loadThumbnailSync(url: item.primaryURL, key: key)
         }
     }
 
-    func fullImage(for url: URL) async -> NSImage? {
-        let key = cacheKey(for: url)
+    func fullImage(for item: PhotoItem) async -> NSImage? {
+        let key = Self.cacheKey(for: item)
         if let cached = fullCache.object(forKey: key as NSString) { return cached }
         return await fullImage(
-            for: url,
+            for: item.primaryURL,
             key: key,
             qualityOfService: .userInitiated,
             queuePriority: .veryHigh
@@ -112,13 +112,13 @@ final class ImagePipeline: @unchecked Sendable {
     }
 
     /// Warm the full-size cache for the next few photos so navigation feels instant.
-    func prefetchFullImages(urls: [URL]) {
-        for url in urls {
-            let key = cacheKey(for: url)
+    func prefetchFullImages(items: [PhotoItem]) {
+        for item in items {
+            let key = Self.cacheKey(for: item)
             if fullCache.object(forKey: key as NSString) != nil { continue }
             Task.detached(priority: .utility) { [weak self] in
                 _ = await self?.fullImage(
-                    for: url,
+                    for: item.primaryURL,
                     key: key,
                     qualityOfService: .utility,
                     queuePriority: .low
@@ -253,11 +253,12 @@ final class ImagePipeline: @unchecked Sendable {
 
     // MARK: - Cache keys
 
-    private func cacheKey(for url: URL) -> String {
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date)
-            .flatMap { $0.timeIntervalSince1970 } ?? 0
+    /// Internal so the performance checks can enforce that cache lookup stays
+    /// independent of the live filesystem after scanning.
+    static func cacheKey(for item: PhotoItem) -> String {
+        let mtime = item.primaryModificationDate?.timeIntervalSince1970 ?? 0
         // "v2" invalidates thumbnails cached before the pixelation fix.
-        return "\(url.path)|\(mtime)|v2"
+        return "\(item.primaryURL.path)|\(mtime)|v2"
     }
 
     private func diskFileName(for key: String) -> String {

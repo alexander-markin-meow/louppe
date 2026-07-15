@@ -6,12 +6,13 @@ struct PerformanceChecks {
         try preparedFilterMatchesFoldedMetadataTokens()
         try preparedFilterUsesWholeDayBounds()
         try folderScannerHonorsCancellation()
+        try imageCacheKeyDoesNotTouchFilesystemAfterScan()
         try linearRestoreMergePreservesOrderAndOmitsLostPhoto()
         try await olderSidecarSaveCannotOverwriteNewerSnapshot()
         try await emptySidecarSnapshotIsPersisted()
         try cleanUpPairRoundTripsThroughTrash()
         try cleanUpPairFailureRollsBackFirstFile()
-        print("Performance checks passed (8/8)")
+        print("Performance checks passed (9/9)")
     }
 
     private static func preparedFilterMatchesFoldedMetadataTokens() throws {
@@ -68,6 +69,28 @@ struct PerformanceChecks {
             didCancel = true
         }
         try expect(didCancel, "superseded folder scan should stop immediately")
+    }
+
+    private static func imageCacheKeyDoesNotTouchFilesystemAfterScan() throws {
+        let folder = try disposableFolder(named: "ImageCacheKey")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("CACHE.JPG")
+        try Data("photo".utf8).write(to: url)
+        let modificationDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: modificationDate], ofItemAtPath: url.path)
+        let item = makeItem(
+            id: "CACHE.JPG",
+            primaryURL: url,
+            modificationDate: modificationDate
+        )
+
+        let beforeRemoval = ImagePipeline.cacheKey(for: item)
+        try FileManager.default.removeItem(at: url)
+        let afterRemoval = ImagePipeline.cacheKey(for: item)
+        try expect(
+            beforeRemoval == afterRemoval,
+            "thumbnail cache keys must use scan metadata instead of reading the live filesystem"
+        )
     }
 
     private static func olderSidecarSaveCannotOverwriteNewerSnapshot() async throws {
@@ -144,7 +167,8 @@ struct PerformanceChecks {
         pairedURL: URL? = nil,
         captureDate: Date? = nil,
         camera: String? = nil,
-        lens: String? = nil
+        lens: String? = nil,
+        modificationDate: Date? = nil
     ) -> PhotoItem {
         PhotoItem(
             id: id,
@@ -153,6 +177,7 @@ struct PerformanceChecks {
             captureDate: captureDate,
             cameraModel: camera,
             lensModel: lens,
+            primaryModificationDate: modificationDate,
             fileSize: 1
         )
     }

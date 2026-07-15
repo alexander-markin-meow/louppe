@@ -23,10 +23,10 @@ struct FullImageView: View {
         // nothing is decoded here. Prefetched neighbours appear instantly at
         // full quality; anything else starts from its thumbnail.
         guard item.isSupported else { return }
-        let cachedFull = ImagePipeline.shared.cachedFullImage(for: item.primaryURL)
+        let cachedFull = ImagePipeline.shared.cachedFullImage(for: item)
         self._image = State(initialValue: cachedFull)
         if cachedFull == nil {
-            self._preview = State(initialValue: ImagePipeline.shared.cachedThumbnail(for: item.primaryURL))
+            self._preview = State(initialValue: ImagePipeline.shared.cachedThumbnail(for: item))
         }
     }
 
@@ -90,8 +90,8 @@ struct FullImageView: View {
             // Full decode in the background; meanwhile grab the thumbnail as a
             // quick preview if the memory cache didn't have it at init (its
             // disk-cache load or 320px decode finishes far sooner).
-            async let full = ImagePipeline.shared.fullImage(for: item.primaryURL)
-            if preview == nil, let thumb = await ImagePipeline.shared.thumbnail(for: item.primaryURL) {
+            async let full = ImagePipeline.shared.fullImage(for: item)
+            if preview == nil, let thumb = await ImagePipeline.shared.thumbnail(for: item) {
                 if image == nil { preview = thumb }
             }
             let loaded = await full

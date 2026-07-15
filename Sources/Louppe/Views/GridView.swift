@@ -54,19 +54,26 @@ struct GridView: View {
                         )
                         .padding(.top, 80)
                     }
-                    LazyVStack(spacing: 14) {
+                    // One lazy grid gives SwiftUI one stable row-height model.
+                    // Nesting a separate LazyVGrid for every day inside a
+                    // LazyVStack made off-screen day heights estimates; those
+                    // estimates were corrected while scrolling upward or
+                    // after a thumbnail resize, visibly moving the viewport.
+                    LazyVGrid(columns: columns, spacing: 10) {
                         ForEach(Array(store.visibleDayGroups.enumerated()), id: \.offset) { groupIndex, group in
-                            if groupIndex > 0 {
-                                RoundedRectangle(cornerRadius: 1)
-                                    .fill(.secondary.opacity(0.4))
-                                    .frame(height: 2)
-                                    .padding(.horizontal, 4)
-                            }
-                            LazyVGrid(columns: columns, spacing: 10) {
+                            Section {
                                 ForEach(group, id: \.self) { index in
                                     if store.items.indices.contains(index) {
                                         cell(index: index, item: store.items[index])
                                     }
+                                }
+                            } header: {
+                                if groupIndex > 0 {
+                                    RoundedRectangle(cornerRadius: 1)
+                                        .fill(.secondary.opacity(0.4))
+                                        .frame(height: 2)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 4)
                                 }
                             }
                         }
