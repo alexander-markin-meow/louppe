@@ -55,6 +55,13 @@ resizing, which makes the viewport jump. `gridColumnCount` is deliberately not
 published because it is navigation-only state; publishing it causes a second
 full grid redraw after each layout change.
 
+The Browser and Grid install the shared `PersistentVerticalScroller` inside
+their SwiftUI scroll content. It forces AppKit's `.legacy` vertical-scroller
+style with autohiding disabled, so the control remains visible and consumes a
+real gutter rather than overlaying thumbnails. Grid column-count calculations
+must subtract `PersistentVerticalScroller.gutterWidth` to match the content
+width AppKit gives the lazy grid.
+
 ## Filtering and derived data
 
 `PhotoItem.searchableText` is locale-folded once during scanning. Each filter

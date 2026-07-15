@@ -9,7 +9,7 @@ struct GalleryView: View {
         HStack(spacing: 0) {
             if store.showBrowser {
                 BrowserView(store: store)
-                    .frame(width: 122)
+                    .frame(width: BrowserView.width)
                     .background(Color.appBackground)
                     .transition(.move(edge: .leading))
             }

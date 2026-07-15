@@ -3,12 +3,16 @@ import SwiftUI
 /// The Browser: an optional vertical column of thumbnails along the left edge
 /// of the Gallery view, with thin separators between shooting days.
 struct BrowserView: View {
+    /// Keep the original 122-point thumbnail column and add exactly enough
+    /// room for a native non-overlay scrollbar beside it.
+    static let width = 122 + PersistentVerticalScroller.gutterWidth
+
     @ObservedObject var store: SessionStore
     @State private var followTask: Task<Void, Never>?
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
+            ScrollView(.vertical) {
                 LazyVStack(spacing: 6) {
                     ForEach(store.visibleIndices, id: \.self) { index in
                         if store.items.indices.contains(index) {
@@ -39,6 +43,7 @@ struct BrowserView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 10)
+                .background(PersistentVerticalScroller())
             }
             .onChange(of: store.currentIndex) {
                 followCurrentPhoto(using: proxy, animated: true)

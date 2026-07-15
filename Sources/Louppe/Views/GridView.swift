@@ -79,6 +79,7 @@ struct GridView: View {
                         }
                     }
                     .padding(12)
+                    .background(PersistentVerticalScroller())
                     // Make the gaps between tiles draggable too, so a rubber band
                     // can start anywhere in the grid.
                     .contentShape(Rectangle())
@@ -132,7 +133,12 @@ struct GridView: View {
     }
 
     private func updateColumnCount(for width: CGFloat) {
-        let contentWidth = max(width - 24, 1) // horizontal padding: 12 on each side
+        // The legacy vertical scroller owns a real gutter inside the Grid's
+        // width. Exclude it so arrow-key columns match the rendered grid.
+        let contentWidth = max(
+            width - 24 - PersistentVerticalScroller.gutterWidth,
+            1
+        ) // horizontal padding: 12 on each side
         let spacing: CGFloat = 10
         let count = max(1, Int((contentWidth + spacing) / (store.gridThumbSize + spacing)))
         store.setGridColumnCount(count)
