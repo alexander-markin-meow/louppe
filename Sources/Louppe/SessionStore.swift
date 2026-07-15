@@ -122,10 +122,16 @@ final class SessionStore: ObservableObject {
     @Published private(set) var availableTypes: [String] = []
     @Published private(set) var availableCameras: [String] = []
     @Published private(set) var availableLenses: [String] = []
+    @Published private(set) var availableCaptureDates: [Date] = []
     @Published private(set) var captureDateRange: ClosedRange<Date>?
+    @Published private(set) var apertureRange: ClosedRange<Double>?
+    @Published private(set) var shutterRange: ClosedRange<Double>?
+    @Published private(set) var isoRange: ClosedRange<Double>?
     @Published private(set) var typeCounts: [String: Int] = [:]
     @Published private(set) var cameraCounts: [String: Int] = [:]
     @Published private(set) var lensCounts: [String: Int] = [:]
+    @Published private(set) var captureDateCounts: [Date: Int] = [:]
+    @Published private(set) var unknownDateCount = 0
 
     nonisolated static let sidecarName = SessionConstants.sidecarName
 
@@ -140,8 +146,21 @@ final class SessionStore: ObservableObject {
     var undecidedCount: Int { ratingTally.undecided }
     var ratedCount: Int { ratingTally.yes + ratingTally.no }
 
+    /// Reset remains available when the date UI is in its non-default mode or
+    /// retains hidden day exclusions, even if those choices currently show all
+    /// photos and therefore do not light the toolbar's active-filter glyph.
+    var filterCanReset: Bool {
+        filter.isActive
+            || filter.dateMode != .range
+            || !filter.excludedDates.isEmpty
+            || filter.excludesUnknownDate
+    }
+
     var currentItem: PhotoItem? {
-        guard items.indices.contains(currentIndex) else { return nil }
+        // When a filter matches nothing there is deliberately no current
+        // photo; returning the previously current hidden item would expose it
+        // in the Info panel and make keyboard actions target it invisibly.
+        guard !visibleIndices.isEmpty, items.indices.contains(currentIndex) else { return nil }
         return items[currentIndex]
     }
 
@@ -220,8 +239,14 @@ final class SessionStore: ObservableObject {
         var types: [String: Int] = [:]
         var cameras: [String: Int] = [:]
         var lenses: [String: Int] = [:]
-        var earliest: Date?
-        var latest: Date?
+        var dates: [Date: Int] = [:]
+        var unknownDates = 0
+        var minimumAperture: Double?
+        var maximumAperture: Double?
+        var minimumShutter: Double?
+        var maximumShutter: Double?
+        var minimumISO: Double?
+        var maximumISO: Double?
         for item in items {
             switch item.rating {
             case .yes: tally.yes += 1
@@ -231,9 +256,22 @@ final class SessionStore: ObservableObject {
             types[item.fileTypeLabel, default: 0] += 1
             cameras[item.cameraLabel, default: 0] += 1
             lenses[item.lensLabel, default: 0] += 1
-            if let date = item.captureDate {
-                earliest = earliest.map { min($0, date) } ?? date
-                latest = latest.map { max($0, date) } ?? date
+            if let day = item.captureDay {
+                dates[day, default: 0] += 1
+            } else {
+                unknownDates += 1
+            }
+            if let aperture = item.aperture {
+                minimumAperture = minimumAperture.map { min($0, aperture) } ?? aperture
+                maximumAperture = maximumAperture.map { max($0, aperture) } ?? aperture
+            }
+            if let shutter = item.shutterSpeed {
+                minimumShutter = minimumShutter.map { min($0, shutter) } ?? shutter
+                maximumShutter = maximumShutter.map { max($0, shutter) } ?? shutter
+            }
+            if let iso = item.iso {
+                minimumISO = minimumISO.map { min($0, iso) } ?? iso
+                maximumISO = maximumISO.map { max($0, iso) } ?? iso
             }
         }
         ratingTally = tally
@@ -243,8 +281,136 @@ final class SessionStore: ObservableObject {
         availableTypes = types.keys.sorted()
         availableCameras = cameras.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         availableLenses = lenses.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-        captureDateRange = earliest.flatMap { first in latest.map { first...$0 } }
+        availableCaptureDates = dates.keys.sorted()
+        captureDateCounts = dates
+        unknownDateCount = unknownDates
+        captureDateRange = availableCaptureDates.first.flatMap { first in
+            availableCaptureDates.last.map { first...$0 }
+        }
+        apertureRange = Self.closedRange(minimum: minimumAperture, maximum: maximumAperture)
+        shutterRange = Self.closedRange(minimum: minimumShutter, maximum: maximumShutter)
+        isoRange = Self.closedRange(minimum: minimumISO, maximum: maximumISO)
         rebuildSortedIndices()
+    }
+
+    private static func closedRange(minimum: Double?, maximum: Double?) -> ClosedRange<Double>? {
+        guard let minimum, let maximum else { return nil }
+        return minimum...maximum
+    }
+
+    /// Folder-wide ranges are the neutral filter state. Existing narrowed
+    /// ranges survive a re-scan and are clamped to the newly discovered span;
+    /// untouched ranges expand to the new full span automatically.
+    /// Returns true when assigning the synchronized filter already caused its
+    /// `didSet` observer to run `applyFilter()`.
+    @discardableResult
+    private func synchronizeFilterRangesWithAvailableData() -> Bool {
+        var updated = filter
+        updated.excludedTypes.formIntersection(availableTypes)
+        updated.excludedCameras.formIntersection(availableCameras)
+        updated.excludedLenses.formIntersection(availableLenses)
+        updated.excludedDates.formIntersection(availableCaptureDates)
+
+        if let available = captureDateRange {
+            if updated.dateMode == .range, updated.dateEnabled {
+                updated.dateFrom = Self.clamp(updated.dateFrom, to: available)
+                updated.dateTo = Self.clamp(updated.dateTo, to: available)
+            } else {
+                updated.dateFrom = available.lowerBound
+                updated.dateTo = available.upperBound
+            }
+        }
+        updated.dateEnabled = dateFilterHasEffect(updated)
+
+        let aperture = Self.synchronizedNumericRange(
+            from: updated.apertureFrom,
+            to: updated.apertureTo,
+            wasActive: updated.apertureEnabled,
+            available: apertureRange
+        )
+        updated.apertureFrom = aperture.from
+        updated.apertureTo = aperture.to
+        updated.apertureEnabled = aperture.isActive
+
+        let shutter = Self.synchronizedNumericRange(
+            from: updated.shutterFrom,
+            to: updated.shutterTo,
+            wasActive: updated.shutterEnabled,
+            available: shutterRange
+        )
+        updated.shutterFrom = shutter.from
+        updated.shutterTo = shutter.to
+        updated.shutterEnabled = shutter.isActive
+
+        let iso = Self.synchronizedNumericRange(
+            from: updated.isoFrom,
+            to: updated.isoTo,
+            wasActive: updated.isoEnabled,
+            available: isoRange
+        )
+        updated.isoFrom = iso.from
+        updated.isoTo = iso.to
+        updated.isoEnabled = iso.isActive
+
+        guard updated != filter else { return false }
+        filter = updated
+        return true
+    }
+
+    /// Restores the visible controls to their folder-wide defaults. This is
+    /// deliberately different from a bare `PhotoFilter()` because DatePicker
+    /// selections must already lie inside the current folder's limits.
+    func resetFilter() {
+        var reset = PhotoFilter()
+        if let available = captureDateRange {
+            reset.dateFrom = available.lowerBound
+            reset.dateTo = available.upperBound
+        }
+        if let available = apertureRange {
+            reset.apertureFrom = available.lowerBound
+            reset.apertureTo = available.upperBound
+        }
+        if let available = shutterRange {
+            reset.shutterFrom = available.lowerBound
+            reset.shutterTo = available.upperBound
+        }
+        if let available = isoRange {
+            reset.isoFrom = available.lowerBound
+            reset.isoTo = available.upperBound
+        }
+        filter = reset
+    }
+
+    private func dateFilterHasEffect(_ candidate: PhotoFilter) -> Bool {
+        switch candidate.dateMode {
+        case .range:
+            guard let available = captureDateRange else { return false }
+            return candidate.dateFrom != available.lowerBound || candidate.dateTo != available.upperBound
+        case .specificDates:
+            return !candidate.excludedDates.isEmpty
+                || (unknownDateCount > 0 && candidate.excludesUnknownDate)
+        }
+    }
+
+    private static func synchronizedNumericRange(
+        from: Double,
+        to: Double,
+        wasActive: Bool,
+        available: ClosedRange<Double>?
+    ) -> (from: Double, to: Double, isActive: Bool) {
+        guard let available else { return (0, 0, false) }
+        guard wasActive else { return (available.lowerBound, available.upperBound, false) }
+        let from = clamp(from, to: available)
+        let to = clamp(to, to: available)
+        return (
+            from,
+            to,
+            from != available.lowerBound || to != available.upperBound
+        )
+    }
+
+    private static func clamp<Value: Comparable>(_ value: Value, to range: ClosedRange<Value>) -> Value {
+        min(max(value, range.lowerBound), range.upperBound)
     }
 
     private func resetDerivedData() {
@@ -255,10 +421,16 @@ final class SessionStore: ObservableObject {
         availableTypes = []
         availableCameras = []
         availableLenses = []
+        availableCaptureDates = []
         captureDateRange = nil
+        apertureRange = nil
+        shutterRange = nil
+        isoRange = nil
         typeCounts = [:]
         cameraCounts = [:]
         lensCounts = [:]
+        captureDateCounts = [:]
+        unknownDateCount = 0
     }
 
     // MARK: - Opening a folder
@@ -278,6 +450,8 @@ final class SessionStore: ObservableObject {
 
     func openFolder(_ url: URL) {
         guard !isCleaningUp else { return }
+        let preservesCurrentFilter = sourceFolder?.standardizedFileURL == url.standardizedFileURL
+            && !items.isEmpty
         scanTask?.cancel()
         scanGeneration &+= 1
         let generation = scanGeneration
@@ -295,6 +469,10 @@ final class SessionStore: ObservableObject {
         selectedIndices = []
         items = []
         resetDerivedData()
+        if !preservesCurrentFilter {
+            filter = PhotoFilter()
+            sort = PhotoSort()
+        }
         undoStack = []
         isClearAllRatingsConfirmationPresented = false
         pendingCleanUp = nil
@@ -338,6 +516,14 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Stops the active folder walk and returns immediately to the welcome
+    /// screen. `closeSession` also advances `scanGeneration`, so any detached
+    /// work that finishes after cancellation cannot apply partial results.
+    func cancelScan() {
+        guard case .scanning = phase else { return }
+        closeSession()
+    }
+
     private func finishScan(
         url: URL,
         generation: UInt64,
@@ -363,9 +549,10 @@ final class SessionStore: ObservableObject {
         rebuildDerivedData()
         // Resume from the first undecided photo.
         currentIndex = loaded.firstIndex(where: { $0.rating == .undecided }) ?? 0
+        let filterAlreadyApplied = synchronizeFilterRangesWithAvailableData()
         // Recompute visibility (a re-scan keeps the active filter; it may
         // also snap currentIndex onto a visible photo).
-        applyFilter()
+        if !filterAlreadyApplied { applyFilter() }
         phase = loaded.isEmpty ? .welcome : .ready
         if loaded.isEmpty {
             scanError = "No supported photos (.NEF, .RAF, .JPG, .JPEG, .TIF) were found in that folder."
@@ -397,7 +584,10 @@ final class SessionStore: ObservableObject {
     /// active, otherwise just the current photo.
     var effectiveSelection: Set<Int> {
         if !selectedIndices.isEmpty { return selectedIndices }
-        return items.indices.contains(currentIndex) ? [currentIndex] : []
+        // `applyFilter` guarantees currentIndex is visible whenever the result
+        // is nonempty. With zero matches, empty must remain truly empty so
+        // rating and Clean Up cannot act on a hidden former current photo.
+        return !visibleIndices.isEmpty && items.indices.contains(currentIndex) ? [currentIndex] : []
     }
 
     func clearSelection() {
@@ -631,24 +821,46 @@ final class SessionStore: ObservableObject {
     /// A problem to report after a clean-up or its undo (some file couldn't
     /// be moved). Nil means the last operation went through completely.
     @Published var cleanUpError: String?
-    /// When true (the default) and a filter is active, Clean Up only
-    /// considers the photos the filter currently shows — hidden photos stay
-    /// untouched. Off means the whole folder is considered.
-    @Published var cleanUpFilteredOnly = true
+    /// Which photos the rating-based Clean Up actions consider. Filtered is
+    /// the safe default; the direct "Move Selected" action ignores this and
+    /// always targets the effective selection.
+    @Published var cleanUpScope: CleanUpScope = .filtered
     /// While true, photo/session mutations are blocked but scrolling and
     /// inspection remain available. File I/O itself runs off the main actor.
     @Published private(set) var isCleaningUp = false
     @Published private(set) var cleanUpProgress: CleanUpProgress?
 
-    /// Whether the next clean-up is actually limited to the filtered photos
-    /// (the toggle only matters while a filter is active).
-    var cleanUpScopeIsFiltered: Bool { cleanUpFilteredOnly && filter.isActive }
-
-    /// The photos a rating-based clean-up would consider, per the scope
-    /// toggle. Order doesn't matter downstream (undo re-sorts by index), so
-    /// no sort here — `visibleIndices` is reused as-is.
+    /// The photos a rating-based clean-up would consider. The direct selection
+    /// action bypasses this property in `cleanUpTargets`.
     private var cleanUpCandidates: [Int] {
-        cleanUpScopeIsFiltered ? visibleIndices : Array(items.indices)
+        cleanUpScope.candidateIndices(
+            all: items.indices,
+            filtered: visibleIndices,
+            selected: effectiveSelection
+        )
+    }
+
+    /// Menu enablement only needs to know whether one target exists. Avoid
+    /// materializing the entire all-photo candidate array on every toolbar
+    /// refresh; the action itself still resolves an exact ordered snapshot.
+    private func cleanUpCandidatesContain(_ predicate: (Int) -> Bool) -> Bool {
+        switch cleanUpScope {
+        case .all:
+            return items.indices.contains(where: predicate)
+        case .filtered:
+            return visibleIndices.contains(where: predicate)
+        case .selected:
+            return effectiveSelection.contains(where: predicate)
+        }
+    }
+
+    /// Live candidate totals shown beside the three inline scope choices.
+    func cleanUpScopeCount(for scope: CleanUpScope) -> Int {
+        switch scope {
+        case .all: return items.count
+        case .filtered: return visibleIndices.count
+        case .selected: return effectiveSelection.count
+        }
     }
 
     /// Exactly which photos a clean-up mode would remove.
@@ -671,14 +883,14 @@ final class SessionStore: ObservableObject {
         case .selection:
             return !effectiveSelection.isEmpty
         case .trashNo:
-            return cleanUpCandidates.contains { items[$0].rating == .no }
+            return cleanUpCandidatesContain { items[$0].rating == .no }
         case .keepOnlyYes:
-            return cleanUpCandidates.contains { items[$0].rating != .yes }
+            return cleanUpCandidatesContain { items[$0].rating != .yes }
         }
     }
 
     /// How many photos (and actual files, counting RAW+JPEG pairs as two)
-    /// a clean-up mode would move to the Trash, respecting the scope toggle.
+    /// a clean-up mode would move to the Trash, respecting the chosen scope.
     /// Only needed once, when the confirmation dialog opens.
     func cleanUpCounts(for mode: CleanUpMode) -> (photos: Int, files: Int, bytes: Int64) {
         let doomed = cleanUpTargets(for: mode).map { items[$0] }
@@ -704,10 +916,9 @@ final class SessionStore: ObservableObject {
         pendingCleanUp = mode
     }
 
-    /// Moves every photo the mode rejects (within the scope the toggle
-    /// chose: filtered photos only, or the whole folder) to the macOS Trash
-    /// — never a permanent delete. One ⌘Z brings the whole batch back. A
-    /// photo is only removed if *all* its files could be trashed; on a
+    /// Moves every photo the mode rejects within the chosen scope to the
+    /// macOS Trash — never a permanent delete. One ⌘Z brings the whole batch
+    /// back. A photo is only removed if *all* its files could be trashed; on a
     /// partial failure its already-trashed files are put back. If that
     /// rollback also fails, the app reports the inconsistent pair explicitly.
     func performCleanUp(_ mode: CleanUpMode) {
@@ -748,7 +959,7 @@ final class SessionStore: ObservableObject {
             currentIndex = min(max(previousIndex - removedBefore, 0), max(items.count - 1, 0))
             pushUndo(.cleanUp(removed, previousIndex: previousIndex))
             rebuildDerivedData()
-            applyFilter()
+            if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
             saveDebounce?.cancel()
             saveSession()
         }
@@ -834,7 +1045,7 @@ final class SessionStore: ObservableObject {
             currentIndex = min(max(previousIndex, 0), items.count - 1)
         }
         rebuildDerivedData()
-        applyFilter()
+        if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
         saveDebounce?.cancel()
         saveSession()
         isCleaningUp = false

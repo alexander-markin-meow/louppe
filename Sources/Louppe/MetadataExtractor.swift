@@ -8,10 +8,13 @@ enum MetadataExtractor {
         var captureDate: Date?
         var cameraModel: String?
         var lensModel: String?
+        var aperture: Double?
+        var shutterSpeed: Double?
+        var iso: Double?
     }
 
-    /// Reads capture date + camera + lens in a single pass during the scan,
-    /// so the filter search can match them without re-opening every file.
+    /// Reads the metadata used by filtering and sorting in a single pass during
+    /// the scan, so interactive changes never have to re-open every file.
     static func scanInfo(for url: URL) -> ScanInfo {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
@@ -22,10 +25,16 @@ enum MetadataExtractor {
         let dateString = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
             ?? (exif?[kCGImagePropertyExifDateTimeDigitized] as? String)
             ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String)
+        let aperture = numericValue(exif?[kCGImagePropertyExifFNumber])
+        let shutterSpeed = numericValue(exif?[kCGImagePropertyExifExposureTime])
+        let iso = firstNumericValue(exif?[kCGImagePropertyExifISOSpeedRatings])
         return ScanInfo(
             captureDate: dateString.flatMap { exifDateFormatter.date(from: $0) },
             cameraModel: tiff?[kCGImagePropertyTIFFModel] as? String,
-            lensModel: exif?[kCGImagePropertyExifLensModel] as? String
+            lensModel: exif?[kCGImagePropertyExifLensModel] as? String,
+            aperture: aperture.flatMap { $0 > 0 ? $0 : nil },
+            shutterSpeed: shutterSpeed.flatMap { $0 > 0 ? $0 : nil },
+            iso: iso.flatMap { $0 > 0 ? $0 : nil }
         )
     }
 
@@ -57,20 +66,19 @@ enum MetadataExtractor {
         add("Camera", tiff[kCGImagePropertyTIFFModel] as? String)
         add("Lens", exif[kCGImagePropertyExifLensModel] as? String)
 
-        if let focal = exif[kCGImagePropertyExifFocalLength] as? Double {
+        if let focal = numericValue(exif[kCGImagePropertyExifFocalLength]) {
             add("Focal length", String(format: "%.0f mm", focal))
         }
-        if let fNumber = exif[kCGImagePropertyExifFNumber] as? Double {
+        if let fNumber = numericValue(exif[kCGImagePropertyExifFNumber]) {
             add("Aperture", String(format: "f/%.1f", fNumber))
         }
-        if let exposure = exif[kCGImagePropertyExifExposureTime] as? Double {
+        if let exposure = numericValue(exif[kCGImagePropertyExifExposureTime]) {
             add("Shutter", formatShutter(exposure))
         }
-        if let isoValues = exif[kCGImagePropertyExifISOSpeedRatings] as? [Any],
-           let iso = isoValues.first {
-            add("ISO", "\(iso)")
+        if let iso = firstNumericValue(exif[kCGImagePropertyExifISOSpeedRatings]) {
+            add("ISO", String(format: "%.0f", iso))
         }
-        if let bias = exif[kCGImagePropertyExifExposureBiasValue] as? Double, bias != 0 {
+        if let bias = numericValue(exif[kCGImagePropertyExifExposureBiasValue]), bias != 0 {
             add("Exposure comp.", String(format: "%+.1f EV", bias))
         } else if exif[kCGImagePropertyExifExposureBiasValue] != nil {
             add("Exposure comp.", "0 EV")
@@ -100,6 +108,21 @@ enum MetadataExtractor {
         }
         guard seconds > 0 else { return "—" }
         return "1/\(Int((1.0 / seconds).rounded()))s"
+    }
+
+    private static func numericValue(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+
+    /// ISO is normally an array in EXIF, but some encoders store a scalar.
+    /// Accept both shapes so filtering, sorting, and the Info panel agree.
+    private static func firstNumericValue(_ value: Any?) -> Double? {
+        if let values = value as? [Any] {
+            return values.lazy.compactMap(numericValue).first
+        }
+        return numericValue(value)
     }
 
     private static let exifDateFormatter: DateFormatter = {

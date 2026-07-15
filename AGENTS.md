@@ -25,6 +25,14 @@ extended attributes, ad-hoc signs, verifies there, then copies the result to
 Finder metadata may otherwise reappear between signing and verification. Still
 run `xattr -cr` after copying into `/Applications`.
 
+`VERSION` is the source of truth for the About-panel marketing version and
+build number. Every shipped release or update must use a new version/build pair
+with a matching entry in `CHANGELOG.md`; development changes stay in the
+current unreleased entry until it ships. `build_app.sh` deliberately refuses
+to package a pair missing from the history. History headings use
+`## <MARKETING_VERSION> (<BUILD_NUMBER>) — <DATE>`. Keep release tags in the
+form `v<MARKETING_VERSION>`.
+
 Always build against the current macOS SDK. Do not work around toolchain errors
 with an older SDK: doing so compiles out current SwiftUI features such as macOS
 26 liquid-glass toolbar styling.
@@ -72,7 +80,7 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/ExportManager.swift` | Copies keepers to a destination, collision-suffixing |
 | `Sources/Louppe/Models.swift` | `PhotoItem`, `Rating`, `PhotoFilter`, sidecar codables |
 | `Sources/Louppe/Views/RootView.swift` | Phase switch (welcome/scanning/session), `Color.appBackground` |
-| `Sources/Louppe/Views/WelcomeView.swift` | Start screen + scanning progress |
+| `Sources/Louppe/Views/WelcomeView.swift` | Start screen + cancellable scanning progress |
 | `Sources/Louppe/Views/SessionView.swift` | Toolbar (incl. sort menu), export sheet, **all single-key hotkeys** (`handleKey`) |
 | `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, file-type / camera / lens toggles |
 | `Sources/Louppe/Views/GalleryView.swift` | Gallery layout: Browser / photo / info panel |

@@ -23,7 +23,7 @@ struct RootView: View {
             case .welcome:
                 WelcomeView(store: store)
             case .scanning(let found):
-                ScanningView(found: found)
+                ScanningView(store: store, found: found)
             case .ready:
                 SessionView(store: store)
             }

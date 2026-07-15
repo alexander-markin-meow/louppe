@@ -64,16 +64,39 @@ width AppKit gives the lazy grid.
 
 ## Filtering and derived data
 
-`PhotoItem.searchableText` is locale-folded once during scanning. Each filter
-change creates one `PreparedPhotoFilter`, so query normalization and whole-day
-date bounds do not repeat per photo. Search typing is debounced by 150 ms.
+`PhotoItem.searchableText` is locale-folded once during scanning. Capture-day,
+aperture, shutter-duration, and ISO values are also cached on `PhotoItem`; do
+not reopen files when their filters or sorts change. Each filter change creates
+one `PreparedPhotoFilter`, so query normalization, whole-day date bounds, and
+numeric ranges are prepared before walking the photo list. Search typing is
+debounced by 150 ms. Camera-setting text edits use the same delay and commit
+all valid drafts in one filter assignment, avoiding repeated full-list walks
+while a value is being typed.
+
+The date and exposure controls are always visible. Their folder-wide
+minimum-to-maximum values are neutral: the corresponding internal filter flag
+is set only after a bound is narrowed, so unknown metadata remains visible in
+the default state. Re-scan keeps narrowed bounds but expands untouched ranges
+to the newly derived folder span.
+
+The multi-selection Info summary is built only from metadata and byte counts
+already cached on `PhotoItem`. Do not reopen every selected file to assemble
+its camera, lens, date range, size, or type lists.
 Before Clean Up presents or resolves targets, it flushes that debounce so the
 confirmation and filesystem operation use the filter text currently on screen.
+The rating-based Clean Up scope resolves from already-cached folder indices,
+visible indices, or the effective selection; changing it must not rescan files.
+
+An active folder scan is cooperatively cancellable from the scanning toolbar
+or Escape. Cancellation advances `scanGeneration` before returning to Welcome,
+so late progress, persistence reads, or partial scan results cannot re-enter
+the session after the user has left the scanning view.
 
 `SessionStore` maintains:
 
 - incremental Yes/No/undecided totals;
 - cached type/camera/lens counts and labels;
+- cached calendar-day counts and folder-wide aperture/shutter/ISO ranges;
 - a sorted index list reused by filter-only changes;
 - cached visible day groups and day-start indices.
 

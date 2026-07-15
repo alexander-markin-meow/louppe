@@ -5,14 +5,21 @@ struct PerformanceChecks {
     static func main() async throws {
         try preparedFilterMatchesFoldedMetadataTokens()
         try preparedFilterUsesWholeDayBounds()
+        try preparedFilterUsesSpecificDateCheckboxes()
+        try preparedFilterUsesInclusiveExposureRanges()
+        try neutralFullRangesKeepUnknownMetadataVisible()
+        try selectionSummaryKeepsEveryDistinctMetadataValue()
+        try metadataSortKeepsMissingValuesLast()
         try folderScannerHonorsCancellation()
+        try folderScannerStopsAfterProgressCancellation()
         try imageCacheKeyDoesNotTouchFilesystemAfterScan()
+        try cleanUpScopeResolvesExpectedCandidates()
         try linearRestoreMergePreservesOrderAndOmitsLostPhoto()
         try await olderSidecarSaveCannotOverwriteNewerSnapshot()
         try await emptySidecarSnapshotIsPersisted()
         try cleanUpPairRoundTripsThroughTrash()
         try cleanUpPairFailureRollsBackFirstFile()
-        print("Performance checks passed (9/9)")
+        print("Performance checks passed (16/16)")
     }
 
     private static func preparedFilterMatchesFoldedMetadataTokens() throws {
@@ -44,6 +51,159 @@ struct PerformanceChecks {
         try expect(PreparedPhotoFilter(filter, calendar: calendar).matches(item), "date range should include the whole final day")
     }
 
+    private static func preparedFilterUsesSpecificDateCheckboxes() throws {
+        let calendar = Calendar.current
+        guard let firstDay = calendar.date(from: DateComponents(year: 2026, month: 7, day: 14)),
+              let secondDay = calendar.date(from: DateComponents(year: 2026, month: 7, day: 15)),
+              let firstCapture = calendar.date(byAdding: .hour, value: 18, to: firstDay),
+              let secondCapture = calendar.date(byAdding: .hour, value: 9, to: secondDay) else {
+            throw CheckFailure("could not construct specific-date test values")
+        }
+        let first = makeItem(id: "FIRST.JPG", captureDate: firstCapture)
+        let second = makeItem(id: "SECOND.JPG", captureDate: secondCapture)
+        let unknown = makeItem(id: "UNKNOWN.JPG")
+        var filter = PhotoFilter()
+        filter.dateEnabled = true
+        filter.dateMode = .specificDates
+        filter.excludedDates = [calendar.startOfDay(for: secondDay)]
+        filter.excludesUnknownDate = true
+        let prepared = PreparedPhotoFilter(filter)
+        try expect(prepared.matches(first), "an included calendar day should remain visible")
+        try expect(!prepared.matches(second), "an unchecked calendar day should be excluded")
+        try expect(!prepared.matches(unknown), "the unknown-date checkbox should exclude undated photos")
+    }
+
+    private static func preparedFilterUsesInclusiveExposureRanges() throws {
+        let item = makeItem(id: "EXPOSURE.JPG", aperture: 2.8, shutter: 1 / 250, iso: 800)
+        var filter = PhotoFilter()
+        filter.apertureEnabled = true
+        filter.apertureFrom = 2.8
+        filter.apertureTo = 5.6
+        filter.shutterEnabled = true
+        filter.shutterFrom = 1 / 1000
+        filter.shutterTo = 1 / 250
+        filter.isoEnabled = true
+        filter.isoFrom = 100
+        filter.isoTo = 800
+        try expect(PreparedPhotoFilter(filter).matches(item), "exposure bounds should include both endpoints")
+
+        filter.isoTo = 799
+        try expect(!PreparedPhotoFilter(filter).matches(item), "a photo outside one active range should be excluded")
+        try expect(
+            !PreparedPhotoFilter(PhotoFilter(apertureEnabled: true, apertureFrom: 1, apertureTo: 16)).matches(makeItem(id: "NO-EXIF.JPG")),
+            "an active exposure filter should exclude missing metadata"
+        )
+    }
+
+    private static func neutralFullRangesKeepUnknownMetadataVisible() throws {
+        var filter = PhotoFilter()
+        filter.dateFrom = Date(timeIntervalSince1970: 1)
+        filter.dateTo = Date(timeIntervalSince1970: 2)
+        filter.apertureFrom = 1.4
+        filter.apertureTo = 16
+        filter.shutterFrom = 1 / 8000
+        filter.shutterTo = 30
+        filter.isoFrom = 64
+        filter.isoTo = 12800
+
+        try expect(filter.dateMode == .range, "date should default to range mode")
+        try expect(!filter.isActive, "folder-wide default ranges should be neutral")
+        try expect(
+            PreparedPhotoFilter(filter).matches(makeItem(id: "UNKNOWN-METADATA.JPG")),
+            "neutral full ranges should keep photos with unknown metadata visible"
+        )
+    }
+
+    private static func selectionSummaryKeepsEveryDistinctMetadataValue() throws {
+        let calendar = Calendar.current
+        guard let firstDay = calendar.date(from: DateComponents(year: 2026, month: 7, day: 1)),
+              let middleDay = calendar.date(from: DateComponents(year: 2026, month: 7, day: 2)),
+              let lastDay = calendar.date(from: DateComponents(year: 2026, month: 7, day: 3)),
+              let firstDate = calendar.date(byAdding: .hour, value: 10, to: firstDay),
+              let middleDate = calendar.date(byAdding: .hour, value: 14, to: middleDay),
+              let lastDate = calendar.date(byAdding: .hour, value: 20, to: lastDay) else {
+            throw CheckFailure("could not construct selection-summary dates")
+        }
+        let items = [
+            makeItem(
+                id: "A.JPG",
+                captureDate: firstDate,
+                camera: "Nikon Z8",
+                lens: "NIKKOR Z 50mm",
+                fileSize: 10
+            ),
+            makeItem(
+                id: "B.NEF",
+                captureDate: middleDate,
+                camera: "Sony α1",
+                lens: "FE 35mm F1.4 GM",
+                fileSize: 20
+            ),
+            makeItem(
+                id: "C.TIF",
+                captureDate: lastDate,
+                camera: "Canon EOS R5",
+                lens: "RF 85mm F1.2 L",
+                fileSize: 30
+            ),
+            makeItem(
+                id: "D.NEF",
+                pairedURL: URL(fileURLWithPath: "/tmp/D.JPG"),
+                camera: "Fujifilm GFX100 II",
+                lens: "GF55mmF1.7 R WR",
+                fileSize: 40,
+                pairedFileSize: 5
+            ),
+        ]
+
+        let summary = PhotoSelectionSummary(items: items)
+        try expect(summary.count == 4, "selection summary should retain the selected item count")
+        try expect(
+            Set(summary.cameras) == ["Nikon Z8", "Sony α1", "Canon EOS R5", "Fujifilm GFX100 II"],
+            "selection summary should retain every distinct camera"
+        )
+        try expect(
+            Set(summary.lenses) == ["NIKKOR Z 50mm", "FE 35mm F1.4 GM", "RF 85mm F1.2 L", "GF55mmF1.7 R WR"],
+            "selection summary should retain every distinct lens"
+        )
+        try expect(summary.captureDayRange == firstDay...lastDay, "selection summary should retain only the capture-day span")
+        try expect(summary.unknownDateCount == 1, "selection summary should count missing capture dates")
+        try expect(summary.totalBytes == 105, "selection summary should include paired-file bytes")
+        try expect(
+            Set(summary.fileTypes) == ["JPEG", "RAW", "TIFF", "RAW + JPEG"],
+            "selection summary should retain every selected file type"
+        )
+
+        guard let laterSameDay = calendar.date(byAdding: .hour, value: 8, to: firstDate) else {
+            throw CheckFailure("could not construct same-day summary date")
+        }
+        let sameDay = PhotoSelectionSummary(items: [
+            makeItem(id: "SAME-1.JPG", captureDate: firstDate),
+            makeItem(id: "SAME-2.JPG", captureDate: laterSameDay),
+        ])
+        try expect(
+            sameDay.captureDayRange == firstDay...firstDay,
+            "same-day selections should collapse to one calendar date"
+        )
+    }
+
+    private static func metadataSortKeepsMissingValuesLast() throws {
+        let low = makeItem(id: "LOW.JPG", captureDate: Date(timeIntervalSince1970: 1), iso: 100)
+        let high = makeItem(id: "HIGH.JPG", captureDate: Date(timeIntervalSince1970: 2), iso: 3200)
+        let unknown = makeItem(id: "UNKNOWN.JPG", captureDate: Date(timeIntervalSince1970: 0))
+
+        var sort = PhotoSort(key: .iso, ascending: true)
+        try expect(
+            [unknown, high, low].sorted(by: sort.areInOrder).map(\.id) == ["LOW.JPG", "HIGH.JPG", "UNKNOWN.JPG"],
+            "ascending numeric metadata sort should order values and put missing data last"
+        )
+        sort.ascending = false
+        try expect(
+            [low, unknown, high].sorted(by: sort.areInOrder).map(\.id) == ["HIGH.JPG", "LOW.JPG", "UNKNOWN.JPG"],
+            "descending numeric metadata sort should still put missing data last"
+        )
+    }
+
     private static func linearRestoreMergePreservesOrderAndOmitsLostPhoto() throws {
         let originals = (0..<5).map { makeItem(id: "\($0).JPG") }
         let survivors = [originals[0], originals[2], originals[4]]
@@ -59,6 +219,24 @@ struct PerformanceChecks {
         )
     }
 
+    private static func cleanUpScopeResolvesExpectedCandidates() throws {
+        let all = 0..<6
+        let filtered = [1, 3, 5]
+        let selected: Set<Int> = [4, 2]
+        try expect(
+            CleanUpScope.all.candidateIndices(all: all, filtered: filtered, selected: selected) == [0, 1, 2, 3, 4, 5],
+            "all-photo Clean Up scope should consider the whole folder"
+        )
+        try expect(
+            CleanUpScope.filtered.candidateIndices(all: all, filtered: filtered, selected: selected) == filtered,
+            "filtered Clean Up scope should consider only visible photos"
+        )
+        try expect(
+            CleanUpScope.selected.candidateIndices(all: all, filtered: filtered, selected: selected) == [2, 4],
+            "selected Clean Up scope should consider only the effective selection"
+        )
+    }
+
     private static func folderScannerHonorsCancellation() throws {
         let folder = try disposableFolder(named: "ScanCancellation")
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -69,6 +247,26 @@ struct PerformanceChecks {
             didCancel = true
         }
         try expect(didCancel, "superseded folder scan should stop immediately")
+    }
+
+    private static func folderScannerStopsAfterProgressCancellation() throws {
+        let folder = try disposableFolder(named: "ScanProgressCancellation")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for index in 0..<30 {
+            let url = folder.appendingPathComponent("PHOTO_\(index).JPG")
+            try Data("placeholder".utf8).write(to: url)
+        }
+
+        var shouldCancel = false
+        var didCancel = false
+        do {
+            _ = try FolderScanner.scan(folder, isCancelled: { shouldCancel }) { found in
+                if found >= 25 { shouldCancel = true }
+            }
+        } catch is CancellationError {
+            didCancel = true
+        }
+        try expect(didCancel, "an in-progress folder scan should stop after cancellation")
     }
 
     private static func imageCacheKeyDoesNotTouchFilesystemAfterScan() throws {
@@ -168,7 +366,12 @@ struct PerformanceChecks {
         captureDate: Date? = nil,
         camera: String? = nil,
         lens: String? = nil,
-        modificationDate: Date? = nil
+        aperture: Double? = nil,
+        shutter: Double? = nil,
+        iso: Double? = nil,
+        modificationDate: Date? = nil,
+        fileSize: Int64 = 1,
+        pairedFileSize: Int64 = 0
     ) -> PhotoItem {
         PhotoItem(
             id: id,
@@ -177,8 +380,12 @@ struct PerformanceChecks {
             captureDate: captureDate,
             cameraModel: camera,
             lensModel: lens,
+            aperture: aperture,
+            shutterSpeed: shutter,
+            iso: iso,
             primaryModificationDate: modificationDate,
-            fileSize: 1
+            fileSize: fileSize,
+            pairedFileSize: pairedFileSize
         )
     }
 

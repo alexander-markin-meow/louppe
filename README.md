@@ -39,11 +39,31 @@ Pick a folder (an SD card works), review, then press **⌘E** to export.
 | ⌘O | Open a different folder |
 | ⌘A | Select all photos (respects the filter) |
 | ⌘⇧← / ⌘⇧→ | Select from the current photo to the first / last |
-| Esc | Clear the selection |
+| Esc | Cancel scanning, or clear the active photo selection |
 | ⌘⌫ | Move selected photo(s) to the Trash — instant, no dialog (⌘Z restores) |
 
 In the **Grid view**: single-click a photo to cycle its rating
 (undecided → yes → no), double-click to open it big in the main view.
+
+While a folder is being scanned, Louppe shows its name, full path, and running
+photo count. Use **Cancel Scan** in the toolbar or press **Esc** to stop the
+scan and return to the start screen; partial scan results are discarded.
+
+### Filtering and sorting
+
+The toolbar filter opens with Date in Range mode and every date/exposure range
+set to the folder's full minimum-to-maximum span. That neutral state shows all
+photos, including files with missing metadata; narrowing a range activates it.
+Date can instead select individual calendar days, with an explicit checkbox
+for files whose date is unknown. Aperture, shutter speed, and ISO accept
+inclusive typed ranges; shutter values can use photographer notation such as
+`1/1000` or `2s`. File type, camera, and lens remain available as checkbox
+lists. Different sections combine, so a date, camera, and ISO range can all be
+active at once.
+
+The adjacent sort menu orders the visible photos by date (the default), name,
+file type, camera, lens, aperture, shutter speed, or ISO. Photos missing the
+chosen metadata stay at the end in either direction.
 
 ### Selecting several photos
 
@@ -57,7 +77,9 @@ In the **Grid view**: single-click a photo to cycle its rating
 - With several photos selected, **F** and **D** rate them all at once and jump
   to the next undecided photo — one ⌘Z undoes the whole batch. In the Light
   Table, clicking any photo inside the selection cycles the rating for all of
-  them. The toolbar counter shows how many photos are selected.
+  them. The toolbar counter shows how many photos are selected. The Info panel
+  switches to a selection summary with every camera, lens, capture-date span,
+  combined file size, and file type represented in the selection.
 - **Esc**, a plain click, or an arrow key drops the selection.
 
 ### Cleaning up the folder
@@ -80,11 +102,13 @@ to the macOS Trash — never deleted permanently — and a
 RAW+JPEG pair always moves together. Press **⌘Z** to put everything back in
 place, or recover the files from the Trash later.
 
-When a filter is active, a **Limit to Filtered Photos** switch appears in the
-clean-up menu. Leave it on (the default) to clean only among the photos the
-filter shows; switch it off to consider every photo in the folder, including
-hidden ones. Either way, the confirmation message spells out exactly which
-photos are affected before anything moves.
+The clean-up menu has an inline **For “No” / “Yes” Actions** choice with live
+counts for **All Photos**, **Filtered**, and **Selected**.
+**Filtered** is the default; with no active filter it naturally contains
+the whole folder. This choice affects only the two rating-based actions — the
+top **Move Selected to Trash** command always moves the complete selection.
+The confirmation message spells out exactly which photos are considered before
+anything moves.
 
 ### Where things are stored
 
@@ -100,6 +124,12 @@ Requires Apple's Command Line Tools (already installed). From this folder:
 ```
 ./build_app.sh
 ```
+
+Release versions come from [`VERSION`](VERSION), and the release build verifies
+that [`CHANGELOG.md`](CHANGELOG.md) contains the same marketing version and
+build number before packaging the app. Every shipped release or update must
+have its own version/build pair and history entry; development changes remain
+under the current unreleased version until that release actually ships.
 
 The fresh app appears at `dist/Louppe.app`. Copy it to `/Applications` to install.
 
@@ -118,7 +148,7 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `CleanUpWorker.swift` — background Trash/restore operations and linear merge
 - `FolderScanner.swift` — recursive folder scan, RAW+JPEG pairing, sorting
 - `ImagePipeline.swift` — image decoding (ImageIO), thumbnail caches, prefetching
-- `MetadataExtractor.swift` — EXIF extraction (capture dates, info panel fields)
+- `MetadataExtractor.swift` — EXIF extraction (dates, exposure settings, info panel fields)
 - `ExportManager.swift` — copying keepers, filename collision handling
 - `Models.swift` — the photo item and session file formats
 - `Views/` — welcome screen, session toolbar + hotkeys, Gallery view, Browser,

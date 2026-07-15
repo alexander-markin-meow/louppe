@@ -99,19 +99,27 @@ struct SessionView: View {
         case .selection:
             parts.append("Only the selected photos will leave the folder; everything else stays.")
         case .trashNo:
-            parts.append("Photos marked “Yes” and unrated photos stay in the folder.")
+            parts.append("Among the photos being considered, photos marked “Yes” and unrated photos stay in the folder.")
         case .keepOnlyYes:
-            parts.append("Only photos marked “Yes” stay in the folder.")
+            parts.append("Among the photos being considered, only those marked “Yes” stay in the folder.")
         }
-        // With a filter active, spell out the scope of the rating-based
-        // options so nothing hidden is trashed (or spared) by surprise.
-        // (A selection is already explicit — no scope to explain.)
+        // Spell out the rating-based scope so nothing outside it is trashed
+        // (or spared) by surprise. A direct selection is already explicit.
         if mode != .selection {
-            if store.cleanUpScopeIsFiltered {
-                let hidden = store.items.count - store.visibleIndices.count
-                parts.append("Only the \(store.visibleIndices.count) photos the filter shows are considered — the \(hidden) hidden ones aren't touched.")
-            } else if store.filter.isActive {
-                parts.append("All \(store.items.count) photos in the folder are considered, including the ones the filter currently hides.")
+            switch store.cleanUpScope {
+            case .all:
+                if store.filter.isActive {
+                    parts.append("All \(store.items.count) photos in the folder are considered, including the ones the filter currently hides.")
+                }
+            case .filtered:
+                if store.filter.isActive {
+                    let hidden = store.items.count - store.visibleIndices.count
+                    parts.append("Only the \(store.visibleIndices.count) photos the filter shows are considered — the \(hidden) hidden ones aren't touched.")
+                }
+            case .selected:
+                let count = store.cleanUpScopeCount(for: .selected)
+                let phrase = count == 1 ? "1 selected photo is" : "\(count) selected photos are"
+                parts.append("Only \(phrase) considered — every unselected photo stays in the folder.")
             }
         }
         return parts.joined(separator: "\n")
@@ -123,7 +131,9 @@ struct SessionView: View {
 
     private var subtitle: String {
         guard !store.items.isEmpty else { return "" }
-        let position = (store.visibleIndices.firstIndex(of: store.currentIndex) ?? 0) + 1
+        let position = store.visibleIndices.isEmpty
+            ? 0
+            : (store.visibleIndices.firstIndex(of: store.currentIndex) ?? 0) + 1
         var text = "\(position) of \(store.visibleIndices.count)"
         if store.filter.isActive {
             text += " (of \(store.items.count) total)"
@@ -190,8 +200,8 @@ struct SessionView: View {
     // MARK: - Toolbar
 
     /// Toolbar order and Liquid Glass groups (2026-07-15):
-    /// {folder · clean up} {filter · sort · view picker} = status =
-    /// {undo · clear all} {browser · info} {export}.
+    /// {folder} {filter · sort · view picker} = status =
+    /// {undo · clear all} {browser · info} {clean up} {export}.
     /// On macOS 26, fixed ToolbarSpacers are Apple's native separator between
     /// neighbouring glass groups. Earlier systems keep the same control order.
     @ToolbarContentBuilder
@@ -207,22 +217,6 @@ struct SessionView: View {
             }
             .disabled(store.isCleaningUp)
             .help("Choose another photo folder (⌘O)")
-
-            // The menu body is shared with the File menu. Clean Up is the
-            // only feature that touches originals, and only moves them to
-            // the macOS Trash after confirmation.
-            Menu {
-                CleanUpMenuItems(store: store)
-            } label: {
-                Image(systemName: "document.on.trash")
-                    // Toolbar Menu styling ignores imageScale on macOS 26;
-                    // scale the drawing while retaining the normal hit area.
-                    .scaleEffect(0.78)
-            }
-            .disabled(store.isCleaningUp)
-            .menuIndicator(.hidden)
-            .tint(Color.primary)
-            .help("Choose photos to move to the Trash")
         }
 
         if #available(macOS 26.0, *) {
@@ -249,11 +243,20 @@ struct SessionView: View {
                 Picker("Sort by", selection: $store.sort.key) {
                     Text("Date taken").tag(PhotoSort.Key.captureDate)
                     Text("Name").tag(PhotoSort.Key.name)
+                    Text("File type").tag(PhotoSort.Key.fileType)
+                    Text("Camera").tag(PhotoSort.Key.camera)
+                    Text("Lens").tag(PhotoSort.Key.lens)
+                    Text("Aperture").tag(PhotoSort.Key.aperture)
+                        .disabled(store.apertureRange == nil)
+                    Text("Shutter speed").tag(PhotoSort.Key.shutterSpeed)
+                        .disabled(store.shutterRange == nil)
+                    Text("ISO").tag(PhotoSort.Key.iso)
+                        .disabled(store.isoRange == nil)
                 }
                 Divider()
                 Picker("Order", selection: $store.sort.ascending) {
-                    Text("Ascending").tag(true)
-                    Text("Descending").tag(false)
+                    Text(store.sort.key.ascendingLabel).tag(true)
+                    Text(store.sort.key.descendingLabel).tag(false)
                 }
             } label: {
                 Image(systemName: "arrow.up.arrow.down")
@@ -262,7 +265,7 @@ struct SessionView: View {
             .menuIndicator(.hidden)
             // Keep the glyph neutral — menus inherit the purple accent.
             .tint(Color.primary)
-            .help("Sort photos by date or name")
+            .help("Sort photos by date, name, or metadata")
 
             Picker("View", selection: $store.viewMode) {
                 Image(systemName: "photo").tag(ViewMode.gallery)
@@ -319,6 +322,32 @@ struct SessionView: View {
                 Image(systemName: "info.circle")
             }
             .help("Show or hide photo information (W)")
+        }
+
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed)
+        }
+
+        cleanUpAndExportToolbarContent
+    }
+
+    /// Kept as a nested builder so the parent toolbar stays below Swift 5.9's
+    /// result-builder arity limit while these remain two distinct capsules.
+    @ToolbarContentBuilder
+    private var cleanUpAndExportToolbarContent: some ToolbarContent {
+        // Clean Up sits in its own capsule between inspection controls and
+        // Export. The menu body is shared with the File menu; it is the only
+        // feature that can move originals, and only ever to the macOS Trash.
+        ToolbarItem {
+            Menu {
+                CleanUpMenuItems(store: store)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .disabled(store.isCleaningUp)
+            .menuIndicator(.hidden)
+            .tint(Color.primary)
+            .help("Choose photos to move to the Trash")
         }
 
         if #available(macOS 26.0, *) {
@@ -475,7 +504,7 @@ struct SessionView: View {
     }
 }
 
-/// The Clean Up menu body — the three trash actions plus the scope toggle —
+/// The Clean Up menu body — the three trash actions plus the inline scope —
 /// shared by the toolbar menu and the File menu so the two never drift.
 struct CleanUpMenuItems: View {
     @ObservedObject var store: SessionStore
@@ -486,6 +515,17 @@ struct CleanUpMenuItems: View {
         }
         .disabled(store.isCleaningUp || !store.hasCleanUpTargets(for: .selection))
         Divider()
+        Picker("For “No” / “Yes” Actions", selection: $store.cleanUpScope) {
+            cleanUpScopeLabel("All Photos", scope: .all)
+                .tag(CleanUpScope.all)
+            cleanUpScopeLabel("Filtered", scope: .filtered)
+                .tag(CleanUpScope.filtered)
+            cleanUpScopeLabel("Selected", scope: .selected)
+                .tag(CleanUpScope.selected)
+        }
+        .pickerStyle(.inline)
+        .disabled(store.isCleaningUp)
+        Divider()
         Button("Move “No” to Trash…") {
             store.requestCleanUp(.trashNo)
         }
@@ -494,11 +534,9 @@ struct CleanUpMenuItems: View {
             store.requestCleanUp(.keepOnlyYes)
         }
         .disabled(store.isCleaningUp || !store.hasCleanUpTargets(for: .keepOnlyYes))
-        // Scope toggle — only meaningful while a filter is active (without
-        // one, "filtered" and "everything" are the same set).
-        if store.filter.isActive {
-            Divider()
-            Toggle("Limit to Filtered Photos", isOn: $store.cleanUpFilteredOnly)
-        }
+    }
+
+    private func cleanUpScopeLabel(_ title: String, scope: CleanUpScope) -> Text {
+        Text("\(title) (\(store.cleanUpScopeCount(for: scope)))")
     }
 }

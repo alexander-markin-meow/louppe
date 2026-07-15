@@ -91,17 +91,59 @@ struct WelcomeView: View {
 
 /// Shown while a folder scan is in progress.
 struct ScanningView: View {
+    @ObservedObject var store: SessionStore
     let found: Int
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 10) {
             ProgressView()
                 .controlSize(.large)
-            Text(found > 0 ? "Scanning… \(found) photos found" : "Scanning folder…")
+
+            Text("Scanning “\(folderName)”…")
+                .font(.headline)
+
+            Text(progressText)
                 .foregroundStyle(.secondary)
+
+            Text(folderPath)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+                .frame(maxWidth: 640)
         }
-        .toolbar { LaunchToolbarTitle() }
+        .padding(.horizontal, 40)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button {
+                    store.cancelScan()
+                } label: {
+                    Label("Cancel Scan", systemImage: "xmark")
+                        .labelStyle(.titleAndIcon)
+                }
+                .keyboardShortcut(.cancelAction)
+                .help("Cancel scanning and return to the start screen (Esc)")
+            }
+            LaunchToolbarTitle()
+        }
         .navigationTitle("")
+        .onExitCommand {
+            store.cancelScan()
+        }
+    }
+
+    private var folderName: String {
+        guard let folder = store.sourceFolder else { return "Folder" }
+        return folder.lastPathComponent.isEmpty ? folder.path : folder.lastPathComponent
+    }
+
+    private var folderPath: String {
+        store.sourceFolder?.path ?? ""
+    }
+
+    private var progressText: String {
+        guard found > 0 else { return "Looking for photos…" }
+        return found == 1 ? "1 photo found" : "\(found.formatted()) photos found"
     }
 }
 

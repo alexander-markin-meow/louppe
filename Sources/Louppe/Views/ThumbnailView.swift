@@ -1,6 +1,8 @@
 import SwiftUI
 import AppKit
 
+private let thumbnailCornerRadius: CGFloat = 6
+
 /// Async-loading thumbnail tile with a yes/no/undecided badge overlay.
 /// The whole photo fits inside the tile (letterboxed, never cropped).
 struct ThumbnailView: View {
@@ -34,9 +36,12 @@ struct ThumbnailView: View {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: thumbnailCornerRadius)
+                        )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: thumbnailCornerRadius)
                         .fill(Color(nsColor: .quaternaryLabelColor))
                         .overlay {
                             Image(systemName: "photo")
@@ -45,7 +50,7 @@ struct ThumbnailView: View {
                 }
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: thumbnailCornerRadius)
                     .strokeBorder(borderColor, lineWidth: 3)
             }
 
@@ -71,7 +76,7 @@ struct UnsupportedThumbnail: View {
     let item: PhotoItem
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 6)
+        RoundedRectangle(cornerRadius: thumbnailCornerRadius)
             .fill(Color(nsColor: .quaternaryLabelColor))
             .overlay {
                 VStack(spacing: 6) {

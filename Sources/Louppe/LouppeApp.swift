@@ -28,8 +28,8 @@ struct LouppeApp: App {
         // freezing a custom or plain style in the app.
         .windowStyle(.automatic)
         .commands {
-            // Standard About panel (icon, name, version, copyright) with a
-            // custom credits section: author, contact email, GitHub link.
+            // Standard About panel reads its version from the release bundle
+            // and adds credits plus a link to the complete release history.
             CommandGroup(replacing: .appInfo) {
                 Button("About Louppe") {
                     NSApp.orderFrontStandardAboutPanel(options: [.credits: Self.aboutCredits])
@@ -113,6 +113,11 @@ struct LouppeApp: App {
 
         credits.append(NSAttributedString(
             string: "Fast photo culling for photographers.\n\n", attributes: base))
+
+        link[.link] = URL(string: "https://github.com/alexander-markin-meow/louppe/releases")!
+        credits.append(NSAttributedString(string: "Version History", attributes: link))
+        credits.append(NSAttributedString(string: "\n\n", attributes: base))
+
         credits.append(NSAttributedString(
             string: "Created by Alex Markin\n", attributes: base))
 
