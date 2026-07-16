@@ -57,13 +57,14 @@ photos, including files with missing metadata; narrowing a range activates it.
 Date can instead select individual calendar days, with an explicit checkbox
 for files whose date is unknown. Aperture, shutter speed, and ISO accept
 inclusive typed ranges; shutter values can use photographer notation such as
-`1/1000` or `2s`. File type, camera, and lens remain available as checkbox
-lists. Different sections combine, so a date, camera, and ISO range can all be
-active at once.
+`1/1000` or `2s`. Subfolder, file type, camera, and lens remain available as
+checkbox lists; the subfolder list includes a **None** entry for files lying
+directly in the source folder. Different sections combine, so a date, camera,
+and ISO range can all be active at once.
 
 The adjacent sort menu orders the visible photos by date (the default), name,
-file type, camera, lens, aperture, shutter speed, or ISO. Photos missing the
-chosen metadata stay at the end in either direction.
+subfolder, file type, camera, lens, aperture, shutter speed, or ISO. Photos
+missing the chosen metadata stay at the end in either direction.
 
 ### Selecting several photos
 

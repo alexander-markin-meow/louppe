@@ -28,6 +28,9 @@ struct PhotoItem: Identifiable, Sendable {
     /// match them without re-opening every file.
     let cameraModel: String?
     let lensModel: String?
+    /// Directory part of `id` — the subfolder path relative to the source
+    /// folder. Nil for files lying directly in the source folder.
+    let subfolder: String?
     /// Exposure metadata is cached during the folder scan. Shutter speed is
     /// stored as exposure duration in seconds; aperture and ISO are numeric.
     let aperture: Double?
@@ -64,6 +67,8 @@ struct PhotoItem: Identifiable, Sendable {
     ) {
         let displayName = primaryURL.lastPathComponent
         let fileTypeLabel = Self.makeFileTypeLabel(primaryURL: primaryURL, pairedURL: pairedURL)
+        let subfolderPath = (id as NSString).deletingLastPathComponent
+        let subfolder = subfolderPath.isEmpty ? nil : subfolderPath
         self.id = id
         self.primaryURL = primaryURL
         self.pairedURL = pairedURL
@@ -73,6 +78,7 @@ struct PhotoItem: Identifiable, Sendable {
         self.captureDay = captureDate.map { Calendar.current.startOfDay(for: $0) }
         self.cameraModel = cameraModel
         self.lensModel = lensModel
+        self.subfolder = subfolder
         self.aperture = aperture
         self.shutterSpeed = shutterSpeed
         self.iso = iso
@@ -84,6 +90,7 @@ struct PhotoItem: Identifiable, Sendable {
 
         var parts = [displayName, fileTypeLabel]
         if let paired = pairedURL?.lastPathComponent { parts.append(paired) }
+        if let subfolder { parts.append(subfolder) }
         if let cameraModel { parts.append(cameraModel) }
         if let lensModel { parts.append(lensModel) }
         if let captureDate { parts.append(Self.searchDateFormatter.string(from: captureDate)) }
@@ -115,6 +122,9 @@ struct PhotoItem: Identifiable, Sendable {
     /// (screenshots, videos…) collect under "Unknown" so they stay filterable.
     var cameraLabel: String { cameraModel ?? "Unknown" }
     var lensLabel: String { lensModel ?? "Unknown" }
+    /// Root-level files collect under "None", the filter's explicit option
+    /// for photos lying directly in the source folder.
+    var subfolderLabel: String { subfolder ?? "None" }
 
     var allURLs: [URL] {
         var urls = [primaryURL]
@@ -234,6 +244,7 @@ struct PhotoSort: Equatable {
     enum Key: Hashable {
         case captureDate
         case name
+        case subfolder
         case fileType
         case camera
         case lens
@@ -244,7 +255,7 @@ struct PhotoSort: Equatable {
         var ascendingLabel: String {
             switch self {
             case .captureDate: return "Oldest first"
-            case .name, .fileType, .camera, .lens: return "A–Z"
+            case .name, .subfolder, .fileType, .camera, .lens: return "A–Z"
             case .aperture: return "Widest first"
             case .shutterSpeed: return "Fastest first"
             case .iso: return "Lowest first"
@@ -254,7 +265,7 @@ struct PhotoSort: Equatable {
         var descendingLabel: String {
             switch self {
             case .captureDate: return "Newest first"
-            case .name, .fileType, .camera, .lens: return "Z–A"
+            case .name, .subfolder, .fileType, .camera, .lens: return "Z–A"
             case .aperture: return "Narrowest first"
             case .shutterSpeed: return "Slowest first"
             case .iso: return "Highest first"
@@ -274,6 +285,10 @@ struct PhotoSort: Equatable {
             }
         case .name:
             return namesInOrder(a, b, ascending: ascending)
+        case .subfolder:
+            return optionalStringsInOrder(a.subfolder, b.subfolder, ascending: ascending) {
+                dateThenNameInOrder(a, b)
+            }
         case .fileType:
             return stringsInOrder(a.fileTypeLabel, b.fileTypeLabel, ascending: ascending) {
                 dateThenNameInOrder(a, b)
@@ -405,6 +420,8 @@ struct PhotoFilter: Equatable {
     /// Same exclusion pattern for camera and lens labels.
     var excludedCameras: Set<String> = []
     var excludedLenses: Set<String> = []
+    /// Same exclusion pattern for subfolder labels ("None" = the folder root).
+    var excludedSubfolders: Set<String> = []
 
     var isActive: Bool {
         !searchText.trimmingCharacters(in: .whitespaces).isEmpty
@@ -415,6 +432,7 @@ struct PhotoFilter: Equatable {
             || !excludedTypes.isEmpty
             || !excludedCameras.isEmpty
             || !excludedLenses.isEmpty
+            || !excludedSubfolders.isEmpty
     }
 
 }
@@ -425,6 +443,7 @@ struct PreparedPhotoFilter {
     let excludedTypes: Set<String>
     let excludedCameras: Set<String>
     let excludedLenses: Set<String>
+    let excludedSubfolders: Set<String>
     let dateRange: Range<Date>?
     let usesSpecificDates: Bool
     let excludedDates: Set<Date>
@@ -438,6 +457,7 @@ struct PreparedPhotoFilter {
         excludedTypes = filter.excludedTypes
         excludedCameras = filter.excludedCameras
         excludedLenses = filter.excludedLenses
+        excludedSubfolders = filter.excludedSubfolders
         usesSpecificDates = filter.dateEnabled && filter.dateMode == .specificDates
         excludedDates = filter.excludedDates
         excludesUnknownDate = filter.excludesUnknownDate
@@ -470,6 +490,7 @@ struct PreparedPhotoFilter {
         if excludedTypes.contains(item.fileTypeLabel) { return false }
         if excludedCameras.contains(item.cameraLabel) { return false }
         if excludedLenses.contains(item.lensLabel) { return false }
+        if excludedSubfolders.contains(item.subfolderLabel) { return false }
         if let dateRange {
             guard let date = item.captureDate, dateRange.contains(date) else { return false }
         }

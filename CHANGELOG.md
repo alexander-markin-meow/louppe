@@ -5,6 +5,13 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
+## 1.6.0 (8) — 2026-07-16
+
+- Added subfolder support to filtering and sorting: the filter popover lists
+  every subfolder of the opened folder (plus **None** for files lying directly
+  in it) as checkboxes with photo counts, and the sort menu gains a
+  **Subfolder** option between Name and File type.
+
 ## 1.5.0 (7) — 2026-07-15
 
 - Expanded filtering with automatic date and exposure ranges, specific capture

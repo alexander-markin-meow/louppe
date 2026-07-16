@@ -82,7 +82,7 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Views/RootView.swift` | Phase switch (welcome/scanning/session), `Color.appBackground` |
 | `Sources/Louppe/Views/WelcomeView.swift` | Start screen + cancellable scanning progress |
 | `Sources/Louppe/Views/SessionView.swift` | Toolbar (incl. sort menu), export sheet, **all single-key hotkeys** (`handleKey`) |
-| `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, file-type / camera / lens toggles |
+| `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, subfolder / file-type / camera / lens toggles |
 | `Sources/Louppe/Views/GalleryView.swift` | Gallery layout: Browser / photo / info panel |
 | `Sources/Louppe/Views/BrowserView.swift` | Optional vertical thumbnail Browser with day separators |
 | `Sources/Louppe/Views/GridView.swift` | Grid view, day-grouped rows, click-to-rate, rubber-band selection |

@@ -122,6 +122,7 @@ final class SessionStore: ObservableObject {
     @Published private(set) var availableTypes: [String] = []
     @Published private(set) var availableCameras: [String] = []
     @Published private(set) var availableLenses: [String] = []
+    @Published private(set) var availableSubfolders: [String] = []
     @Published private(set) var availableCaptureDates: [Date] = []
     @Published private(set) var captureDateRange: ClosedRange<Date>?
     @Published private(set) var apertureRange: ClosedRange<Double>?
@@ -130,6 +131,7 @@ final class SessionStore: ObservableObject {
     @Published private(set) var typeCounts: [String: Int] = [:]
     @Published private(set) var cameraCounts: [String: Int] = [:]
     @Published private(set) var lensCounts: [String: Int] = [:]
+    @Published private(set) var subfolderCounts: [String: Int] = [:]
     @Published private(set) var captureDateCounts: [Date: Int] = [:]
     @Published private(set) var unknownDateCount = 0
 
@@ -239,6 +241,7 @@ final class SessionStore: ObservableObject {
         var types: [String: Int] = [:]
         var cameras: [String: Int] = [:]
         var lenses: [String: Int] = [:]
+        var subfolders: [String: Int] = [:]
         var dates: [Date: Int] = [:]
         var unknownDates = 0
         var minimumAperture: Double?
@@ -256,6 +259,7 @@ final class SessionStore: ObservableObject {
             types[item.fileTypeLabel, default: 0] += 1
             cameras[item.cameraLabel, default: 0] += 1
             lenses[item.lensLabel, default: 0] += 1
+            subfolders[item.subfolderLabel, default: 0] += 1
             if let day = item.captureDay {
                 dates[day, default: 0] += 1
             } else {
@@ -278,9 +282,17 @@ final class SessionStore: ObservableObject {
         typeCounts = types
         cameraCounts = cameras
         lensCounts = lenses
+        subfolderCounts = subfolders
         availableTypes = types.keys.sorted()
         availableCameras = cameras.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         availableLenses = lenses.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        // "None" (the folder root) always lists last, like the date list's
+        // "Unknown date" entry.
+        var subfolderLabels = subfolders.keys
+            .filter { $0 != "None" }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        if subfolders["None"] != nil { subfolderLabels.append("None") }
+        availableSubfolders = subfolderLabels
         availableCaptureDates = dates.keys.sorted()
         captureDateCounts = dates
         unknownDateCount = unknownDates
@@ -309,6 +321,7 @@ final class SessionStore: ObservableObject {
         updated.excludedTypes.formIntersection(availableTypes)
         updated.excludedCameras.formIntersection(availableCameras)
         updated.excludedLenses.formIntersection(availableLenses)
+        updated.excludedSubfolders.formIntersection(availableSubfolders)
         updated.excludedDates.formIntersection(availableCaptureDates)
 
         if let available = captureDateRange {
@@ -421,6 +434,7 @@ final class SessionStore: ObservableObject {
         availableTypes = []
         availableCameras = []
         availableLenses = []
+        availableSubfolders = []
         availableCaptureDates = []
         captureDateRange = nil
         apertureRange = nil
@@ -429,6 +443,7 @@ final class SessionStore: ObservableObject {
         typeCounts = [:]
         cameraCounts = [:]
         lensCounts = [:]
+        subfolderCounts = [:]
         captureDateCounts = [:]
         unknownDateCount = 0
     }

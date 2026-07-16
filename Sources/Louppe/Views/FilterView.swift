@@ -7,6 +7,7 @@ struct FilterView: View {
 
     @State private var dateExpanded = true
     @State private var cameraSettingsExpanded = false
+    @State private var subfoldersExpanded = true
     @State private var fileTypesExpanded = true
     @State private var camerasExpanded = false
     @State private var lensesExpanded = false
@@ -34,6 +35,11 @@ struct FilterView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     dateSection
+
+                    if store.availableSubfolders.count > 1 {
+                        Divider()
+                        subfoldersSection
+                    }
 
                     Divider()
                     fileTypesSection
@@ -246,6 +252,18 @@ struct FilterView: View {
     }
 
     // MARK: - Facet sections
+
+    private var subfoldersSection: some View {
+        FilterDisclosureSection(title: "Subfolders", isExpanded: $subfoldersExpanded) {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(store.availableSubfolders, id: \.self) { subfolder in
+                    Toggle(isOn: exclusionBinding(subfolder, \.excludedSubfolders)) {
+                        labeledCount(subfolder, store.subfolderCounts[subfolder, default: 0])
+                    }
+                }
+            }
+        }
+    }
 
     private var fileTypesSection: some View {
         FilterDisclosureSection(title: "File types", isExpanded: $fileTypesExpanded) {

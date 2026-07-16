@@ -235,7 +235,7 @@ struct SessionView: View {
             .popover(isPresented: $store.isFilterPresented, arrowEdge: .bottom) {
                 FilterView(store: store)
             }
-            .help("Filter photos by metadata, date, type, camera, or lens")
+            .help("Filter photos by metadata, date, subfolder, type, camera, or lens")
 
             // A native menu with check-marked pickers, like Finder's sort
             // menu. It only reorders what's shown and never touches ratings.
@@ -243,6 +243,8 @@ struct SessionView: View {
                 Picker("Sort by", selection: $store.sort.key) {
                     Text("Date taken").tag(PhotoSort.Key.captureDate)
                     Text("Name").tag(PhotoSort.Key.name)
+                    Text("Subfolder").tag(PhotoSort.Key.subfolder)
+                        .disabled(store.availableSubfolders.count <= 1)
                     Text("File type").tag(PhotoSort.Key.fileType)
                     Text("Camera").tag(PhotoSort.Key.camera)
                     Text("Lens").tag(PhotoSort.Key.lens)

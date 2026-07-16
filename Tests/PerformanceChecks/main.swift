@@ -10,6 +10,7 @@ struct PerformanceChecks {
         try neutralFullRangesKeepUnknownMetadataVisible()
         try selectionSummaryKeepsEveryDistinctMetadataValue()
         try metadataSortKeepsMissingValuesLast()
+        try subfolderFacetFiltersAndSortsByRelativePath()
         try folderScannerHonorsCancellation()
         try folderScannerStopsAfterProgressCancellation()
         try imageCacheKeyDoesNotTouchFilesystemAfterScan()
@@ -19,7 +20,7 @@ struct PerformanceChecks {
         try await emptySidecarSnapshotIsPersisted()
         try cleanUpPairRoundTripsThroughTrash()
         try cleanUpPairFailureRollsBackFirstFile()
-        print("Performance checks passed (16/16)")
+        print("Performance checks passed (17/17)")
     }
 
     private static func preparedFilterMatchesFoldedMetadataTokens() throws {
@@ -201,6 +202,39 @@ struct PerformanceChecks {
         try expect(
             [low, unknown, high].sorted(by: sort.areInOrder).map(\.id) == ["HIGH.JPG", "LOW.JPG", "UNKNOWN.JPG"],
             "descending numeric metadata sort should still put missing data last"
+        )
+    }
+
+    private static func subfolderFacetFiltersAndSortsByRelativePath() throws {
+        let root = makeItem(id: "ROOT.JPG")
+        let nested = makeItem(id: "DCIM/100NIKON/NESTED.JPG")
+        let flat = makeItem(id: "berlin/FLAT.JPG")
+        try expect(root.subfolder == nil && root.subfolderLabel == "None",
+                   "a root-level file should carry the explicit None label")
+        try expect(nested.subfolder == "DCIM/100NIKON",
+                   "the subfolder should be the id's full relative directory")
+
+        var filter = PhotoFilter()
+        filter.excludedSubfolders = ["None"]
+        var prepared = PreparedPhotoFilter(filter)
+        try expect(!prepared.matches(root) && prepared.matches(nested),
+                   "unchecking None should hide only root-level files")
+        filter.excludedSubfolders = ["DCIM/100NIKON"]
+        prepared = PreparedPhotoFilter(filter)
+        try expect(prepared.matches(root) && !prepared.matches(nested),
+                   "unchecking a subfolder should hide exactly its files")
+
+        var sort = PhotoSort(key: .subfolder, ascending: true)
+        try expect(
+            [root, nested, flat].sorted(by: sort.areInOrder).map(\.id)
+                == ["berlin/FLAT.JPG", "DCIM/100NIKON/NESTED.JPG", "ROOT.JPG"],
+            "ascending subfolder sort should order paths and put root files last"
+        )
+        sort.ascending = false
+        try expect(
+            [root, nested, flat].sorted(by: sort.areInOrder).map(\.id)
+                == ["DCIM/100NIKON/NESTED.JPG", "berlin/FLAT.JPG", "ROOT.JPG"],
+            "descending subfolder sort should still put root files last"
         )
     }
 
