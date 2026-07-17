@@ -5,12 +5,27 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.6.0 (8) — 2026-07-16
+## 1.6.0 (8) — 2026-07-17
 
+- The toolbar sort menu is now a full popover matching the filter's look, with
+  **Sort by**, **Order**, and a new **Groups** section.
+- Group division now follows the active sort option: sorting by camera divides
+  the photos into camera groups, by subfolder into subfolder groups, and so on
+  (Name sorting shows one continuous list). A **Divide into groups** checkbox
+  turns the division off entirely.
+- Group dividers now carry the group's name: the Grid and the Browser column
+  show the date, camera, lens, or other group label at the start of the line,
+  with the divider continuing after it.
+- All dates and times shown in the app (info panel, selection summary, filter
+  day list, group dividers) now follow the Mac's Language & Region settings,
+  including the custom **Date format** picker and the 12/24-hour clock.
 - Added subfolder support to filtering and sorting: the filter popover lists
   every subfolder of the opened folder (plus **None** for files lying directly
   in it) as checkboxes with photo counts, and the sort menu gains a
   **Subfolder** option between Name and File type.
+- The Browser toggle now appears in the toolbar only while the Gallery view is
+  showing, and the Q shortcut is ignored in the Grid view — the Browser column
+  exists only in the Gallery.
 
 ## 1.5.0 (7) — 2026-07-15
 

@@ -30,7 +30,7 @@ Pick a folder (an SD card works), review, then press **⌘E** to export.
 | A | Toggle phone-sized preview / fit |
 | Tab / G | Switch Gallery ↔ Grid view |
 | E or ⌘E | Export |
-| Q | Show/hide the browser (thumbnail column) |
+| Q | Show/hide the browser (thumbnail column; Gallery view only) |
 | W | Show/hide the info panel |
 | R | Clear all ratings (16+ ratings ask for confirmation; Enter confirms; ⌘Z restores) |
 | ⌘R | Re-scan folder for new photos |

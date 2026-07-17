@@ -237,36 +237,14 @@ struct SessionView: View {
             }
             .help("Filter photos by metadata, date, subfolder, type, camera, or lens")
 
-            // A native menu with check-marked pickers, like Finder's sort
-            // menu. It only reorders what's shown and never touches ratings.
-            Menu {
-                Picker("Sort by", selection: $store.sort.key) {
-                    Text("Date taken").tag(PhotoSort.Key.captureDate)
-                    Text("Name").tag(PhotoSort.Key.name)
-                    Text("Subfolder").tag(PhotoSort.Key.subfolder)
-                        .disabled(store.availableSubfolders.count <= 1)
-                    Text("File type").tag(PhotoSort.Key.fileType)
-                    Text("Camera").tag(PhotoSort.Key.camera)
-                    Text("Lens").tag(PhotoSort.Key.lens)
-                    Text("Aperture").tag(PhotoSort.Key.aperture)
-                        .disabled(store.apertureRange == nil)
-                    Text("Shutter speed").tag(PhotoSort.Key.shutterSpeed)
-                        .disabled(store.shutterRange == nil)
-                    Text("ISO").tag(PhotoSort.Key.iso)
-                        .disabled(store.isoRange == nil)
-                }
-                Divider()
-                Picker("Order", selection: $store.sort.ascending) {
-                    Text(store.sort.key.ascendingLabel).tag(true)
-                    Text(store.sort.key.descendingLabel).tag(false)
-                }
+            Button {
+                store.isSortPresented.toggle()
             } label: {
                 Image(systemName: "arrow.up.arrow.down")
             }
-            .pickerStyle(.inline)
-            .menuIndicator(.hidden)
-            // Keep the glyph neutral — menus inherit the purple accent.
-            .tint(Color.primary)
+            .popover(isPresented: $store.isSortPresented, arrowEdge: .bottom) {
+                SortView(store: store)
+            }
             .help("Sort photos by date, name, or metadata")
 
             Picker("View", selection: $store.viewMode) {
@@ -311,12 +289,16 @@ struct SessionView: View {
         }
 
         ToolbarItemGroup {
-            Button {
-                withAnimation { store.showBrowser.toggle() }
-            } label: {
-                Image(systemName: store.showBrowser ? "sidebar.squares.left" : "sidebar.left")
+            // The Browser toggle leaves the toolbar entirely while the Grid
+            // is showing — the column it controls exists only in the Gallery.
+            if store.viewMode == .gallery {
+                Button {
+                    withAnimation { store.toggleBrowser() }
+                } label: {
+                    Image(systemName: store.showBrowser ? "sidebar.squares.left" : "sidebar.left")
+                }
+                .help("Show or hide the Browser in the Gallery view (Q)")
             }
-            .help("Show or hide the Browser in the Gallery view (Q)")
 
             Button {
                 withAnimation { store.showMetadataPanel.toggle() }
@@ -402,15 +384,16 @@ struct SessionView: View {
             if event.modifierFlags.contains(.command) { return false }
             if event.keyCode == 48 { store.toggleViewMode(); return true }
             switch event.charactersIgnoringModifiers?.lowercased() {
-            case "q": withAnimation { store.showBrowser.toggle() }; return true
+            case "q": withAnimation { store.toggleBrowser() }; return true
             case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
             case "g": store.toggleViewMode(); return true
             default: return true
             }
         }
         if store.isExportPresented { return false }
-        // Don't steal letters while the filter popover is up (search typing).
-        if store.isFilterPresented { return false }
+        // Don't steal letters while the filter popover is up (search typing),
+        // nor while the sort popover is open.
+        if store.isFilterPresented || store.isSortPresented { return false }
         // Nor while a confirmation or error alert is up.
         if store.isClearAllRatingsConfirmationPresented ||
             store.pendingCleanUp != nil || store.cleanUpError != nil { return false }
@@ -482,7 +465,7 @@ struct SessionView: View {
         switch event.charactersIgnoringModifiers?.lowercased() {
         case "f": store.rate(.yes); return true
         case "d": store.rate(.no); return true
-        case "q": withAnimation { store.showBrowser.toggle() }; return true
+        case "q": withAnimation { store.toggleBrowser() }; return true
         case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
         case "g": store.toggleViewMode(); return true
         case "e": store.isExportPresented = true; return true

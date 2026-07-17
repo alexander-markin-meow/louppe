@@ -93,7 +93,7 @@ struct PhotoItem: Identifiable, Sendable {
         if let subfolder { parts.append(subfolder) }
         if let cameraModel { parts.append(cameraModel) }
         if let lensModel { parts.append(lensModel) }
-        if let captureDate { parts.append(Self.searchDateFormatter.string(from: captureDate)) }
+        if let captureDate { parts.append(AppDateFormat.day(captureDate)) }
         searchableText = Self.normalizeForSearch(parts.joined(separator: " "))
     }
 
@@ -138,13 +138,6 @@ struct PhotoItem: Identifiable, Sendable {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
     }
-
-    private static let searchDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter
-    }()
 }
 
 // MARK: - Multi-selection metadata
@@ -271,6 +264,65 @@ struct PhotoSort: Equatable {
             case .iso: return "Highest first"
             }
         }
+
+        /// Whether two adjacent photos in the sorted order belong to the same
+        /// group. Name sorting never divides — every file name is unique, so
+        /// groups would be meaningless.
+        func sameGroup(_ a: PhotoItem, _ b: PhotoItem) -> Bool {
+            switch self {
+            case .captureDate:
+                switch (a.captureDate, b.captureDate) {
+                case let (a?, b?): return Calendar.current.isDate(a, inSameDayAs: b)
+                case (nil, nil): return true
+                default: return false
+                }
+            case .name:
+                return true
+            case .subfolder:
+                return a.subfolderLabel == b.subfolderLabel
+            case .fileType:
+                return a.fileTypeLabel == b.fileTypeLabel
+            case .camera:
+                return a.cameraLabel == b.cameraLabel
+            case .lens:
+                return a.lensLabel == b.lensLabel
+            case .aperture:
+                return a.aperture == b.aperture
+            case .shutterSpeed:
+                return a.shutterSpeed == b.shutterSpeed
+            case .iso:
+                return a.iso == b.iso
+            }
+        }
+
+        /// The header label for the group a photo opens, shown above dividers
+        /// in the Grid and the Browser strip.
+        func groupTitle(for item: PhotoItem) -> String {
+            switch self {
+            case .captureDate:
+                guard let date = item.captureDate else { return "Unknown date" }
+                return AppDateFormat.day(date)
+            case .name:
+                return ""
+            case .subfolder:
+                return item.subfolderLabel
+            case .fileType:
+                return item.fileTypeLabel
+            case .camera:
+                return item.cameraLabel
+            case .lens:
+                return item.lensLabel
+            case .aperture:
+                guard let aperture = item.aperture else { return "Unknown aperture" }
+                return "f/\(MetadataFormat.decimal(aperture))"
+            case .shutterSpeed:
+                guard let shutter = item.shutterSpeed else { return "Unknown shutter speed" }
+                return MetadataFormat.shutter(shutter)
+            case .iso:
+                guard let iso = item.iso else { return "Unknown ISO" }
+                return "ISO \(MetadataFormat.iso(iso))"
+            }
+        }
     }
     var key: Key = .captureDate
     var ascending = true
@@ -380,6 +432,40 @@ struct PhotoSort: Equatable {
         case (nil, .some):
             return false
         }
+    }
+}
+
+/// One run of visible photos that share the active sort key's value.
+/// `title` is nil when division is off (or the key never divides), which
+/// tells the views to draw no header at all.
+struct PhotoGroup: Equatable {
+    let title: String?
+    let indices: [Int]
+}
+
+/// EXIF value formatting shared by the filter fields and group headers.
+enum MetadataFormat {
+    static func decimal(_ value: Double) -> String {
+        guard value.isFinite, value > 0 else { return "" }
+        return String(format: "%.2f", value)
+            .replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+    }
+
+    static func shutter(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "" }
+        if seconds >= 1 {
+            return "\(decimal(seconds))s"
+        }
+        let denominator = (1 / seconds).rounded()
+        if denominator >= 1, abs(seconds - (1 / denominator)) < 0.000_001 {
+            return "1/\(Int(denominator))"
+        }
+        return "\(decimal(seconds))s"
+    }
+
+    static func iso(_ value: Double) -> String {
+        guard value.isFinite, value > 0 else { return "" }
+        return String(format: "%.0f", value)
     }
 }
 

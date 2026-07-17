@@ -202,9 +202,9 @@ struct MetadataPanel: View {
         var lines: [String] = []
         if let range = summary.captureDayRange {
             if range.lowerBound == range.upperBound {
-                lines.append(Self.selectionDateFormatter.string(from: range.lowerBound))
+                lines.append(AppDateFormat.day(range.lowerBound))
             } else {
-                lines.append(Self.selectionDateRangeFormatter.string(
+                lines.append(AppDateFormat.dayRange(
                     from: range.lowerBound,
                     to: range.upperBound
                 ))
@@ -313,18 +313,4 @@ struct MetadataPanel: View {
         case .undecided: return "Undecided"
         }
     }
-
-    private static let selectionDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter
-    }()
-
-    private static let selectionDateRangeFormatter: DateIntervalFormatter = {
-        let formatter = DateIntervalFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter
-    }()
 }

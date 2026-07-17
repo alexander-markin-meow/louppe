@@ -146,7 +146,7 @@ struct FilterView: View {
                             ForEach(store.availableCaptureDates, id: \.self) { date in
                                 Toggle(isOn: dateBinding(date)) {
                                     labeledCount(
-                                        Self.dayFormatter.string(from: date),
+                                        AppDateFormat.day(date),
                                         store.captureDateCounts[date, default: 0]
                                     )
                                 }
@@ -604,26 +604,15 @@ struct FilterView: View {
     }
 
     private static func formatDecimal(_ value: Double) -> String {
-        guard value.isFinite, value > 0 else { return "" }
-        return String(format: "%.2f", value)
-            .replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+        MetadataFormat.decimal(value)
     }
 
     private static func formatShutter(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds > 0 else { return "" }
-        if seconds >= 1 {
-            return "\(formatDecimal(seconds))s"
-        }
-        let denominator = (1 / seconds).rounded()
-        if denominator >= 1, abs(seconds - (1 / denominator)) < 0.000_001 {
-            return "1/\(Int(denominator))"
-        }
-        return "\(formatDecimal(seconds))s"
+        MetadataFormat.shutter(seconds)
     }
 
     private static func formatISO(_ value: Double) -> String {
-        guard value.isFinite, value > 0 else { return "" }
-        return String(format: "%.0f", value)
+        MetadataFormat.iso(value)
     }
 
     /// Display formatting rounds some legal EXIF values. If the user-entered
@@ -652,13 +641,6 @@ struct FilterView: View {
                 .monospacedDigit()
         }
     }
-
-    private static let dayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter
-    }()
 }
 
 /// A native-looking disclosure row whose whole width, including its title, is

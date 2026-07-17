@@ -37,6 +37,14 @@ final class SessionStore: ObservableObject {
     private(set) var gridColumnCount = 1
     @Published var isExportPresented = false
     @Published var isFilterPresented = false
+    @Published var isSortPresented = false
+    /// The "Divide into groups" switch at the end of the sort popover. One
+    /// global setting: off hides every divider whatever the sort key is.
+    @Published var isGroupingEnabled = true {
+        didSet {
+            if isGroupingEnabled != oldValue { rebuildVisibleGroups() }
+        }
+    }
     /// In-flight big-photo decodes (a count, so overlapping loads during fast
     /// arrow-key navigation can't blank the spinner early). The toolbar shows
     /// a small spinner while it's above zero.
@@ -76,10 +84,13 @@ final class SessionStore: ObservableObject {
     }
     /// Indices into `items` that pass the current filter, in the chosen sort order.
     @Published private(set) var visibleIndices: [Int] = []
-    /// Same visible order, split into day runs for the Grid view. Rebuilt
-    /// only when filter/sort/session structure changes, not on selection drag.
-    @Published private(set) var visibleDayGroups: [[Int]] = []
-    @Published private(set) var visibleDayStartIndices: Set<Int> = []
+    /// Same visible order, split into runs of the active sort key's value
+    /// (days, cameras, subfolders…) for the Grid view. Rebuilt only when
+    /// filter/sort/session structure changes, not on selection drag.
+    @Published private(set) var visibleGroups: [PhotoGroup] = []
+    /// Item index → header title for the Browser strip, covering every group
+    /// start (including the first). Empty when division is off.
+    @Published private(set) var visibleGroupTitles: [Int: String] = [:]
 
     /// The multi-selection (absolute indices into `items`). Empty is the
     /// normal single-photo state: the selection is just `currentIndex`.
@@ -171,8 +182,7 @@ final class SessionStore: ObservableObject {
     private func applyFilter() {
         let prepared = PreparedPhotoFilter(filter)
         visibleIndices = sortedIndices.filter { prepared.matches(items[$0]) }
-        visibleDayGroups = makeVisibleDayGroups()
-        visibleDayStartIndices = Set(visibleDayGroups.dropFirst().compactMap(\.first))
+        rebuildVisibleGroups()
         // Photos that just got filtered out must leave the selection too —
         // an invisible photo shouldn't silently receive a rating.
         if !selectedIndices.isEmpty {
@@ -210,26 +220,38 @@ final class SessionStore: ObservableObject {
         sortedIndices = items.indices.sorted { sort.areInOrder(items[$0], items[$1]) }
     }
 
-    private func makeVisibleDayGroups() -> [[Int]] {
-        guard !visibleIndices.isEmpty else { return [] }
-        guard sort.key == .captureDate else { return [visibleIndices] }
-        let calendar = Calendar.current
-        var groups: [[Int]] = []
-        var previousDate: Date?
-        for index in visibleIndices {
-            let date = items[index].captureDate
-            let startsGroup: Bool
-            if groups.isEmpty {
-                startsGroup = true
-            } else if let previousDate, let date {
-                startsGroup = !calendar.isDate(previousDate, inSameDayAs: date)
-            } else {
-                startsGroup = previousDate != nil || date != nil
+    private func rebuildVisibleGroups() {
+        visibleGroups = makeVisibleGroups()
+        visibleGroupTitles = visibleGroups.reduce(into: [:]) { titles, group in
+            if let title = group.title, let first = group.indices.first {
+                titles[first] = title
             }
-            if startsGroup { groups.append([]) }
-            groups[groups.count - 1].append(index)
-            previousDate = date
         }
+    }
+
+    private func makeVisibleGroups() -> [PhotoGroup] {
+        guard !visibleIndices.isEmpty else { return [] }
+        guard isGroupingEnabled, sort.key != .name else {
+            return [PhotoGroup(title: nil, indices: visibleIndices)]
+        }
+        let key = sort.key
+        var groups: [PhotoGroup] = []
+        var run: [Int] = []
+        var previousItem: PhotoItem?
+        func closeRun() {
+            guard let first = run.first else { return }
+            groups.append(PhotoGroup(title: key.groupTitle(for: items[first]), indices: run))
+        }
+        for index in visibleIndices {
+            let item = items[index]
+            if let previousItem, !key.sameGroup(previousItem, item) {
+                closeRun()
+                run = []
+            }
+            run.append(index)
+            previousItem = item
+        }
+        closeRun()
         return groups
     }
 
@@ -428,8 +450,8 @@ final class SessionStore: ObservableObject {
 
     private func resetDerivedData() {
         sortedIndices = []
-        visibleDayGroups = []
-        visibleDayStartIndices = []
+        visibleGroups = []
+        visibleGroupTitles = [:]
         ratingTally = (0, 0, 0)
         availableTypes = []
         availableCameras = []
@@ -1073,15 +1095,15 @@ final class SessionStore: ObservableObject {
     func goPrevious() { stepVisible(-1) }
 
     /// Moves to the photo in the same grid column on the row above or below.
-    /// Each day group starts a new grid, so crossing a group boundary lands in
-    /// the nearest matching column of the adjacent day's first/last row.
+    /// Each group starts a new grid, so crossing a group boundary lands in
+    /// the nearest matching column of the adjacent group's first/last row.
     func goVertical(_ delta: Int) {
-        guard !visibleDayGroups.isEmpty else { return }
-        guard let groupIndex = visibleDayGroups.firstIndex(where: { $0.contains(currentIndex) }) else {
+        guard !visibleGroups.isEmpty else { return }
+        guard let groupIndex = visibleGroups.firstIndex(where: { $0.indices.contains(currentIndex) }) else {
             setIndex(visibleIndices[0])
             return
         }
-        let group = visibleDayGroups[groupIndex]
+        let group = visibleGroups[groupIndex].indices
         guard let position = group.firstIndex(of: currentIndex) else { return }
 
         let columns = max(gridColumnCount, 1)
@@ -1093,7 +1115,7 @@ final class SessionStore: ObservableObject {
             if row > 0 {
                 target = group[min((row - 1) * columns + column, group.count - 1)]
             } else if groupIndex > 0 {
-                let previous = visibleDayGroups[groupIndex - 1]
+                let previous = visibleGroups[groupIndex - 1].indices
                 let lastRowStart = (previous.count - 1) / columns * columns
                 target = previous[min(lastRowStart + column, previous.count - 1)]
             } else {
@@ -1103,8 +1125,8 @@ final class SessionStore: ObservableObject {
             let nextRowStart = (row + 1) * columns
             if nextRowStart < group.count {
                 target = group[min(nextRowStart + column, group.count - 1)]
-            } else if groupIndex + 1 < visibleDayGroups.count {
-                let next = visibleDayGroups[groupIndex + 1]
+            } else if groupIndex + 1 < visibleGroups.count {
+                let next = visibleGroups[groupIndex + 1].indices
                 target = next[min(column, next.count - 1)]
             } else {
                 target = nil
@@ -1164,6 +1186,14 @@ final class SessionStore: ObservableObject {
 
     func toggleViewMode() {
         viewMode = (viewMode == .gallery) ? .grid : .gallery
+    }
+
+    /// The Browser column exists only in the Gallery view, so its toolbar
+    /// button and the Q hotkey both come through this guard — the Grid must
+    /// not change the Gallery's layout invisibly.
+    func toggleBrowser() {
+        guard viewMode == .gallery else { return }
+        showBrowser.toggle()
     }
 
     func toggleZoom(_ mode: ZoomMode) {
@@ -1314,6 +1344,8 @@ final class SessionStore: ObservableObject {
         sort = PhotoSort()
         visibleIndices = []
         isFilterPresented = false
+        isSortPresented = false
+        isGroupingEnabled = true
         phase = .welcome
     }
 }

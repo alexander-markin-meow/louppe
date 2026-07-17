@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The Browser: an optional vertical column of thumbnails along the left edge
-/// of the Gallery view, with thin separators between shooting days.
+/// of the Gallery view, with a small gray group label above each sort group
+/// (shooting day, camera, subfolder… depending on the active sort key).
 struct BrowserView: View {
     /// Keep the original 122-point thumbnail column and add exactly enough
     /// room for a native non-overlay scrollbar beside it.
@@ -18,11 +19,22 @@ struct BrowserView: View {
                         if store.items.indices.contains(index) {
                             let item = store.items[index]
                             VStack(spacing: 6) {
-                                if store.visibleDayStartIndices.contains(index) {
-                                    RoundedRectangle(cornerRadius: 1)
-                                        .fill(.secondary.opacity(0.5))
-                                        .frame(width: 64, height: 2)
-                                        .padding(.vertical, 3)
+                                if let title = store.visibleGroupTitles[index] {
+                                    // Same header shape as the Grid: name first,
+                                    // divider filling whatever width is left.
+                                    HStack(spacing: 6) {
+                                        Text(title)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                            .layoutPriority(1)
+                                        RoundedRectangle(cornerRadius: 1)
+                                            .fill(.secondary.opacity(0.5))
+                                            .frame(height: 2)
+                                    }
+                                    .frame(width: 102)
+                                    .padding(.vertical, 3)
                                 }
                                 ThumbnailView(
                                     item: item,

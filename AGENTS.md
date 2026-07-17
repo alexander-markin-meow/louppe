@@ -26,10 +26,15 @@ Finder metadata may otherwise reappear between signing and verification. Still
 run `xattr -cr` after copying into `/Applications`.
 
 `VERSION` is the source of truth for the About-panel marketing version and
-build number. Every shipped release or update must use a new version/build pair
-with a matching entry in `CHANGELOG.md`; development changes stay in the
-current unreleased entry until it ships. `build_app.sh` deliberately refuses
-to package a pair missing from the history. History headings use
+build number. **Bump the version/build pair exactly once per GitHub release
+cycle**: the first change after the latest published GitHub release bumps
+`VERSION` and opens one new `CHANGELOG.md` entry, and every further change
+folds into that same entry (update its bullets and date — do not bump again)
+until that version ships as the next GitHub release. Check the latest release
+(`gh release list`) before deciding whether a bump is due; local installs of
+work-in-progress builds are not releases and never justify a bump.
+`build_app.sh` deliberately refuses to package a pair missing from the
+history. History headings use
 `## <MARKETING_VERSION> (<BUILD_NUMBER>) — <DATE>`. Keep release tags in the
 form `v<MARKETING_VERSION>`.
 

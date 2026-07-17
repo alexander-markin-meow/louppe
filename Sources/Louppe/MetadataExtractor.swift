@@ -61,7 +61,7 @@ enum MetadataExtractor {
         let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
 
         if let date = item.captureDate {
-            add("Captured", displayDateFormatter.string(from: date))
+            add("Captured", AppDateFormat.dayAndTime(date))
         }
         add("Camera", tiff[kCGImagePropertyTIFFModel] as? String)
         add("Lens", exif[kCGImagePropertyExifLensModel] as? String)
@@ -130,13 +130,6 @@ enum MetadataExtractor {
         formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
-        return formatter
-    }()
-
-    private static let displayDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .medium
         return formatter
     }()
 }

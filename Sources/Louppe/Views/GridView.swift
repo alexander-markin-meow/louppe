@@ -67,20 +67,26 @@ struct GridView: View {
                     // estimates were corrected while scrolling upward or
                     // after a thumbnail resize, visibly moving the viewport.
                     LazyVGrid(columns: columns, spacing: 10) {
-                        ForEach(Array(store.visibleDayGroups.enumerated()), id: \.offset) { groupIndex, group in
+                        ForEach(Array(store.visibleGroups.enumerated()), id: \.offset) { _, group in
                             Section {
-                                ForEach(group, id: \.self) { index in
+                                ForEach(group.indices, id: \.self) { index in
                                     if store.items.indices.contains(index) {
                                         cell(index: index, item: store.items[index])
                                     }
                                 }
                             } header: {
-                                if groupIndex > 0 {
-                                    RoundedRectangle(cornerRadius: 1)
-                                        .fill(.secondary.opacity(0.4))
-                                        .frame(height: 2)
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 4)
+                                if let title = group.title {
+                                    HStack(spacing: 8) {
+                                        Text(title)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                        RoundedRectangle(cornerRadius: 1)
+                                            .fill(.secondary.opacity(0.4))
+                                            .frame(height: 2)
+                                    }
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 4)
                                 }
                             }
                         }
