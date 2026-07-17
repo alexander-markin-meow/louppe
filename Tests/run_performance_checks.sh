@@ -11,6 +11,7 @@ swiftc \
     -module-cache-path .build/performance-checks/module-cache \
     -parse-as-library \
     Sources/Louppe/Models.swift \
+    Sources/Louppe/AppDateFormat.swift \
     Sources/Louppe/FolderScanner.swift \
     Sources/Louppe/MetadataExtractor.swift \
     Sources/Louppe/ImagePipeline.swift \

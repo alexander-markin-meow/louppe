@@ -271,11 +271,10 @@ struct PhotoSort: Equatable {
         func sameGroup(_ a: PhotoItem, _ b: PhotoItem) -> Bool {
             switch self {
             case .captureDate:
-                switch (a.captureDate, b.captureDate) {
-                case let (a?, b?): return Calendar.current.isDate(a, inSameDayAs: b)
-                case (nil, nil): return true
-                default: return false
-                }
+                // Compare the day buckets cached at scan time; fetching
+                // Calendar.current per adjacent pair made every group rebuild
+                // pay a calendar lookup for each visible photo.
+                return a.captureDay == b.captureDay
             case .name:
                 return true
             case .subfolder:

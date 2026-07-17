@@ -7,7 +7,7 @@ import AppKit
 /// Hotkey map (README's table must stay in sync with `handleKey`):
 ///   F yes · D no · S 100% zoom · A phone-size zoom · R clear all
 ///   Q browser · W info panel · E export · Space next · ←/→ prev/next
-///   ↑/↓ same-column photo in the Grid view
+///   ↑/↓ prev/next in the Gallery view · same-column photo in the Grid view
 ///   Tab/G switch view · Z/⌘Z undo · ⌘+/⌘− grid size
 ///   ⌘A select all · ⌘⇧←/→ select to first/last · Esc clear selection
 ///   ⌘⌫ trash selection (no confirmation — ⌘Z restores)
@@ -446,12 +446,20 @@ struct SessionView: View {
         case 123: store.goPrevious(); return true            // ←
         case 124: store.goNext(); return true                // →
         case 126:                                             // ↑
-            guard store.viewMode == .grid else { return false }
-            store.goVertical(-1)
+            // Grid: same column, one row up. Gallery: previous photo, matching
+            // the vertical Browser strip where the photo above is the previous one.
+            if store.viewMode == .grid {
+                store.goVertical(-1)
+            } else {
+                store.goPrevious()
+            }
             return true
         case 125:                                             // ↓
-            guard store.viewMode == .grid else { return false }
-            store.goVertical(1)
+            if store.viewMode == .grid {
+                store.goVertical(1)
+            } else {
+                store.goNext()
+            }
             return true
         case 48:  store.toggleViewMode(); return true        // Tab
         case 49:  store.goNext(); return true                // Space: next, no rating

@@ -11,12 +11,23 @@ final class ImagePipeline: @unchecked Sendable {
 
     private let thumbCache = NSCache<NSString, NSImage>()
     private let fullCache = NSCache<NSString, NSImage>()
-    private let decodeQueue: OperationQueue = {
+    private let fullDecodeQueue: OperationQueue = {
         let queue = OperationQueue()
-        queue.name = "louppe.decode"
+        queue.name = "louppe.decode.full"
         // Two large decodes keep navigation responsive without allowing fast
         // key-repeat to saturate every CPU core and multiply peak memory.
         queue.maxConcurrentOperationCount = 2
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
+    private let thumbnailDecodeQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "louppe.decode.thumbnail"
+        // Thumbnails are small (320 px, ~0.4 MB decoded), so a wider lane
+        // fills a fresh Grid noticeably faster without the peak-memory risk
+        // that keeps the full-size queue at two. A separate queue also means
+        // the current photo's full decode never waits behind tile backlog.
+        queue.maxConcurrentOperationCount = min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
         queue.qualityOfService = .userInitiated
         return queue
     }()
@@ -160,7 +171,10 @@ final class ImagePipeline: @unchecked Sendable {
             operation.queuePriority = queuePriority
             inFlight[request] = PendingDecode(waiters: [continuation], operation: operation)
             inFlightLock.unlock()
-            decodeQueue.addOperation(operation)
+            switch kind {
+            case .thumbnail: thumbnailDecodeQueue.addOperation(operation)
+            case .full: fullDecodeQueue.addOperation(operation)
+            }
         }
     }
 

@@ -518,15 +518,24 @@ final class SessionStore: ObservableObject {
         scanTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do {
-                let scanned = try FolderScanner.scan(url, isCancelled: { Task.isCancelled }) { count in
-                    Task { @MainActor [weak self] in
-                        guard let self,
-                              self.scanGeneration == generation,
-                              self.sourceFolder == url else { return }
-                        if case .scanning = self.phase {
-                            self.phase = .scanning(found: count)
+                // The scan polls cancellation from parallel metadata workers
+                // on GCD threads, where `Task.isCancelled` has no task context
+                // and silently reads false. Bridge this task's cancellation
+                // into a flag that is valid on any thread.
+                let cancelFlag = FolderScanner.CancelFlag()
+                let scanned = try await withTaskCancellationHandler {
+                    try FolderScanner.scan(url, isCancelled: { cancelFlag.isSet }) { count in
+                        Task { @MainActor [weak self] in
+                            guard let self,
+                                  self.scanGeneration == generation,
+                                  self.sourceFolder == url else { return }
+                            if case .scanning = self.phase {
+                                self.phase = .scanning(found: count)
+                            }
                         }
                     }
+                } onCancel: {
+                    cancelFlag.set()
                 }
                 try Task.checkCancellation()
                 let savedSession = await self.persistence.read(for: url)

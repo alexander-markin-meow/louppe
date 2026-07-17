@@ -19,10 +19,23 @@ operations belong elsewhere:
   inside its detached task. Trash and restore roll back RAW+JPEG pairs after a
   partial failure and explicitly warn if rollback itself fails. `SessionStore`
   applies the returned batch once.
-- `ImagePipeline` uses an `OperationQueue` limited to two decodes. Requests for
-  the same URL/size are coalesced; foreground and prefetch calls share the same
-  in-flight operation, and a foreground join promotes utility prefetch work.
-  The current full image outranks queued thumbnails, which outrank prefetches.
+- `ImagePipeline` uses two bounded `OperationQueue`s: full-size decodes stay
+  limited to two (peak-memory bound for 4096 px images), while thumbnails get
+  their own lane of `min(4, cores/2)` because 320 px decodes are small and a
+  fresh Grid fills visibly faster. Requests for the same URL/size are
+  coalesced; foreground and prefetch calls share the same in-flight operation,
+  and a foreground join promotes utility prefetch work. With separate queues
+  the current full image never waits behind tile backlog at all.
+- `FolderScanner` reads per-file EXIF on concurrent workers
+  (`DispatchQueue.concurrentPerform`, up to 8 chunks) because metadata
+  extraction dominates scan time. Chunk slots are single-writer and
+  concatenated in order, and the final chronological sort settles ordering, so
+  output is identical to a serial pass (verified by order-hash benchmark).
+  The `isCancelled` closure is polled from those workers and **must be safe to
+  call from any thread** — a bare `{ Task.isCancelled }` silently reads false
+  on GCD threads, which is why `SessionStore.openFolder` bridges task
+  cancellation through `FolderScanner.CancelFlag` via
+  `withTaskCancellationHandler`.
 
 Do not move filesystem loops or JSON encoding back onto `SessionStore`.
 
@@ -60,13 +73,19 @@ their SwiftUI scroll content. It forces AppKit's `.legacy` vertical-scroller
 style with autohiding disabled, so the control remains visible and consumes a
 real gutter rather than overlaying thumbnails. Grid column-count calculations
 must subtract `PersistentVerticalScroller.gutterWidth` to match the content
-width AppKit gives the lazy grid.
+width AppKit gives the lazy grid. `configure` runs on every SwiftUI update
+pass (every store publish), so it early-returns once the scroll view is fully
+configured — keep that guard, otherwise every keystroke and drag tick pays a
+redundant `tile()` layout on both scroll views.
 
 ## Filtering and derived data
 
 `PhotoItem.searchableText` is locale-folded once during scanning. Capture-day,
 aperture, shutter-duration, and ISO values are also cached on `PhotoItem`; do
-not reopen files when their filters or sorts change. Each filter change creates
+not reopen files when their filters or sorts change. Group division compares
+the cached `captureDay` buckets directly — do not reintroduce
+`Calendar.current` calls per adjacent pair in `sameGroup`; a group rebuild
+walks every visible photo. Each filter change creates
 one `PreparedPhotoFilter`, so query normalization, whole-day date bounds, and
 numeric ranges are prepared before walking the photo list. Search typing is
 debounced by 150 ms. Camera-setting text edits use the same delay and commit

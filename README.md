@@ -22,7 +22,7 @@ Pick a folder (an SD card works), review, then press **⌘E** to export.
 |---|---|
 | → | Next photo |
 | ← | Previous photo |
-| ↑ / ↓ | Previous / next row in the Grid view |
+| ↑ / ↓ | Previous / next photo in the Gallery view; previous / next row in the Grid view |
 | Space | Next photo without rating |
 | F | Mark Yes (all selected photos), jump to next undecided |
 | D | Mark No (all selected photos), jump to next undecided |

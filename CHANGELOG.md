@@ -26,6 +26,22 @@ release bundle.
 - The Browser toggle now appears in the toolbar only while the Gallery view is
   showing, and the Q shortcut is ignored in the Grid view — the Browser column
   exists only in the Gallery.
+- In the Gallery view, ↓ now steps to the next photo and ↑ to the previous
+  one, mirroring the top-to-bottom order of the Browser column. The Grid view
+  keeps its row-by-row ↑/↓ movement.
+- In the filter popover, **Subfolders** now sits below **File types** and
+  starts collapsed.
+- Opening a folder is much faster: photo details (EXIF) are now read on
+  several CPU cores at once instead of one file at a time — nearly 3× quicker
+  in benchmarks, with more expected on large cards.
+- The Grid view fills its thumbnails about twice as fast (thumbnails got their
+  own decoding lane), and the big Gallery photo no longer waits in line behind
+  thumbnail work.
+- Removed hidden per-keystroke layout work in the always-visible scrollbars
+  and a small group-divider slowdown introduced by the sort update, keeping
+  rating and navigation snappy in large sessions.
+- Repaired the logic-check script, which had stopped compiling after the sort
+  update.
 
 ## 1.5.0 (7) — 2026-07-15
 

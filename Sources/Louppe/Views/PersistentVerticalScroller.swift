@@ -21,6 +21,18 @@ struct PersistentVerticalScroller: NSViewRepresentable {
 
     /// Internal for the focused AppKit regression check.
     static func configure(_ scrollView: NSScrollView) {
+        // updateNSView re-runs this on every SwiftUI update pass (every store
+        // publish). Once the scroll view holds a fully configured scroller,
+        // skip the replace/tile work; any drifted property re-takes the full
+        // path, so the invariant remains self-healing.
+        if scrollView.verticalScroller is AlwaysVisibleScroller,
+           scrollView.scrollerStyle == .legacy,
+           scrollView.hasVerticalScroller,
+           !scrollView.autohidesScrollers,
+           scrollView.verticalScroller?.isHidden == false,
+           scrollView.verticalScroller?.alphaValue == 1 {
+            return
+        }
         // SwiftUI's standard scroller remains eligible for the system's fade
         // treatment. This subclass opts out, then paints the preferred rounded
         // overlay-style track and thumb itself so it never fades away.

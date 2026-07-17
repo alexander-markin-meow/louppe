@@ -7,7 +7,7 @@ struct FilterView: View {
 
     @State private var dateExpanded = true
     @State private var cameraSettingsExpanded = false
-    @State private var subfoldersExpanded = true
+    @State private var subfoldersExpanded = false
     @State private var fileTypesExpanded = true
     @State private var camerasExpanded = false
     @State private var lensesExpanded = false
@@ -36,13 +36,13 @@ struct FilterView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     dateSection
 
+                    Divider()
+                    fileTypesSection
+
                     if store.availableSubfolders.count > 1 {
                         Divider()
                         subfoldersSection
                     }
-
-                    Divider()
-                    fileTypesSection
 
                     if store.availableCameras.count > 1 {
                         Divider()

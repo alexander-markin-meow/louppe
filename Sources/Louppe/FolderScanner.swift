@@ -57,9 +57,31 @@ enum FolderScanner {
         let modificationDate: Date?
     }
 
+    /// Thread-safe cancellation signal for a scan. `Task.isCancelled` only
+    /// reflects cancellation on the task's own thread; the scan's parallel
+    /// metadata workers run on GCD threads, so callers bridge task
+    /// cancellation through this flag (see `SessionStore.openFolder`).
+    final class CancelFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        var isSet: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+
+        func set() {
+            lock.lock()
+            defer { lock.unlock() }
+            value = true
+        }
+    }
+
     /// `progress` is called periodically with the running file count. The
     /// cancellation hook lets a superseded scan stop before it walks or opens
-    /// the rest of a large card.
+    /// the rest of a large card; it is polled from concurrent metadata
+    /// workers too, so it must be safe to call from any thread.
     static func scan(
         _ root: URL,
         isCancelled: () -> Bool = { false },
@@ -117,14 +139,15 @@ enum FolderScanner {
             groups[key, default: []].append(url)
         }
 
-        var result: [PhotoItem] = []
-        let rootPath = root.standardizedFileURL.path
+        // Pair building is cheap; collect every (primary, paired) pair first
+        // so the expensive per-file metadata reads can run in parallel below.
+        var pairs: [(primary: URL, paired: URL?)] = []
+        pairs.reserveCapacity(files.count)
         for (_, urls) in groups {
             if isCancelled() { throw CancellationError() }
             let raws = urls.filter { rawExtensions.contains($0.pathExtension.lowercased()) }
             let nonRaws = urls.filter { !rawExtensions.contains($0.pathExtension.lowercased()) }
 
-            var pairs: [(primary: URL, paired: URL?)] = []
             if let raw = raws.first, let jpeg = nonRaws.first {
                 pairs.append((raw, jpeg))
                 // Rare leftovers (e.g., two RAWs with the same base name) become separate items.
@@ -133,28 +156,14 @@ enum FolderScanner {
             } else {
                 for url in urls { pairs.append((url, nil)) }
             }
-
-            for (primary, paired) in pairs {
-                if isCancelled() { throw CancellationError() }
-                let facts = factsByURL[primary]
-                let info = MetadataExtractor.scanInfo(for: primary)
-                let captureDate = info.captureDate ?? facts?.creationDate
-                result.append(PhotoItem(
-                    id: relativePath(of: primary, under: rootPath),
-                    primaryURL: primary,
-                    pairedURL: paired,
-                    captureDate: captureDate,
-                    cameraModel: info.cameraModel,
-                    lensModel: info.lensModel,
-                    aperture: info.aperture,
-                    shutterSpeed: info.shutterSpeed,
-                    iso: info.iso,
-                    primaryModificationDate: facts?.modificationDate,
-                    fileSize: facts?.size ?? 0,
-                    pairedFileSize: paired.flatMap { factsByURL[$0]?.size } ?? 0
-                ))
-            }
         }
+
+        var result = try makeItems(
+            for: pairs,
+            factsByURL: factsByURL,
+            rootPath: root.standardizedFileURL.path,
+            isCancelled: isCancelled
+        )
 
         result.sort { a, b in
             switch (a.captureDate, b.captureDate) {
@@ -165,6 +174,62 @@ enum FolderScanner {
             }
         }
         return result
+    }
+
+    /// How many EXIF readers run at once during a scan. Header parsing mixes
+    /// file I/O with CPU work, so a handful of workers saturates it without
+    /// competing with the rest of the system.
+    private static let maxMetadataConcurrency = min(8, max(1, ProcessInfo.processInfo.activeProcessorCount))
+
+    /// Reading EXIF opens every file and dominates scan time, so the pair
+    /// list is split into contiguous chunks processed concurrently. Each
+    /// chunk fills its own result slot (a single writer per slot) and the
+    /// slots are concatenated in order, making the outcome identical to a
+    /// serial pass; the caller's chronological sort settles the final order
+    /// either way.
+    private static func makeItems(
+        for pairs: [(primary: URL, paired: URL?)],
+        factsByURL: [URL: FileFacts],
+        rootPath: String,
+        isCancelled: () -> Bool
+    ) throws -> [PhotoItem] {
+        guard !pairs.isEmpty else { return [] }
+        let chunkSize = max(1, (pairs.count + maxMetadataConcurrency - 1) / maxMetadataConcurrency)
+        let chunkStarts = Array(stride(from: 0, to: pairs.count, by: chunkSize))
+        var chunkResults = [[PhotoItem]](repeating: [], count: chunkStarts.count)
+        chunkResults.withUnsafeMutableBufferPointer { slots in
+            DispatchQueue.concurrentPerform(iterations: chunkStarts.count) { chunkIndex in
+                let start = chunkStarts[chunkIndex]
+                let end = min(start + chunkSize, pairs.count)
+                var items: [PhotoItem] = []
+                items.reserveCapacity(end - start)
+                for (primary, paired) in pairs[start..<end] {
+                    // A cancelled scan's partial chunk is discarded by the
+                    // throw below, so stopping mid-chunk is safe.
+                    if isCancelled() { return }
+                    let facts = factsByURL[primary]
+                    let info = MetadataExtractor.scanInfo(for: primary)
+                    let captureDate = info.captureDate ?? facts?.creationDate
+                    items.append(PhotoItem(
+                        id: relativePath(of: primary, under: rootPath),
+                        primaryURL: primary,
+                        pairedURL: paired,
+                        captureDate: captureDate,
+                        cameraModel: info.cameraModel,
+                        lensModel: info.lensModel,
+                        aperture: info.aperture,
+                        shutterSpeed: info.shutterSpeed,
+                        iso: info.iso,
+                        primaryModificationDate: facts?.modificationDate,
+                        fileSize: facts?.size ?? 0,
+                        pairedFileSize: paired.flatMap { factsByURL[$0]?.size } ?? 0
+                    ))
+                }
+                slots[chunkIndex] = items
+            }
+        }
+        if isCancelled() { throw CancellationError() }
+        return chunkResults.flatMap { $0 }
     }
 
     private static func relativePath(of url: URL, under rootPath: String) -> String {
