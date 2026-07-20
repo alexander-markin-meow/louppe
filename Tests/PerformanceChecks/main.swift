@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 @main
@@ -20,7 +21,9 @@ struct PerformanceChecks {
         try await emptySidecarSnapshotIsPersisted()
         try cleanUpPairRoundTripsThroughTrash()
         try cleanUpPairFailureRollsBackFirstFile()
-        print("Performance checks passed (17/17)")
+        try clearAllRatingsPublishesOnceForLargeSessions()
+        try batchRatingUndoRestoresEveryRating()
+        print("Performance checks passed (19/19)")
     }
 
     private static func preparedFilterMatchesFoldedMetadataTokens() throws {
@@ -391,6 +394,64 @@ struct PerformanceChecks {
         try expect(result.failedPhotos == 1, "incomplete pair should report one failure")
         try expect(result.inconsistentPhotos == 0, "successful rollback should remain consistent")
         try expect(FileManager.default.fileExists(atPath: raw.path), "first file must roll back when its pair fails")
+    }
+
+    /// Each element written through `@Published items` copies the whole array
+    /// and fires objectWillChange, so a per-element clear-all loop is O(N²)
+    /// with thousands of publishes — the publish storm left stale rating
+    /// badges in the Browser and froze large folders. Batched clearing must
+    /// stay at one array publish however many photos change.
+    @MainActor
+    private static func clearAllRatingsPublishesOnceForLargeSessions() throws {
+        let store = SessionStore()
+        store.items = (0..<3000).map { i in
+            var item = makeItem(id: String(format: "IMG_%04d.JPG", i))
+            item.rating = i.isMultiple(of: 2) ? .yes : .no
+            item.ratedAt = Date(timeIntervalSince1970: TimeInterval(i))
+            return item
+        }
+        var publishes = 0
+        let subscription = store.objectWillChange.sink { _ in publishes += 1 }
+        defer { subscription.cancel() }
+
+        let start = Date()
+        store.clearAllRatings()
+        let elapsed = Date().timeIntervalSince(start)
+
+        try expect(publishes <= 3, "clear-all should publish the batch once, not per element (got \(publishes))")
+        try expect(
+            store.items.allSatisfy { $0.rating == .undecided && $0.ratedAt == nil },
+            "clear-all should reset every rating"
+        )
+        try expect(store.ratedCount == 0 && store.undecidedCount == 3000, "clear-all should reset the tally")
+        try expect(elapsed < 2, "clearing 3000 ratings should be near-instant (took \(elapsed)s)")
+    }
+
+    @MainActor
+    private static func batchRatingUndoRestoresEveryRating() throws {
+        let store = SessionStore()
+        store.items = (0..<200).map { makeItem(id: String(format: "IMG_%04d.JPG", $0)) }
+        // Recompute visibleIndices through the sort observer — applyFilter
+        // itself is deliberately private.
+        store.sort.ascending = false
+        try expect(store.visibleIndices.count == 200, "every photo should be visible before selection")
+        store.selectAllVisible()
+
+        var publishes = 0
+        let subscription = store.objectWillChange.sink { _ in publishes += 1 }
+        store.rate(.yes)
+        subscription.cancel()
+
+        try expect(publishes <= 6, "batch rating should not publish per element (got \(publishes))")
+        try expect(store.items.allSatisfy { $0.rating == .yes }, "rating a full selection should rate every photo")
+        try expect(store.yesCount == 200, "the tally should count the whole batch")
+
+        store.undo()
+        try expect(
+            store.items.allSatisfy { $0.rating == .undecided && $0.ratedAt == nil },
+            "one undo should restore every rating in the batch"
+        )
+        try expect(store.ratedCount == 0, "undo should restore the tally")
     }
 
     private static func makeItem(

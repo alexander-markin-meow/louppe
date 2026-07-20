@@ -752,6 +752,18 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Every element written through the `items` property wrapper copies the
+    /// whole published array (Combine's `@Published` has no in-place accessor)
+    /// and fires one objectWillChange. Looping `items[i].rating = …` directly
+    /// is therefore O(N) per photo — seconds of main-thread stall on a large
+    /// folder — so every multi-element mutation must go through here: one
+    /// copy, one publish, however many elements change.
+    private func updateItems(_ mutate: (inout [PhotoItem]) -> Void) {
+        var updated = items
+        mutate(&updated)
+        items = updated
+    }
+
     /// Applies one rating to several photos as a single undoable step.
     private func applyRating(_ rating: Rating, to targets: [Int]) {
         let valid = targets.filter { items.indices.contains($0) }
@@ -761,10 +773,12 @@ final class SessionStore: ObservableObject {
         }
         pushUndo(.ratings(changes, previousIndex: currentIndex))
         let now = Date()
-        for index in valid {
-            transitionRatingCount(from: items[index].rating, to: rating)
-            items[index].rating = rating
-            items[index].ratedAt = now
+        updateItems { updated in
+            for index in valid {
+                transitionRatingCount(from: updated[index].rating, to: rating)
+                updated[index].rating = rating
+                updated[index].ratedAt = now
+            }
         }
         scheduleSave()
     }
@@ -775,9 +789,11 @@ final class SessionStore: ObservableObject {
             let change = RatingChange(index: index, previousRating: items[index].rating, previousRatedAt: items[index].ratedAt)
             pushUndo(.ratings([change], previousIndex: currentIndex))
         }
-        transitionRatingCount(from: items[index].rating, to: rating)
-        items[index].rating = rating
-        items[index].ratedAt = Date()
+        updateItems { updated in
+            transitionRatingCount(from: updated[index].rating, to: rating)
+            updated[index].rating = rating
+            updated[index].ratedAt = Date()
+        }
         scheduleSave()
     }
 
@@ -806,9 +822,11 @@ final class SessionStore: ObservableObject {
         }
         guard !changes.isEmpty else { return }
         pushUndo(.ratings(changes, previousIndex: currentIndex))
-        for i in items.indices {
-            items[i].rating = .undecided
-            items[i].ratedAt = nil
+        updateItems { updated in
+            for i in updated.indices {
+                updated[i].rating = .undecided
+                updated[i].ratedAt = nil
+            }
         }
         ratingTally = (0, 0, items.count)
         scheduleSave()
@@ -845,10 +863,12 @@ final class SessionStore: ObservableObject {
         selectedIndices = []
         switch step {
         case .ratings(let changes, let previousIndex):
-            for change in changes where items.indices.contains(change.index) {
-                transitionRatingCount(from: items[change.index].rating, to: change.previousRating)
-                items[change.index].rating = change.previousRating
-                items[change.index].ratedAt = change.previousRatedAt
+            updateItems { updated in
+                for change in changes where updated.indices.contains(change.index) {
+                    transitionRatingCount(from: updated[change.index].rating, to: change.previousRating)
+                    updated[change.index].rating = change.previousRating
+                    updated[change.index].ratedAt = change.previousRatedAt
+                }
             }
             if !items.isEmpty {
                 currentIndex = min(max(previousIndex, 0), items.count - 1)

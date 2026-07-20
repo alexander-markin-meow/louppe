@@ -5,6 +5,20 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
+## 1.7.0 (9) — 2026-07-20
+
+- Clearing all ratings in a large folder is now instant. Previously every
+  photo triggered its own full refresh, which could freeze the app for
+  seconds and leave stale ✓/✗ badges in the Browser column. The same fix
+  speeds up rating a large selection (⌘A then F/D) and undoing such a batch
+  with ⌘Z.
+- Clicking a thumbnail in the Browser no longer scrolls the strip to center
+  that thumbnail — the list stays put under the cursor. Keyboard navigation
+  (F/D, arrows, Space) still follows the current photo as before.
+- After a long jump (for example F/D advancing to a far-away undecided
+  photo), the Browser now lands centered on the current photo reliably
+  instead of stopping slightly off-target in big folders.
+
 ## 1.6.0 (8) — 2026-07-17
 
 - The toolbar sort menu is now a full popover matching the filter's look, with

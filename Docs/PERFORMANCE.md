@@ -39,6 +39,17 @@ operations belong elsewhere:
 
 Do not move filesystem loops or JSON encoding back onto `SessionStore`.
 
+## Batched `items` mutations
+
+Combine's `@Published` exposes no in-place accessor, so every element written
+through the wrapper (`items[i].rating = …`) copies the entire array and fires
+its own `objectWillChange`. A per-element loop is O(N²) with thousands of
+publishes — on a large folder that froze the app for seconds and the publish
+storm left stale rating badges in the Browser. Any mutation touching more than
+one element must go through `SessionStore.updateItems`, which mutates one
+local copy and publishes once (verified by the clear-all/batch-rating
+performance checks).
+
 ## Image cache budgets
 
 - Thumbnails: at most 1,200 objects and 256 MiB decoded cost.

@@ -17,6 +17,7 @@ swiftc \
     Sources/Louppe/ImagePipeline.swift \
     Sources/Louppe/CleanUpWorker.swift \
     Sources/Louppe/SessionPersistence.swift \
+    Sources/Louppe/SessionStore.swift \
     Tests/PerformanceChecks/main.swift \
     -o .build/performance-checks/LouppePerformanceChecks
 

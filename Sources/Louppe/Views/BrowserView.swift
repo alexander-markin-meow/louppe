@@ -10,6 +10,11 @@ struct BrowserView: View {
 
     @ObservedObject var store: SessionStore
     @State private var followTask: Task<Void, Never>?
+    /// A plain click targets a thumbnail that is already on screen, so the
+    /// follow-scroll that click's index change triggers must be skipped —
+    /// centering the clicked thumbnail drags the strip under the cursor.
+    /// Keyboard navigation keeps following as before.
+    @State private var suppressNextFollow = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -45,6 +50,12 @@ struct BrowserView: View {
                                 .onTapGesture {
                                     // ⇧-click: range · ⌘-click: add/remove · click: jump.
                                     store.handleThumbnailClick(at: index) {
+                                        // Only set when the click will actually move
+                                        // currentIndex, so the flag is always consumed
+                                        // by the onChange it precedes.
+                                        if index != store.currentIndex {
+                                            suppressNextFollow = true
+                                        }
                                         store.setIndex(index)
                                     }
                                 }
@@ -58,6 +69,10 @@ struct BrowserView: View {
                 .background(PersistentVerticalScroller())
             }
             .onChange(of: store.currentIndex) {
+                if suppressNextFollow {
+                    suppressNextFollow = false
+                    return
+                }
                 followCurrentPhoto(using: proxy, animated: true)
             }
             .onAppear {
@@ -84,6 +99,12 @@ struct BrowserView: View {
             } else {
                 proxy.scrollTo(id, anchor: .center)
             }
+            // Lazy stacks estimate distant offsets, so a long jump can land
+            // off-center. Issue a second pass once the target row exists —
+            // the same correction the Grid view applies.
+            await Task.yield()
+            guard !Task.isCancelled, store.currentItem?.id == id else { return }
+            proxy.scrollTo(id, anchor: .center)
         }
     }
 }
