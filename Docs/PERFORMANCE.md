@@ -50,6 +50,25 @@ one element must go through `SessionStore.updateItems`, which mutates one
 local copy and publishes once (verified by the clear-all/batch-rating
 performance checks).
 
+## Browser row invalidation
+
+Batching alone did not cure the stale Browser: on macOS 26 a `LazyVStack`'s
+diff of already-created rows is not a reliable invalidation path — realized
+rows kept old rating badges and the current-photo frame until the view was
+recreated (e.g. Grid and back). Each strip row is therefore `BrowserRow` with
+its own `@ObservedObject` store reference, so every publish invalidates the
+row directly, independent of the container's caching. Two invariants:
+
+- Do not turn `BrowserRow` back into a plain value subtree inside the
+  `ForEach` — that reintroduces the freeze.
+- The row's `.id(item.id)` must stay: it is the follow-scroll target and it
+  resets `ThumbnailView`'s cached `@State` image when Clean Up or its undo
+  remaps an absolute index to a different photo.
+
+The fan-out is bounded: only realized rows subscribe, their bodies are a
+bounds check plus cache-hit lookups, and multiple publishes in one turn
+coalesce into a single update transaction.
+
 ## Image cache budgets
 
 - Thumbnails: at most 1,200 objects and 256 MiB decoded cost.

@@ -5,13 +5,18 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-07-20
+## 1.7.0 (9) — 2026-07-21
 
 - Clearing all ratings in a large folder is now instant. Previously every
   photo triggered its own full refresh, which could freeze the app for
   seconds and leave stale ✓/✗ badges in the Browser column. The same fix
   speeds up rating a large selection (⌘A then F/D) and undoing such a batch
   with ⌘Z.
+- Fixed the Browser column freezing its contents in long sessions: thumbnails
+  could keep old ✓/✗ badges (most visibly after Clear All Ratings) and the
+  purple current-photo frame could sit on the wrong thumbnail until the view
+  was switched to Grid and back. Each strip row now tracks the session
+  directly, so badges and the frame always match what's on screen.
 - Clicking a thumbnail in the Browser no longer scrolls the strip to center
   that thumbnail — the list stays put under the cursor. Keyboard navigation
   (F/D, arrows, Space) still follows the current photo as before.

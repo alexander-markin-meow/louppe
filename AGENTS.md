@@ -136,6 +136,12 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   empties `items` must reset/recompute `visibleIndices` in the same turn
   (see `openFolder`) — stale indices crashed the app on re-scan once.
   `visibleItems` bounds-checks as a backstop; keep it that way.
+- **Browser rows must observe the store directly**: `BrowserRow` holds its own
+  `@ObservedObject` because a macOS `LazyVStack` does not reliably re-resolve
+  already-created rows on data changes — as a plain value subtree the rows
+  froze their badges and current-photo frame until the view was recreated.
+  Keep the row's `.id(item.id)` too (follow-scroll target + state reset when
+  Clean Up remaps indices). Details in `Docs/PERFORMANCE.md`.
 - **ImageIO embedded thumbnails**: many JPEGs embed a tiny (~160px) preview.
   `ImagePipeline.decode` asks for the fast embedded path first and falls back
   to a full decode when the result is undersized — removing that fallback
