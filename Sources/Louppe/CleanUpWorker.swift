@@ -167,7 +167,9 @@ enum CleanUpWorker {
     }
 }
 
-private struct ThrottledProgress {
+/// Coalesces per-file progress callbacks (shared by CleanUpWorker and
+/// ExportWorker) so near-instant operations don't flood the main actor.
+struct ThrottledProgress {
     let total: Int
     let callback: CleanUpWorker.Progress
     private(set) var done = 0

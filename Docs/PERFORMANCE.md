@@ -176,6 +176,18 @@ Restoration uses `mergeRestoredItems` rather than repeated array insertion. It
 is O(n+k), retains survivor ordering, and omits only photos whose Trash files
 could not be restored.
 
+## Export lifecycle
+
+Export shares Clean Up's three-phase shape: the main actor snapshots the
+photos with the chosen ratings, `ExportWorker` runs the copy or move loop
+off-main (reusing `ThrottledProgress`), and the main actor applies one
+result. Copy never mutates the session. A Move export raises
+`isMovingExport`, which blocks folder switching, rescan, undo, Clear All
+Ratings, Clean Up, and Quit until the worker finishes; `finishExportMove`
+then drops the fully moved photos by id, clears the (now index-stale) undo
+stack, rebuilds derived data, re-applies the filter, and snapshots a save.
+The modal sheet keeps rating and navigation keys away while export runs.
+
 ## Verification checklist
 
 Run after performance-sensitive changes:

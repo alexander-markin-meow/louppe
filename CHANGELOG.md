@@ -23,6 +23,14 @@ release bundle.
 - After a long jump (for example F/D advancing to a far-away undecided
   photo), the Browser now lands centered on the current photo reliably
   instead of stopping slightly off-target in big folders.
+- The Export dialog now offers two modes: **Copy to…** (the previous
+  behavior) and **Move to…**, which transfers the files and removes those
+  photos from the session. Moved files stay safe at the chosen destination,
+  but a move isn't undoable with ⌘Z — the dialog warns before it happens.
+- Export is no longer keepers-only: the Yes / No / Undecided counts in the
+  dialog are clickable tiles, so any mix of ratings can be exported. Copy
+  with only Yes selected stays the default, and RAW+JPEG pairs still travel
+  together.
 
 ## 1.6.0 (8) — 2026-07-17
 

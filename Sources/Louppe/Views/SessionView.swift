@@ -353,7 +353,7 @@ struct SessionView: View {
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .tint(Color.louppeAccent)
-            .help("Export copies of the photos marked “Yes” (E or ⌘E)")
+            .help("Export photos by rating — copy or move them to a folder (E or ⌘E)")
         }
     }
 

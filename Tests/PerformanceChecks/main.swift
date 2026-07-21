@@ -21,9 +21,15 @@ struct PerformanceChecks {
         try await emptySidecarSnapshotIsPersisted()
         try cleanUpPairRoundTripsThroughTrash()
         try cleanUpPairFailureRollsBackFirstFile()
+        try exportCollisionSuffixSkipsTakenNames()
+        try exportCopyCopiesEveryFileAndKeepsSources()
+        try exportMoveReportsFullyMovedPhotos()
+        try exportMovePairRollsBackOnPartialFailure()
+        try exportMoveRefusesInPlaceDestination()
         try clearAllRatingsPublishesOnceForLargeSessions()
         try batchRatingUndoRestoresEveryRating()
-        print("Performance checks passed (19/19)")
+        try exportMoveRemovalUpdatesSessionState()
+        print("Performance checks passed (25/25)")
     }
 
     private static func preparedFilterMatchesFoldedMetadataTokens() throws {
@@ -396,6 +402,125 @@ struct PerformanceChecks {
         try expect(FileManager.default.fileExists(atPath: raw.path), "first file must roll back when its pair fails")
     }
 
+    private static func exportCollisionSuffixSkipsTakenNames() throws {
+        let folder = try disposableFolder(named: "ExportCollision")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Data("a".utf8).write(to: folder.appendingPathComponent("PAIR.JPG"))
+        try Data("b".utf8).write(to: folder.appendingPathComponent("PAIR (1).JPG"))
+
+        try expect(
+            ExportWorker.collisionFreeURL(for: "PAIR.JPG", in: folder).lastPathComponent == "PAIR (2).JPG",
+            "collision naming should skip every taken name"
+        )
+        try expect(
+            ExportWorker.collisionFreeURL(for: "FREE.JPG", in: folder).lastPathComponent == "FREE.JPG",
+            "an untaken name should pass through unchanged"
+        )
+    }
+
+    private static func exportCopyCopiesEveryFileAndKeepsSources() throws {
+        let source = try disposableFolder(named: "ExportCopySource")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let destination = try disposableFolder(named: "ExportCopyDestination")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let raw = source.appendingPathComponent("PAIR.NEF")
+        let jpeg = source.appendingPathComponent("PAIR.JPG")
+        let single = source.appendingPathComponent("SINGLE.JPG")
+        try Data("raw".utf8).write(to: raw)
+        try Data("jpeg".utf8).write(to: jpeg)
+        try Data("single".utf8).write(to: single)
+        let items = [
+            makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg),
+            makeItem(id: "SINGLE.JPG", primaryURL: single),
+        ]
+
+        let result = ExportWorker.copy(items, to: destination) { _, _ in }
+        try expect(result.copiedFiles == 3 && result.failedFiles == 0, "copy should duplicate every file")
+        for name in ["PAIR.NEF", "PAIR.JPG", "SINGLE.JPG"] {
+            try expect(
+                FileManager.default.fileExists(atPath: destination.appendingPathComponent(name).path),
+                "\(name) should exist at the destination"
+            )
+            try expect(
+                FileManager.default.fileExists(atPath: source.appendingPathComponent(name).path),
+                "\(name) should stay in the source folder"
+            )
+        }
+    }
+
+    private static func exportMoveReportsFullyMovedPhotos() throws {
+        let source = try disposableFolder(named: "ExportMoveSource")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let destination = try disposableFolder(named: "ExportMoveDestination")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let raw = source.appendingPathComponent("PAIR.NEF")
+        let jpeg = source.appendingPathComponent("PAIR.JPG")
+        let single = source.appendingPathComponent("SINGLE.JPG")
+        try Data("raw".utf8).write(to: raw)
+        try Data("jpeg".utf8).write(to: jpeg)
+        try Data("single".utf8).write(to: single)
+        let items = [
+            makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg),
+            makeItem(id: "SINGLE.JPG", primaryURL: single),
+        ]
+
+        let result = ExportWorker.move(items, to: destination) { _, _ in }
+        try expect(
+            result.movedItemIDs == ["PAIR.NEF", "SINGLE.JPG"],
+            "every fully transferred photo should be reported for session removal"
+        )
+        try expect(result.movedFiles == 3 && result.failedPhotos == 0 && result.inconsistentPhotos == 0,
+                   "a clean move should report no failures")
+        for name in ["PAIR.NEF", "PAIR.JPG", "SINGLE.JPG"] {
+            try expect(
+                FileManager.default.fileExists(atPath: destination.appendingPathComponent(name).path),
+                "\(name) should land at the destination under its own name"
+            )
+            try expect(
+                !FileManager.default.fileExists(atPath: source.appendingPathComponent(name).path),
+                "\(name) should leave the source folder"
+            )
+        }
+    }
+
+    private static func exportMovePairRollsBackOnPartialFailure() throws {
+        let source = try disposableFolder(named: "ExportMoveRollback")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let destination = try disposableFolder(named: "ExportMoveRollbackDestination")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let raw = source.appendingPathComponent("PAIR.NEF")
+        let missingJPEG = source.appendingPathComponent("MISSING.JPG")
+        try Data("raw".utf8).write(to: raw)
+        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: missingJPEG)
+
+        let result = ExportWorker.move([item], to: destination) { _, _ in }
+        try expect(result.movedItemIDs.isEmpty, "an incomplete pair must not count as moved")
+        try expect(result.failedPhotos == 1, "an incomplete pair should report one failed photo")
+        try expect(result.inconsistentPhotos == 0, "a successful rollback should remain consistent")
+        try expect(FileManager.default.fileExists(atPath: raw.path), "the first file must roll back when its pair fails")
+        try expect(
+            !FileManager.default.fileExists(atPath: destination.appendingPathComponent("PAIR.NEF").path),
+            "no file of a failed pair may stay at the destination"
+        )
+    }
+
+    private static func exportMoveRefusesInPlaceDestination() throws {
+        let folder = try disposableFolder(named: "ExportMoveInPlace")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let single = folder.appendingPathComponent("SINGLE.JPG")
+        try Data("single".utf8).write(to: single)
+        let item = makeItem(id: "SINGLE.JPG", primaryURL: single)
+
+        let result = ExportWorker.move([item], to: folder) { _, _ in }
+        try expect(result.movedItemIDs.isEmpty && result.failedPhotos == 1,
+                   "moving a photo into its own folder should be refused")
+        try expect(FileManager.default.fileExists(atPath: single.path), "the original file must stay untouched")
+        try expect(
+            !FileManager.default.fileExists(atPath: folder.appendingPathComponent("SINGLE (1).JPG").path),
+            "an in-place move must not rename the original with a collision suffix"
+        )
+    }
+
     /// Each element written through `@Published items` copies the whole array
     /// and fires objectWillChange, so a per-element clear-all loop is O(N²)
     /// with thousands of publishes — the publish storm left stale rating
@@ -452,6 +577,40 @@ struct PerformanceChecks {
             "one undo should restore every rating in the batch"
         )
         try expect(store.ratedCount == 0, "undo should restore the tally")
+    }
+
+    @MainActor
+    private static func exportMoveRemovalUpdatesSessionState() throws {
+        let store = SessionStore()
+        store.items = (0..<10).map { i in
+            var item = makeItem(id: String(format: "IMG_%04d.JPG", i))
+            item.rating = i < 4 ? .yes : (i < 7 ? .no : .undecided)
+            return item
+        }
+        // Recompute visibleIndices through the sort observer — applyFilter
+        // itself is deliberately private.
+        store.sort.ascending = false
+        try expect(store.visibleIndices.count == 10, "every photo should be visible before the move")
+        store.rate(.no)
+        try expect(store.canUndo, "a rating step should be undoable before the move")
+
+        let movedIDs = (0..<4).map { String(format: "IMG_%04d.JPG", $0) }
+        store.exportMoveWillStart()
+        try expect(store.isMovingExport, "the in-flight flag should be up during the move")
+        store.finishExportMove(movedIDs: movedIDs)
+
+        try expect(!store.isMovingExport, "the in-flight flag should clear when the move finishes")
+        try expect(
+            store.items.map(\.id) == (4..<10).map { String(format: "IMG_%04d.JPG", $0) },
+            "exactly the moved photos should leave the session, in order"
+        )
+        try expect(store.yesCount == 0 && store.items.count == 6, "the tally should be rebuilt from the survivors")
+        try expect(store.visibleIndices.count == 6, "visible indices should shrink with the session")
+        try expect(
+            store.items.indices.contains(store.currentIndex),
+            "the current photo must stay in bounds after the removal"
+        )
+        try expect(!store.canUndo, "a move export is not undoable — the stale undo stack must be cleared")
     }
 
     private static func makeItem(

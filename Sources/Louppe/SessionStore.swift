@@ -473,7 +473,7 @@ final class SessionStore: ObservableObject {
     // MARK: - Opening a folder
 
     func promptForSourceFolder() {
-        guard !isCleaningUp else { return }
+        guard !isCleaningUp, !isMovingExport else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -486,7 +486,7 @@ final class SessionStore: ObservableObject {
     }
 
     func openFolder(_ url: URL) {
-        guard !isCleaningUp else { return }
+        guard !isCleaningUp, !isMovingExport else { return }
         let preservesCurrentFilter = sourceFolder?.standardizedFileURL == url.standardizedFileURL
             && !items.isEmpty
         scanTask?.cancel()
@@ -611,7 +611,7 @@ final class SessionStore: ObservableObject {
     /// Existing ratings survive: they're saved to the sidecar first,
     /// and the scan restores them by filename.
     func rescan() {
-        guard !isCleaningUp, let folder = sourceFolder else { return }
+        guard !isCleaningUp, !isMovingExport, let folder = sourceFolder else { return }
         saveDebounce?.cancel()
         guard let request = makeSaveRequest() else {
             openFolder(folder)
@@ -804,7 +804,7 @@ final class SessionStore: ObservableObject {
     /// and the bare R shortcut all come through here so the threshold is
     /// consistent: 1–15 ratings clear immediately, while 16+ need approval.
     func requestClearAllRatings() {
-        guard !isCleaningUp, ratedCount > 0 else { return }
+        guard !isCleaningUp, !isMovingExport, ratedCount > 0 else { return }
         if ratedCount > 15 {
             isClearAllRatingsConfirmationPresented = true
         } else {
@@ -857,7 +857,7 @@ final class SessionStore: ObservableObject {
     }
 
     func undo() {
-        guard !isCleaningUp, let step = undoStack.popLast() else { return }
+        guard !isCleaningUp, !isMovingExport, let step = undoStack.popLast() else { return }
         // Undo moves the session back in time; a live selection would no
         // longer mean what the user built it for.
         selectedIndices = []
@@ -977,7 +977,7 @@ final class SessionStore: ObservableObject {
     /// Flushes a pending search debounce before presenting counts, ensuring
     /// the confirmation describes the exact set that will be moved.
     func requestCleanUp(_ mode: CleanUpMode) {
-        guard !isCleaningUp else { return }
+        guard !isCleaningUp, !isMovingExport else { return }
         flushPendingFilter()
         pendingCleanUp = mode
     }
@@ -988,7 +988,7 @@ final class SessionStore: ObservableObject {
     /// partial failure its already-trashed files are put back. If that
     /// rollback also fails, the app reports the inconsistent pair explicitly.
     func performCleanUp(_ mode: CleanUpMode) {
-        guard !isCleaningUp else { return }
+        guard !isCleaningUp, !isMovingExport else { return }
         flushPendingFilter()
         // Resolve targets first — .selection reads the live selection —
         // then drop it: indices are about to shift.
@@ -1116,6 +1116,48 @@ final class SessionStore: ObservableObject {
         saveSession()
         isCleaningUp = false
         cleanUpProgress = nil
+    }
+
+    // MARK: - Export (Move mode)
+
+    /// True while a Move export's file loop runs off the main actor. Mirrors
+    /// `isCleaningUp`: structural session mutations and Quit are refused so a
+    /// RAW+JPEG pair can never be stranded half-moved
+    /// (LouppeApplicationDelegate holds termination the same way it does for
+    /// Clean Up). Copy exports never set it — they don't touch the session.
+    @Published private(set) var isMovingExport = false
+    /// The folder the move started from — `finishExportMove` refuses to apply
+    /// a result to a different session.
+    private var movingExportFolder: URL?
+
+    func exportMoveWillStart() {
+        isMovingExport = true
+        movingExportFolder = sourceFolder
+    }
+
+    /// Drops photos whose files a Move export fully transferred. Not
+    /// undoable: the files are gone from the folder, so the undo stack —
+    /// whose indices and Trash URLs describe the pre-move session — is
+    /// cleared, exactly like the lost-restore case in `finishUndoCleanUp`.
+    func finishExportMove(movedIDs: [String]) {
+        let expected = movingExportFolder
+        movingExportFolder = nil
+        isMovingExport = false
+        guard !movedIDs.isEmpty else { return }
+        // Belt over braces: the in-flight guards make a mid-move session swap
+        // impossible, but never remove ids from an unrelated session.
+        if let expected, sourceFolder?.standardizedFileURL != expected.standardizedFileURL { return }
+        let ids = Set(movedIDs)
+        let previousIndex = currentIndex
+        let removedBefore = items.prefix(min(previousIndex, items.count)).filter { ids.contains($0.id) }.count
+        selectedIndices = []
+        items = items.filter { !ids.contains($0.id) }
+        currentIndex = min(max(previousIndex - removedBefore, 0), max(items.count - 1, 0))
+        undoStack.removeAll()
+        rebuildDerivedData()
+        if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
+        saveDebounce?.cancel()
+        saveSession()
     }
 
     // MARK: - Navigation (moves through *visible* photos only)
@@ -1348,7 +1390,7 @@ final class SessionStore: ObservableObject {
     // MARK: - Going back to the welcome screen
 
     func closeSession() {
-        guard !isCleaningUp else { return }
+        guard !isCleaningUp, !isMovingExport else { return }
         scanTask?.cancel()
         scanTask = nil
         scanGeneration &+= 1

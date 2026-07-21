@@ -230,6 +230,18 @@ enum CleanUpMode: Sendable {
     case keepOnlyYes
 }
 
+// MARK: - Export
+
+/// What the Export dialog does with the files of the chosen ratings.
+enum ExportMode: Equatable, Sendable {
+    /// Duplicate the files at the destination; originals stay untouched.
+    case copy
+    /// Transfer the files to the destination. Moved photos leave the session,
+    /// and the move is not undoable in Louppe — the files themselves stay
+    /// intact at the destination.
+    case move
+}
+
 // MARK: - Session sort
 
 /// How the toolbar sort menu orders the visible photos.

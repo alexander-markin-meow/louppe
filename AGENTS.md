@@ -82,7 +82,8 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/FolderScanner.swift` | Recursive folder scan, RAW+JPEG pairing, chronological sort |
 | `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding, thumbnail memory+disk caches, prefetching |
 | `Sources/Louppe/MetadataExtractor.swift` | EXIF reading for capture dates + info panel |
-| `Sources/Louppe/ExportManager.swift` | Copies keepers to a destination, collision-suffixing |
+| `Sources/Louppe/ExportManager.swift` | Export dialog state machine: destination prompt, copy/move orchestration |
+| `Sources/Louppe/ExportWorker.swift` | Background export copy/move loops, collision suffixing, pair rollback for Move |
 | `Sources/Louppe/Models.swift` | `PhotoItem`, `Rating`, `PhotoFilter`, sidecar codables |
 | `Sources/Louppe/Views/RootView.swift` | Phase switch (welcome/scanning/session), `Color.appBackground` |
 | `Sources/Louppe/Views/WelcomeView.swift` | Start screen + cancellable scanning progress |
@@ -94,8 +95,8 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Views/MetadataPanel.swift` | Info panel (filename header, camera, exposure row, fields) |
 | `Sources/Louppe/Views/ThumbnailView.swift` | Async thumbnail tile + rating badge |
 | `Sources/Louppe/Views/FullImageView.swift` | Large photo with fit / 100% / phone-size zoom |
-| `Sources/Louppe/Views/ExportView.swift` | Export dialog (summary → progress → done) |
-| `Tests/PerformanceChecks/main.swift` | Dependency-free search, ordered persistence, and restoration-merge regression checks |
+| `Sources/Louppe/Views/ExportView.swift` | Export dialog (mode + rating tiles → progress → done) |
+| `Tests/PerformanceChecks/main.swift` | Dependency-free search, ordered persistence, restoration-merge, and export copy/move regression checks |
 
 See `Docs/PERFORMANCE.md` before changing concurrency, caching, filtering, or
 Clean Up. It records ownership boundaries, cache budgets, and verification.
@@ -107,14 +108,19 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   2026-07-12 with the owner's consent — old sessions and folder permissions
   were intentionally abandoned. Don't rename again without asking: it resets
   saved ratings and macOS folder permissions.)
-- **Originals are never modified, moved, or deleted.** Export only copies.
-  The single sanctioned exception (added 2026-07-13 at the owner's request) is
-  Clean Up in `SessionStore`: it moves rejected files to the macOS Trash via
+- **Originals are never modified or deleted, and never move without an
+  explicit, confirmed command.** Export's default mode only copies. Two
+  sanctioned exceptions, both owner-requested: (1) Clean Up in `SessionStore`
+  (2026-07-13) moves rejected files to the macOS Trash via
   `FileManager.trashItem` — never a permanent delete — behind a confirmation
-  dialog, and ⌘Z restores the whole batch. Keep it that way: no hard deletes,
-  no moves anywhere but the Trash, and no *single-key* hotkey for it (⌘⌫
-  trashing the selection without a dialog is the one sanctioned shortcut,
-  added 2026-07-13 at the owner's request — Finder parallel, ⌘Z restores).
+  dialog, with ⌘Z restoring the whole batch; no *single-key* hotkey for it
+  (⌘⌫ trashing the selection without a dialog is the one sanctioned
+  shortcut — Finder parallel, ⌘Z restores). (2) The Export dialog's
+  **Move to…** mode (2026-07-21) transfers the chosen ratings' files to a
+  user-selected folder after an explicit mode choice and an in-dialog
+  warning; moved photos leave the session, the move is not undoable, and the
+  files stay intact at the destination. No other code path may move
+  originals; nothing ever hard-deletes.
 - The hotkey map lives in `SessionView.handleKey` and is documented in
   README's shortcut table — keep the two in sync when changing keys.
 - One background gray everywhere: `Color.appBackground`. Don't introduce
@@ -154,7 +160,9 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   in `CleanUpWorker`, apply on `SessionStore`. Do not put `trashItem`/`moveItem`
   loops back on the main actor. While `isCleaningUp`, keep item-index mutations
   blocked, folder switching disabled, and Quit refused so pair rollback and ⌘Z
-  remain exact.
+  remain exact. Export follows the same boundary (`ExportWorker`), and a Move
+  export raises `isMovingExport`, which blocks folder switching, rescan, undo,
+  and Clean Up and refuses Quit the same way.
 - `RootView` owns the persistent window's phase-aware content layout through
   `WindowContentLayout`: Welcome/Scanning use `.fullSizeContentView`, while
   Ready removes it so photos cannot scroll behind the liquid-glass toolbar.

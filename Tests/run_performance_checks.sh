@@ -16,6 +16,7 @@ swiftc \
     Sources/Louppe/MetadataExtractor.swift \
     Sources/Louppe/ImagePipeline.swift \
     Sources/Louppe/CleanUpWorker.swift \
+    Sources/Louppe/ExportWorker.swift \
     Sources/Louppe/SessionPersistence.swift \
     Sources/Louppe/SessionStore.swift \
     Tests/PerformanceChecks/main.swift \

@@ -1,10 +1,11 @@
 # Louppe: Photo Culling App
 
 Fast, keyboard-driven open source macOS app for reviewing a folder of photos and marking
-each one **Yes** (keep) or **No** (reject), then exporting the keepers to a new
-folder. Originals are never modified or deleted — the only thing that can move
-them is the explicit **Clean Up** command, which sends rejects to the macOS
-Trash (recoverable, and undoable with ⌘Z).
+each one **Yes** (keep) or **No** (reject), then exporting any mix of ratings —
+copied to a new folder, or moved there with the export dialog's opt-in
+**Move to…** mode. Originals are never modified or deleted — the only things
+that can move them are that explicit Move mode and the **Clean Up** command,
+which sends rejects to the macOS Trash (recoverable, and undoable with ⌘Z).
 
 ## Download
 
@@ -14,7 +15,8 @@ This app isn't notarized by Apple, so on first launch macOS will warn it can't v
 
 ## Using the app
 
-Pick a folder (an SD card works), review, then press **⌘E** to export.
+Pick a folder (an SD card works), review, then press **⌘E** to copy — or
+move — the photos you picked.
 
 ### Keyboard shortcuts
 
@@ -150,7 +152,8 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `FolderScanner.swift` — recursive folder scan, RAW+JPEG pairing, sorting
 - `ImagePipeline.swift` — image decoding (ImageIO), thumbnail caches, prefetching
 - `MetadataExtractor.swift` — EXIF extraction (dates, exposure settings, info panel fields)
-- `ExportManager.swift` — copying keepers, filename collision handling
+- `ExportManager.swift` — export dialog orchestration (copy/move, destination prompt)
+- `ExportWorker.swift` — background export copy/move loops, collision handling, pair rollback
 - `Models.swift` — the photo item and session file formats
 - `Views/` — welcome screen, session toolbar + hotkeys, Gallery view, Browser,
   Grid view, info panel, thumbnails, export dialog

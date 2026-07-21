@@ -3,44 +3,65 @@ import SwiftUI
 struct ExportView: View {
     @ObservedObject var store: SessionStore
     @StateObject private var exporter = ExportManager()
+    // The sheet's content is recreated per presentation, so every open starts
+    // from the safe default: Copy, keepers only.
+    @State private var mode: ExportMode = .copy
+    @State private var selectedRatings: Set<Rating> = [.yes]
 
     var body: some View {
         VStack(spacing: 16) {
             switch exporter.state {
             case .summary:
                 summaryView
-            case .copying(let done, let total):
-                copyingView(done: done, total: total)
-            case .finished(let copied, let failed, let destination):
-                finishedView(copied: copied, failed: failed, destination: destination)
+            case .working(let mode, let done, let total):
+                workingView(mode: mode, done: done, total: total)
+            case .finished(let outcome):
+                finishedView(outcome: outcome)
             case .failed(let message):
                 failedView(message: message)
             }
         }
         .padding(24)
         .frame(width: 380)
+        .interactiveDismissDisabled(isWorking)
+    }
+
+    private var isWorking: Bool {
+        if case .working = exporter.state { return true }
+        return false
     }
 
     private var summaryView: some View {
         VStack(spacing: 14) {
-            Text("Export Keepers")
+            Text("Export")
                 .font(.title2.bold())
 
-            Grid(horizontalSpacing: 24, verticalSpacing: 6) {
-                GridRow {
-                    countCell(store.yesCount, label: "Yes", color: .green)
-                    countCell(store.noCount, label: "No", color: .red)
-                    countCell(store.undecidedCount, label: "Undecided", color: .secondary)
-                }
+            Picker("Mode", selection: $mode) {
+                Text("Copy to…").tag(ExportMode.copy)
+                Text("Move to…").tag(ExportMode.move)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            HStack(spacing: 12) {
+                ratingTile(.yes, count: store.yesCount, label: "Yes", color: .green)
+                ratingTile(.no, count: store.noCount, label: "No", color: .red)
+                ratingTile(.undecided, count: store.undecidedCount, label: "Undecided", color: .secondary)
             }
 
-            let fileCount = store.items.filter { $0.rating == .yes }.flatMap(\.allURLs).count
-            Text(exportDescription(fileCount: fileCount))
+            Text(exportDescription)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            if store.undecidedCount > 0 {
+            if mode == .move {
+                Text("Moved photos leave the source folder and this session. This can't be undone in Louppe — the files stay safe at the destination.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
+            if store.undecidedCount > 0 && !selectedRatings.contains(.undecided) {
                 Text("\(store.undecidedCount) photo\(store.undecidedCount == 1 ? "" : "s") still undecided — they won't be exported.")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -50,41 +71,83 @@ struct ExportView: View {
                 Button("Cancel") { store.isExportPresented = false }
                     .keyboardShortcut(.cancelAction)
                 Button("Choose Destination…") {
-                    exporter.promptDestinationAndExport(items: store.items)
+                    exporter.promptDestinationAndExport(
+                        items: store.items,
+                        ratings: selectedRatings,
+                        mode: mode,
+                        onMoveWillStart: { store.exportMoveWillStart() },
+                        onMoveDidFinish: { store.finishExportMove(movedIDs: $0) }
+                    )
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(store.yesCount == 0)
+                .disabled(selectedPhotoCount == 0)
             }
         }
     }
 
-    private func exportDescription(fileCount: Int) -> String {
-        if store.yesCount == 0 {
-            return "Mark some photos Yes (press Y) before exporting."
+    /// Photos the current tile selection would export — O(1) from the tally.
+    private var selectedPhotoCount: Int {
+        (selectedRatings.contains(.yes) ? store.yesCount : 0)
+            + (selectedRatings.contains(.no) ? store.noCount : 0)
+            + (selectedRatings.contains(.undecided) ? store.undecidedCount : 0)
+    }
+
+    /// Actual file count, counting RAW+JPEG pairs as two.
+    private var selectedFileCount: Int {
+        store.items.reduce(0) { $0 + (selectedRatings.contains($1.rating) ? $1.allURLs.count : 0) }
+    }
+
+    private var exportDescription: String {
+        if selectedRatings.isEmpty {
+            return "Select at least one rating tile above to export."
         }
-        var text = "\(store.yesCount) photo\(store.yesCount == 1 ? "" : "s") will be copied"
-        if fileCount != store.yesCount {
-            text += " (\(fileCount) files, including RAW+JPEG pairs)"
+        if selectedPhotoCount == 0 {
+            return selectedRatings == [.yes]
+                ? "Mark some photos Yes (press F) before exporting."
+                : "No photos have the selected ratings."
         }
-        text += ". Originals are never touched."
+        let verb = mode == .copy ? "copied" : "moved"
+        var text = "\(selectedPhotoCount) photo\(selectedPhotoCount == 1 ? "" : "s") will be \(verb)"
+        if selectedFileCount != selectedPhotoCount {
+            text += " (\(selectedFileCount) files, including RAW+JPEG pairs)"
+        }
+        text += mode == .copy ? ". Originals are never touched." : "."
         return text
     }
 
-    private func countCell(_ count: Int, label: String, color: Color) -> some View {
-        VStack(spacing: 2) {
-            Text("\(count)")
-                .font(.title.bold())
-                .foregroundStyle(color)
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+    private func ratingTile(_ rating: Rating, count: Int, label: String, color: Color) -> some View {
+        let isSelected = selectedRatings.contains(rating)
+        return Button {
+            if isSelected {
+                selectedRatings.remove(rating)
+            } else {
+                selectedRatings.insert(rating)
+            }
+        } label: {
+            VStack(spacing: 2) {
+                Text("\(count)")
+                    .font(.title.bold())
+                    .foregroundStyle(isSelected ? color : color.opacity(0.35))
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+            }
+            .frame(minWidth: 70)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isSelected ? color.opacity(0.12) : Color.clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
-        .frame(minWidth: 70)
+        .buttonStyle(.plain)
+        .help(isSelected ? "Click to leave \(label) photos out" : "Click to include \(label) photos")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
-    private func copyingView(done: Int, total: Int) -> some View {
+    private func workingView(mode: ExportMode, done: Int, total: Int) -> some View {
         VStack(spacing: 12) {
-            Text("Copying photos…")
+            Text(mode == .copy ? "Copying photos…" : "Moving photos…")
                 .font(.headline)
             ProgressView(value: Double(done), total: Double(total))
             Text("\(done) of \(total) files")
@@ -93,21 +156,20 @@ struct ExportView: View {
         }
     }
 
-    private func finishedView(copied: Int, failed: Int, destination: URL) -> some View {
+    private func finishedView(outcome: ExportManager.Outcome) -> some View {
         VStack(spacing: 14) {
-            Image(systemName: failed == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+            Image(systemName: outcome.isClean ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .font(.system(size: 40))
-                .foregroundStyle(failed == 0 ? .green : .orange)
-            Text(failed == 0 ? "Export complete" : "Export finished with problems")
+                .foregroundStyle(outcome.isClean ? .green : .orange)
+            Text(outcome.isClean ? "Export complete" : "Export finished with problems")
                 .font(.title3.bold())
-            Text("\(copied) file\(copied == 1 ? "" : "s") copied to \(destination.lastPathComponent)"
-                 + (failed > 0 ? " — \(failed) failed to copy." : "."))
+            Text(finishedMessage(for: outcome))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             HStack {
                 Button("Show in Finder") {
-                    exporter.revealInFinder(destination)
+                    exporter.revealInFinder(outcome.destination)
                 }
                 Button("Done") {
                     store.isExportPresented = false
@@ -116,6 +178,25 @@ struct ExportView: View {
                 .keyboardShortcut(.defaultAction)
             }
         }
+    }
+
+    private func finishedMessage(for outcome: ExportManager.Outcome) -> String {
+        let verb = outcome.mode == .copy ? "copied" : "moved"
+        var text = "\(outcome.files) file\(outcome.files == 1 ? "" : "s") \(verb) to \(outcome.destination.lastPathComponent)"
+        switch outcome.mode {
+        case .copy:
+            text += outcome.failedFiles > 0 ? " — \(outcome.failedFiles) failed to copy." : "."
+        case .move:
+            if outcome.failedPhotos > 0 {
+                text += " — \(outcome.failedPhotos) photo\(outcome.failedPhotos == 1 ? "" : "s") couldn't be moved and stayed in the session."
+            } else {
+                text += "."
+            }
+            if outcome.inconsistentPhotos > 0 {
+                text += " For \(outcome.inconsistentPhotos), rollback also failed; check both the source folder and the destination."
+            }
+        }
+        return text
     }
 
     private func failedView(message: String) -> some View {
