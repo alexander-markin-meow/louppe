@@ -22,6 +22,11 @@ enum MediaKind: String, Hashable, Sendable {
     }
 }
 
+enum RawJPEGPairingMode: String, Hashable, Sendable {
+    case together
+    case separate
+}
+
 struct PhotoItem: Identifiable, Sendable {
     /// Relative path of the primary file within the source folder — stable session key.
     let id: String

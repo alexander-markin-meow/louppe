@@ -18,6 +18,8 @@ struct PerformanceChecks {
         try folderScannerHonorsCancellation()
         try folderScannerStopsAfterProgressCancellation()
         try videoNeverBecomesThePairForSameNamedRaw()
+        try rawAndTiffStayIndependent()
+        try rawJPEGPairingCanBeDisabled()
         try imageCacheKeyDoesNotTouchFilesystemAfterScan()
         try cleanUpScopeResolvesExpectedCandidates()
         try linearRestoreMergePreservesOrderAndOmitsLostPhoto()
@@ -33,7 +35,7 @@ struct PerformanceChecks {
         try clearAllRatingsPublishesOnceForLargeSessions()
         try batchRatingUndoRestoresEveryRating()
         try exportMoveRemovalUpdatesSessionState()
-        print("Performance checks passed (29/29)")
+        print("Performance checks passed (31/31)")
     }
 
     private static func preparedFilterMatchesFoldedMetadataTokens() throws {
@@ -369,6 +371,44 @@ struct PerformanceChecks {
         }
         try expect(rawItem.pairedURL == jpeg, "RAW should pair only with its JPEG")
         try expect(videoItem.pairedURL == nil && videoItem.isVideo, "video should remain an independent item")
+    }
+
+    private static func rawAndTiffStayIndependent() throws {
+        let folder = try disposableFolder(named: "RawTiffPairing")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let raw = folder.appendingPathComponent("SHOT.NEF")
+        let tiff = folder.appendingPathComponent("SHOT.TIFF")
+        try Data().write(to: raw)
+        try Data().write(to: tiff)
+
+        let items = try FolderScanner.scan(folder) { _ in }
+        try expect(items.count == 2, "same-named RAW and TIFF should produce two review items")
+        try expect(items.allSatisfy { $0.pairedURL == nil }, "TIFF should never become a RAW pair")
+        try expect(
+            Set(items.map(\.fileTypeLabel)) == ["RAW", "TIFF"],
+            "same-named RAW and TIFF should retain their individual file types"
+        )
+    }
+
+    private static func rawJPEGPairingCanBeDisabled() throws {
+        let folder = try disposableFolder(named: "RawJPEGPairingMode")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let raw = folder.appendingPathComponent("SHOT.NEF")
+        let jpeg = folder.appendingPathComponent("SHOT.JPG")
+        try Data().write(to: raw)
+        try Data().write(to: jpeg)
+
+        let paired = try FolderScanner.scan(folder) { _ in }
+        try expect(paired.count == 1, "RAW+JPEG should stay one item by default")
+        try expect(paired[0].fileTypeLabel == "RAW + JPEG", "default pairing should use the combined type")
+
+        let separate = try FolderScanner.scan(folder, pairingMode: .separate) { _ in }
+        try expect(separate.count == 2, "separate pairing mode should expose both files")
+        try expect(separate.allSatisfy { $0.pairedURL == nil }, "separate pairing mode should remove the partner link")
+        try expect(
+            Set(separate.map(\.fileTypeLabel)) == ["RAW", "JPEG"],
+            "separate pairing mode should expose independent file types"
+        )
     }
 
     private static func imageCacheKeyDoesNotTouchFilesystemAfterScan() throws {

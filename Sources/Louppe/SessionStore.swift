@@ -42,6 +42,9 @@ final class SessionStore: ObservableObject {
     @Published var isExportPresented = false
     @Published var isFilterPresented = false
     @Published var isSortPresented = false
+    /// Whether same-named RAW and JPEG files are reviewed and acted on as one
+    /// photo item. The safe default keeps the existing RAW+JPEG behavior.
+    @Published private(set) var rawJPEGPairingMode: RawJPEGPairingMode = .together
     /// The "Divide into groups" switch at the end of the sort popover. One
     /// global setting: off hides every divider whatever the sort key is.
     @Published var isGroupingEnabled = true {
@@ -555,6 +558,7 @@ final class SessionStore: ObservableObject {
         isClearAllRatingsConfirmationPresented = false
         pendingCleanUp = nil
         addToRecents(url)
+        let pairingMode = rawJPEGPairingMode
 
         scanTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
@@ -565,7 +569,11 @@ final class SessionStore: ObservableObject {
                 // into a flag that is valid on any thread.
                 let cancelFlag = FolderScanner.CancelFlag()
                 let scanned = try await withTaskCancellationHandler {
-                    try FolderScanner.scan(url, isCancelled: { cancelFlag.isSet }) { count in
+                    try FolderScanner.scan(
+                        url,
+                        pairingMode: pairingMode,
+                        isCancelled: { cancelFlag.isSet }
+                    ) { count in
                         Task { @MainActor [weak self] in
                             guard let self,
                                   self.scanGeneration == generation,
@@ -603,6 +611,31 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    func setRawJPEGPairingMode(_ mode: RawJPEGPairingMode) {
+        guard mode != rawJPEGPairingMode else { return }
+        rawJPEGPairingMode = mode
+        guard let folder = sourceFolder, case .ready = phase, !items.isEmpty else { return }
+
+        // The available type labels change between "RAW + JPEG" and separate
+        // "RAW"/"JPEG" entries. Clear only that facet so an old label cannot
+        // silently produce a surprising result after the rebuild.
+        var updatedFilter = filter
+        updatedFilter.excludedTypes = []
+        filter = updatedFilter
+        flushPendingFilter()
+        saveSession()
+        let requestedMode = mode
+        let saveTask = pendingPersistenceTask
+        Task { @MainActor [weak self] in
+            await saveTask?.value
+            guard let self,
+                  self.rawJPEGPairingMode == requestedMode,
+                  self.sourceFolder?.standardizedFileURL == folder.standardizedFileURL,
+                  case .ready = self.phase else { return }
+            self.openFolder(folder)
+        }
+    }
+
     /// Stops the active folder walk and returns immediately to the welcome
     /// screen. `closeSession` also advances `scanGeneration`, so any detached
     /// work that finishes after cancellation cannot apply partial results.
@@ -623,7 +656,15 @@ final class SessionStore: ObservableObject {
         if let session = savedSession {
             var ratingByFilename: [String: (Rating, Date?)] = [:]
             for entry in session.entries {
-                ratingByFilename[entry.filename] = (Rating(rawValue: entry.rating) ?? .undecided, entry.ratedAt)
+                let rating = (Rating(rawValue: entry.rating) ?? .undecided, entry.ratedAt)
+                ratingByFilename[entry.filename] = rating
+                if let pairedFilename = entry.pairedFilename {
+                    let parent = (entry.filename as NSString).deletingLastPathComponent
+                    let pairedID = parent.isEmpty ? pairedFilename : "\(parent)/\(pairedFilename)"
+                    // When a previously paired item is split, both files
+                    // inherit the existing decision instead of losing it.
+                    ratingByFilename[pairedID] = rating
+                }
             }
             for i in loaded.indices {
                 if let (rating, ratedAt) = ratingByFilename[loaded[i].id] {

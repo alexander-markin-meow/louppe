@@ -66,8 +66,11 @@ for files whose date is unknown. Aperture, shutter speed, and ISO accept
 inclusive typed ranges; shutter values can use photographer notation such as
 `1/1000` or `2s`. Subfolder, file type, camera, and lens remain available as
 checkbox lists; the subfolder list includes a **None** entry for files lying
-directly in the source folder. Different sections combine, so a date, camera,
-and ISO range can all be active at once.
+directly in the source folder. The **Keep RAW + JPEG together** switch in the
+File types section is enabled by default; turn it off when you want same-named
+RAW and JPEG files to be reviewed, rated, filtered, exported, or cleaned up as
+separate items. RAW+TIFF files are always separate. Different sections combine,
+so a date, camera, and ISO range can all be active at once.
 
 Mixed folders add a **Media** section for Photos/Videos and a **Video duration**
 range accepting `m:ss` or `h:mm:ss`. Activating a duration range shows matching

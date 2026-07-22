@@ -326,6 +326,15 @@ struct FilterView: View {
     private var fileTypesSection: some View {
         FilterDisclosureSection(title: "File types", isExpanded: $fileTypesExpanded) {
             VStack(alignment: .leading, spacing: 7) {
+                Toggle(isOn: rawJPEGPairingBinding) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Keep RAW + JPEG together")
+                        Text("Turn off to review and act on them separately")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Divider()
                 ForEach(store.availableTypes, id: \.self) { type in
                     Toggle(isOn: exclusionBinding(type, \.excludedTypes)) {
                         labeledCount(type, store.typeCounts[type, default: 0])
@@ -333,6 +342,13 @@ struct FilterView: View {
                 }
             }
         }
+    }
+
+    private var rawJPEGPairingBinding: Binding<Bool> {
+        Binding(
+            get: { store.rawJPEGPairingMode == .together },
+            set: { store.setRawJPEGPairingMode($0 ? .together : .separate) }
+        )
     }
 
     private var camerasSection: some View {

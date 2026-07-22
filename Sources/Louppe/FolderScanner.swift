@@ -102,6 +102,7 @@ enum FolderScanner {
     /// workers too, so it must be safe to call from any thread.
     static func scan(
         _ root: URL,
+        pairingMode: RawJPEGPairingMode = .together,
         isCancelled: () -> Bool = { false },
         progress: (Int) -> Void
     ) throws -> [PhotoItem] {
@@ -174,7 +175,7 @@ enum FolderScanner {
             let raws = images.filter { rawExtensions.contains($0.pathExtension.lowercased()) }
             let jpegs = images.filter { ["jpg", "jpeg"].contains($0.pathExtension.lowercased()) }
 
-            if let raw = raws.first, let jpeg = jpegs.first {
+            if pairingMode == .together, let raw = raws.first, let jpeg = jpegs.first {
                 pairs.append((raw, jpeg))
                 // Rare leftovers (e.g., two RAWs or JPEGs with the same base
                 // name) become separate items without duplicating either side
