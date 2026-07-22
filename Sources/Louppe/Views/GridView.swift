@@ -55,9 +55,9 @@ struct GridView: View {
                 ScrollView {
                     if store.visibleIndices.isEmpty && store.filter.isActive {
                         ContentUnavailableView(
-                            "No photos match the filter",
+                            "No items match the filter",
                             systemImage: "line.3.horizontal.decrease.circle",
-                            description: Text("Adjust or reset the filter in the toolbar to see photos again.")
+                            description: Text("Adjust or reset the filter in the toolbar to see media again.")
                         )
                         .padding(.top, 80)
                     }
@@ -164,17 +164,50 @@ struct GridView: View {
 
     private func cell(index: Int, item: PhotoItem) -> some View {
         VStack(spacing: 3) {
-            ThumbnailView(
-                item: item,
-                isCurrent: index == store.currentIndex,
-                isSelected: store.selectedIndices.contains(index)
-            )
+            ZStack {
+                ThumbnailView(
+                    item: item,
+                    isCurrent: index == store.currentIndex,
+                    isSelected: store.selectedIndices.contains(index),
+                    videoPlayback: store.videoPlayback
+                )
+                .allowsHitTesting(false)
+
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(cellTapGesture(index: index))
+
+                if item.isVideo, item.videoIsPlayable {
+                    Button {
+                        if index != store.currentIndex { store.setIndex(index) }
+                        store.videoPlayback.toggle(item)
+                    } label: {
+                        Image(systemName: store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
+                            ? "pause.fill"
+                            : "play.fill")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.circle)
+                    .tint(.black.opacity(0.62))
+                    .foregroundStyle(.white)
+                    .controlSize(.large)
+                    .help(store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
+                        ? "Pause video"
+                        : "Play video")
+                    .accessibilityLabel(store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
+                        ? "Pause video"
+                        : "Play video")
+                }
+            }
             .aspectRatio(1, contentMode: .fit)
             Text(item.displayName)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .contentShape(Rectangle())
+                .gesture(cellTapGesture(index: index))
         }
         .id(item.id)
         .contentShape(Rectangle())
@@ -186,20 +219,21 @@ struct GridView: View {
                 )
             }
         )
-        .gesture(
-            TapGesture(count: 2).onEnded {
-                // Double-click: open in the Gallery view.
-                store.setIndex(index)
-                store.viewMode = .gallery
+    }
+
+    /// The play button is a sibling of this hit target, not its descendant.
+    /// That keeps a playback click from also triggering the cell's rating or
+    /// double-click gestures — the source of Grid playback being cancelled.
+    private func cellTapGesture(index: Int) -> some Gesture {
+        TapGesture(count: 2).onEnded {
+            store.setIndex(index)
+            store.viewMode = .gallery
+        }
+        .exclusively(before: TapGesture(count: 1).onEnded {
+            store.handleThumbnailClick(at: index) {
+                store.toggleRating(at: index)
             }
-            .exclusively(before: TapGesture(count: 1).onEnded {
-                // ⇧-click: range · ⌘-click: add/remove · click: cycle rating
-                // (a click on a multi-selected photo rates the whole selection).
-                store.handleThumbnailClick(at: index) {
-                    store.toggleRating(at: index)
-                }
-            })
-        )
+        })
     }
 
     // MARK: - Rubber-band selection

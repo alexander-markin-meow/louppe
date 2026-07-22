@@ -20,21 +20,25 @@ struct GalleryView: View {
                     // Only reachable when Clean Up emptied the whole session
                     // (an empty scan goes back to the welcome screen instead).
                     ContentUnavailableView(
-                        "No photos left in this folder",
+                        "No media left in this folder",
                         systemImage: "trash",
-                        description: Text("Everything was moved to the Trash. Press ⌘Z to put the photos back.")
+                        description: Text("Everything was moved to the Trash. Press ⌘Z to put the items back.")
                     )
                 } else if store.visibleIndices.isEmpty && store.filter.isActive {
                     ContentUnavailableView(
-                        "No photos match the filter",
+                        "No items match the filter",
                         systemImage: "line.3.horizontal.decrease.circle",
-                        description: Text("Adjust or reset the filter in the toolbar to see photos again.")
+                        description: Text("Adjust or reset the filter in the toolbar to see media again.")
                     )
                 } else if let item = store.currentItem {
-                    FullImageView(item: item, zoomMode: $store.zoomMode) { loading in
-                        store.fullImageLoads += loading ? 1 : -1
+                    if item.isVideo {
+                        GalleryVideoPlayerView(item: item, playback: store.videoPlayback)
+                    } else {
+                        FullImageView(item: item, zoomMode: $store.zoomMode) { loading in
+                            store.fullImageLoads += loading ? 1 : -1
+                        }
+                        .id(item.id)
                     }
-                    .id(item.id)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

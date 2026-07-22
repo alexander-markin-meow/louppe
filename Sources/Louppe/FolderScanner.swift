@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 /// Recursively discovers photos in a folder and turns them into `PhotoItem`s:
 /// pairs RAW+JPEG shots, reads capture dates, and sorts chronologically.
@@ -33,19 +34,36 @@ enum FolderScanner {
         "webp", "avif", "jxl", "jp2", "psd", "tga", "ico",
     ])
 
+    /// Movie extensions commonly found on cameras, phones, drones, and web
+    /// downloads. `isVideoExtension` also asks Uniform Type Identifiers, so
+    /// formats added by macOS media extensions are discovered automatically.
+    static let videoExtensions: Set<String> = [
+        "mov", "mp4", "m4v", "avi", "mkv", "mpg", "mpeg", "wmv", "flv",
+        "webm", "3gp", "3g2", "mts", "m2ts", "m2v", "hevc", "insv",
+    ]
+
     /// Visual files we recognise but can't preview — RAW formats ImageIO
-    /// doesn't decode, and video. They show up in the session as a grey
+    /// doesn't decode. They show up in the session as a grey
     /// "file isn't supported" placeholder instead of being silently dropped.
     static let unsupportedVisualExtensions: Set<String> = [
         // RAW formats ImageIO can't decode
         "x3f", "kdc", "mef", "gpr",
-        // Video
-        "mov", "mp4", "m4v", "avi", "mkv", "mpg", "mpeg", "wmv", "flv",
-        "webm", "3gp", "mts", "m2ts", "hevc", "insv",
     ]
 
     /// Everything we surface in a session — previewable or placeholder.
-    static let recognizedExtensions: Set<String> = supportedExtensions.union(unsupportedVisualExtensions)
+    static let recognizedExtensions: Set<String> = supportedExtensions
+        .union(unsupportedVisualExtensions)
+        .union(videoExtensions)
+
+    static func isVideoExtension(_ ext: String) -> Bool {
+        let normalized = ext.lowercased()
+        if videoExtensions.contains(normalized) { return true }
+        return UTType(filenameExtension: normalized)?.conforms(to: .movie) == true
+    }
+
+    static func isRecognizedExtension(_ ext: String) -> Bool {
+        recognizedExtensions.contains(ext.lowercased()) || isVideoExtension(ext)
+    }
 
     /// SD cards nest photos under e.g. DCIM/100NIKON/, so scan recursively —
     /// but not endlessly, in case of symlink loops or pathological trees.
@@ -111,7 +129,7 @@ enum FolderScanner {
                 continue
             }
             let ext = url.pathExtension.lowercased()
-            guard recognizedExtensions.contains(ext) else { continue }
+            guard isRecognizedExtension(ext) else { continue }
             // These keys were prefetched by the enumerator above. Keep their
             // values now instead of issuing separate attributes/resource calls
             // for every primary photo later in the scan.
@@ -145,16 +163,27 @@ enum FolderScanner {
         pairs.reserveCapacity(files.count)
         for (_, urls) in groups {
             if isCancelled() { throw CancellationError() }
-            let raws = urls.filter { rawExtensions.contains($0.pathExtension.lowercased()) }
-            let nonRaws = urls.filter { !rawExtensions.contains($0.pathExtension.lowercased()) }
+            // Videos are always independent media, even when a camera gives a
+            // RAW and sidecar movie the same base name. Only RAW + JPEG is a
+            // pair; pairing a RAW with MOV/PNG/TIFF would make the latter
+            // disappear from the review session.
+            let videos = urls.filter { isVideoExtension($0.pathExtension) }
+            for video in videos { pairs.append((video, nil)) }
 
-            if let raw = raws.first, let jpeg = nonRaws.first {
+            let images = urls.filter { !isVideoExtension($0.pathExtension) }
+            let raws = images.filter { rawExtensions.contains($0.pathExtension.lowercased()) }
+            let jpegs = images.filter { ["jpg", "jpeg"].contains($0.pathExtension.lowercased()) }
+
+            if let raw = raws.first, let jpeg = jpegs.first {
                 pairs.append((raw, jpeg))
-                // Rare leftovers (e.g., two RAWs with the same base name) become separate items.
-                for extra in raws.dropFirst() { pairs.append((extra, nil)) }
-                for extra in nonRaws.dropFirst() { pairs.append((extra, nil)) }
+                // Rare leftovers (e.g., two RAWs or JPEGs with the same base
+                // name) become separate items without duplicating either side
+                // of the one real pair.
+                for extra in images where extra != raw && extra != jpeg {
+                    pairs.append((extra, nil))
+                }
             } else {
-                for url in urls { pairs.append((url, nil)) }
+                for url in images { pairs.append((url, nil)) }
             }
         }
 
@@ -208,7 +237,9 @@ enum FolderScanner {
                     // throw below, so stopping mid-chunk is safe.
                     if isCancelled() { return }
                     let facts = factsByURL[primary]
-                    let info = MetadataExtractor.scanInfo(for: primary)
+                    let isVideo = isVideoExtension(primary.pathExtension)
+                    let info = isVideo ? MetadataExtractor.ScanInfo() : MetadataExtractor.scanInfo(for: primary)
+                    let videoInfo = isVideo ? VideoMetadataExtractor.scanInfo(for: primary) : nil
                     let captureDate = info.captureDate ?? facts?.creationDate
                     items.append(PhotoItem(
                         id: relativePath(of: primary, under: rootPath),
@@ -220,6 +251,12 @@ enum FolderScanner {
                         aperture: info.aperture,
                         shutterSpeed: info.shutterSpeed,
                         iso: info.iso,
+                        mediaKind: isVideo ? .video : .photo,
+                        duration: videoInfo?.duration,
+                        videoDimensions: videoInfo?.dimensions,
+                        videoCodec: videoInfo?.codec,
+                        videoFrameRate: videoInfo?.frameRate,
+                        videoIsPlayable: videoInfo?.isPlayable ?? false,
                         primaryModificationDate: facts?.modificationDate,
                         fileSize: facts?.size ?? 0,
                         pairedFileSize: paired.flatMap { factsByURL[$0]?.size } ?? 0

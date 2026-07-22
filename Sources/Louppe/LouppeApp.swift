@@ -112,7 +112,7 @@ struct LouppeApp: App {
         let credits = NSMutableAttributedString()
 
         credits.append(NSAttributedString(
-            string: "Fast photo culling for photographers.\n\n", attributes: base))
+            string: "Fast photo and video culling for photographers.\n\n", attributes: base))
 
         link[.link] = URL(string: "https://github.com/alexander-markin-meow/louppe/releases")!
         credits.append(NSAttributedString(string: "Version History", attributes: link))

@@ -3,12 +3,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SDK="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}"
-
-mkdir -p .build/performance-checks/module-cache
+mkdir -p .build/video-checks/module-cache
 
 swiftc \
     -sdk "$SDK" \
-    -module-cache-path .build/performance-checks/module-cache \
+    -module-cache-path .build/video-checks/module-cache \
     -parse-as-library \
     Sources/Louppe/Models.swift \
     Sources/Louppe/AppDateFormat.swift \
@@ -17,11 +16,7 @@ swiftc \
     Sources/Louppe/VideoSupport.swift \
     Sources/Louppe/ImagePipeline.swift \
     Sources/Louppe/VideoPlaybackController.swift \
-    Sources/Louppe/CleanUpWorker.swift \
-    Sources/Louppe/ExportWorker.swift \
-    Sources/Louppe/SessionPersistence.swift \
-    Sources/Louppe/SessionStore.swift \
-    Tests/PerformanceChecks/main.swift \
-    -o .build/performance-checks/LouppePerformanceChecks
+    Tests/VideoChecks/main.swift \
+    -o .build/video-checks/LouppeVideoChecks
 
-.build/performance-checks/LouppePerformanceChecks
+.build/video-checks/LouppeVideoChecks

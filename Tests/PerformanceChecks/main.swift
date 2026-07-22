@@ -9,11 +9,15 @@ struct PerformanceChecks {
         try preparedFilterUsesSpecificDateCheckboxes()
         try preparedFilterUsesInclusiveExposureRanges()
         try neutralFullRangesKeepUnknownMetadataVisible()
+        try mediaKindFilterSeparatesPhotosAndVideos()
+        try durationFilterAndSortHandleImagesAsMissingValues()
+        try durationFormattingCoversShortAndLongMovies()
         try selectionSummaryKeepsEveryDistinctMetadataValue()
         try metadataSortKeepsMissingValuesLast()
         try subfolderFacetFiltersAndSortsByRelativePath()
         try folderScannerHonorsCancellation()
         try folderScannerStopsAfterProgressCancellation()
+        try videoNeverBecomesThePairForSameNamedRaw()
         try imageCacheKeyDoesNotTouchFilesystemAfterScan()
         try cleanUpScopeResolvesExpectedCandidates()
         try linearRestoreMergePreservesOrderAndOmitsLostPhoto()
@@ -29,7 +33,7 @@ struct PerformanceChecks {
         try clearAllRatingsPublishesOnceForLargeSessions()
         try batchRatingUndoRestoresEveryRating()
         try exportMoveRemovalUpdatesSessionState()
-        print("Performance checks passed (25/25)")
+        print("Performance checks passed (29/29)")
     }
 
     private static func preparedFilterMatchesFoldedMetadataTokens() throws {
@@ -122,6 +126,41 @@ struct PerformanceChecks {
             PreparedPhotoFilter(filter).matches(makeItem(id: "UNKNOWN-METADATA.JPG")),
             "neutral full ranges should keep photos with unknown metadata visible"
         )
+    }
+
+    private static func mediaKindFilterSeparatesPhotosAndVideos() throws {
+        let photo = makeItem(id: "PHOTO.JPG")
+        let video = makeItem(id: "VIDEO.MOV", mediaKind: .video, duration: 12, videoIsPlayable: true)
+        var filter = PhotoFilter()
+        filter.excludedMediaKinds = [.photo]
+        let prepared = PreparedPhotoFilter(filter)
+        try expect(!prepared.matches(photo), "media filter should exclude switched-off photos")
+        try expect(prepared.matches(video), "media filter should keep enabled videos")
+    }
+
+    private static func durationFilterAndSortHandleImagesAsMissingValues() throws {
+        let photo = makeItem(id: "PHOTO.JPG")
+        let short = makeItem(id: "SHORT.MOV", mediaKind: .video, duration: 12, videoIsPlayable: true)
+        let long = makeItem(id: "LONG.MP4", mediaKind: .video, duration: 95, videoIsPlayable: true)
+        var filter = PhotoFilter()
+        filter.durationEnabled = true
+        filter.durationFrom = 10
+        filter.durationTo = 20
+        let prepared = PreparedPhotoFilter(filter)
+        try expect(prepared.matches(short), "duration range should include a video inside its bounds")
+        try expect(!prepared.matches(long), "duration range should exclude a longer video")
+        try expect(!prepared.matches(photo), "an active duration range should exclude images without duration")
+
+        let ascending = PhotoSort(key: .duration, ascending: true)
+        let ordered = [photo, long, short].sorted(by: ascending.areInOrder)
+        try expect(ordered.map(\.id) == ["SHORT.MOV", "LONG.MP4", "PHOTO.JPG"], "duration sort should keep missing values last")
+    }
+
+    private static func durationFormattingCoversShortAndLongMovies() throws {
+        try expect(MediaDurationFormat.display(0) == "0:00", "zero duration should stay visible")
+        try expect(MediaDurationFormat.display(65) == "1:05", "minute duration should be zero padded")
+        try expect(MediaDurationFormat.display(3_661) == "1:01:01", "hour duration should include hours")
+        try expect(MediaDurationFormat.display(nil) == "--:--", "missing duration should keep a visible placeholder")
     }
 
     private static func selectionSummaryKeepsEveryDistinctMetadataValue() throws {
@@ -310,6 +349,26 @@ struct PerformanceChecks {
             didCancel = true
         }
         try expect(didCancel, "an in-progress folder scan should stop after cancellation")
+    }
+
+    private static func videoNeverBecomesThePairForSameNamedRaw() throws {
+        let folder = try disposableFolder(named: "VideoPairing")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let raw = folder.appendingPathComponent("CLIP.NEF")
+        let jpeg = folder.appendingPathComponent("CLIP.JPG")
+        let video = folder.appendingPathComponent("CLIP.MOV")
+        try Data().write(to: raw)
+        try Data().write(to: jpeg)
+        try Data().write(to: video)
+
+        let items = try FolderScanner.scan(folder) { _ in }
+        try expect(items.count == 2, "RAW+JPEG and same-named video should produce two review items")
+        guard let rawItem = items.first(where: { $0.primaryURL == raw }),
+              let videoItem = items.first(where: { $0.primaryURL == video }) else {
+            throw CheckFailure("scanner dropped RAW or same-named video")
+        }
+        try expect(rawItem.pairedURL == jpeg, "RAW should pair only with its JPEG")
+        try expect(videoItem.pairedURL == nil && videoItem.isVideo, "video should remain an independent item")
     }
 
     private static func imageCacheKeyDoesNotTouchFilesystemAfterScan() throws {
@@ -623,6 +682,9 @@ struct PerformanceChecks {
         aperture: Double? = nil,
         shutter: Double? = nil,
         iso: Double? = nil,
+        mediaKind: MediaKind = .photo,
+        duration: TimeInterval? = nil,
+        videoIsPlayable: Bool = false,
         modificationDate: Date? = nil,
         fileSize: Int64 = 1,
         pairedFileSize: Int64 = 0
@@ -637,6 +699,9 @@ struct PerformanceChecks {
             aperture: aperture,
             shutterSpeed: shutter,
             iso: iso,
+            mediaKind: mediaKind,
+            duration: duration,
+            videoIsPlayable: videoIsPlayable,
             primaryModificationDate: modificationDate,
             fileSize: fileSize,
             pairedFileSize: pairedFileSize

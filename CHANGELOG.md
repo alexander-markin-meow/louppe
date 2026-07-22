@@ -5,7 +5,30 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-07-21
+## 1.7.0 (9) — 2026-07-22
+
+- Added first-class video review using native macOS playback. Videos now use
+  their first frame as the thumbnail, always show their duration in the
+  Gallery Browser and Grid, open with the full native player in Gallery, and
+  play inline in Grid with a single play/pause control.
+- Video support follows the movie types and codecs available to AVFoundation
+  on the Mac. Recognised movies that macOS cannot decode remain visible,
+  rateable, filterable, and exportable with a clear unsupported message.
+- Filtering and sorting now understand mixed media: filter Photos/Videos and
+  video duration, or sort/group by media type and duration. Video metadata,
+  RAW+JPEG pairing, first-frame caching, and one-player-at-a-time behavior are
+  covered by focused regression checks.
+- Fixed video-player focus intercepting Louppe's review hotkeys. Arrow keys
+  always move the current item (including Grid rows), and the Grid play/pause
+  control no longer also triggers the tile's rating gesture.
+- Space now plays or pauses the current video in Gallery or Grid. It retains
+  its previous next-item behavior when the current item is a photo.
+- Stabilized Gallery playback controls when moving rapidly between videos.
+  Louppe now preserves the native player view and uses AVKit's anchored inline
+  control pane instead of rebuilding a floating pane for every selection.
+- Fixed the Browser's purple current-item indicator disappearing after the
+  selected video was moved to Trash or moved during export. Browser rows now
+  follow stable media IDs rather than reusing a removed item's numeric index.
 
 - Clearing all ratings in a large folder is now instant. Previously every
   photo triggered its own full refresh, which could freeze the app for

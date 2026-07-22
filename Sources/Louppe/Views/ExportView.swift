@@ -55,14 +55,14 @@ struct ExportView: View {
                 .multilineTextAlignment(.center)
 
             if mode == .move {
-                Text("Moved photos leave the source folder and this session. This can't be undone in Louppe — the files stay safe at the destination.")
+                Text("Moved items leave the source folder and this session. This can't be undone in Louppe — the files stay safe at the destination.")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .multilineTextAlignment(.center)
             }
 
             if store.undecidedCount > 0 && !selectedRatings.contains(.undecided) {
-                Text("\(store.undecidedCount) photo\(store.undecidedCount == 1 ? "" : "s") still undecided — they won't be exported.")
+                Text("\(store.undecidedCount) item\(store.undecidedCount == 1 ? "" : "s") still undecided — they won't be exported.")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -103,11 +103,11 @@ struct ExportView: View {
         }
         if selectedPhotoCount == 0 {
             return selectedRatings == [.yes]
-                ? "Mark some photos Yes (press F) before exporting."
-                : "No photos have the selected ratings."
+                ? "Mark some items Yes (press F) before exporting."
+                : "No items have the selected ratings."
         }
         let verb = mode == .copy ? "copied" : "moved"
-        var text = "\(selectedPhotoCount) photo\(selectedPhotoCount == 1 ? "" : "s") will be \(verb)"
+        var text = "\(selectedPhotoCount) item\(selectedPhotoCount == 1 ? "" : "s") will be \(verb)"
         if selectedFileCount != selectedPhotoCount {
             text += " (\(selectedFileCount) files, including RAW+JPEG pairs)"
         }
@@ -141,13 +141,13 @@ struct ExportView: View {
             .contentShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
-        .help(isSelected ? "Click to leave \(label) photos out" : "Click to include \(label) photos")
+        .help(isSelected ? "Click to leave \(label) items out" : "Click to include \(label) items")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func workingView(mode: ExportMode, done: Int, total: Int) -> some View {
         VStack(spacing: 12) {
-            Text(mode == .copy ? "Copying photos…" : "Moving photos…")
+            Text(mode == .copy ? "Copying media…" : "Moving media…")
                 .font(.headline)
             ProgressView(value: Double(done), total: Double(total))
             Text("\(done) of \(total) files")
@@ -188,7 +188,7 @@ struct ExportView: View {
             text += outcome.failedFiles > 0 ? " — \(outcome.failedFiles) failed to copy." : "."
         case .move:
             if outcome.failedPhotos > 0 {
-                text += " — \(outcome.failedPhotos) photo\(outcome.failedPhotos == 1 ? "" : "s") couldn't be moved and stayed in the session."
+                text += " — \(outcome.failedPhotos) item\(outcome.failedPhotos == 1 ? "" : "s") couldn't be moved and stayed in the session."
             } else {
                 text += "."
             }

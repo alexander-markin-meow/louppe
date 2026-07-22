@@ -10,13 +10,20 @@ struct ThumbnailView: View {
     var isCurrent: Bool
     /// Part of a multi-selection: same accent as the current photo, dimmed.
     var isSelected: Bool = false
+    var videoPlayback: VideoPlaybackController?
 
     @State private var image: NSImage?
 
-    init(item: PhotoItem, isCurrent: Bool, isSelected: Bool = false) {
+    init(
+        item: PhotoItem,
+        isCurrent: Bool,
+        isSelected: Bool = false,
+        videoPlayback: VideoPlaybackController? = nil
+    ) {
         self.item = item
         self.isCurrent = isCurrent
         self.isSelected = isSelected
+        self.videoPlayback = videoPlayback
         // Reappearing lazy cells should render their memory-cached image on
         // their first frame instead of flashing a placeholder and scheduling
         // an otherwise unnecessary state update.
@@ -28,7 +35,7 @@ struct ThumbnailView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
             Group {
                 if !item.isSupported {
                     UnsupportedThumbnail(item: item)
@@ -49,13 +56,26 @@ struct ThumbnailView: View {
                         }
                 }
             }
-            .overlay {
-                RoundedRectangle(cornerRadius: thumbnailCornerRadius)
-                    .strokeBorder(borderColor, lineWidth: 3)
+            if let videoPlayback, item.isVideo, item.videoIsPlayable {
+                GridVideoPlaybackOverlay(
+                    item: item,
+                    playback: videoPlayback
+                )
             }
-
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: thumbnailCornerRadius)
+                .strokeBorder(borderColor, lineWidth: 3)
+        }
+        .overlay(alignment: .topTrailing) {
             RatingBadge(rating: item.rating)
                 .padding(4)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if item.isVideo {
+                VideoDurationBadge(duration: item.duration)
+                    .padding(4)
+            }
         }
         .task(id: item.id) {
             guard item.isSupported, image == nil else { return }
@@ -70,8 +90,36 @@ struct ThumbnailView: View {
     }
 }
 
-/// Grey placeholder tile shown for recognised-but-unpreviewable files
-/// (other RAW formats, PNG/HEIC/WebP, video, …).
+private struct GridVideoPlaybackOverlay: View {
+    let item: PhotoItem
+    @ObservedObject var playback: VideoPlaybackController
+
+    var body: some View {
+        if playback.isActive(item) {
+            NativeVideoPlayer(player: playback.player, controls: .none)
+                .clipShape(RoundedRectangle(cornerRadius: thumbnailCornerRadius))
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+struct VideoDurationBadge: View {
+    let duration: TimeInterval?
+
+    var body: some View {
+        Text(MediaDurationFormat.display(duration))
+            .font(.caption2.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3)
+            .background(.black.opacity(0.68), in: Capsule())
+            .shadow(radius: 1)
+            .accessibilityLabel("Video duration: \(MediaDurationFormat.accessibility(duration))")
+    }
+}
+
+/// Grey placeholder tile shown for recognised-but-unpreviewable files.
 struct UnsupportedThumbnail: View {
     let item: PhotoItem
 

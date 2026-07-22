@@ -6,6 +6,8 @@ struct FilterView: View {
     @ObservedObject var store: SessionStore
 
     @State private var dateExpanded = true
+    @State private var mediaExpanded = true
+    @State private var durationExpanded = false
     @State private var cameraSettingsExpanded = false
     @State private var subfoldersExpanded = false
     @State private var fileTypesExpanded = true
@@ -18,6 +20,8 @@ struct FilterView: View {
     @State private var shutterToText = ""
     @State private var isoFromText = ""
     @State private var isoToText = ""
+    @State private var durationFromText = ""
+    @State private var durationToText = ""
     @State private var settingCommitTask: Task<Void, Never>?
     @FocusState private var focusedSettingField: SettingField?
 
@@ -25,6 +29,7 @@ struct FilterView: View {
         case apertureFrom, apertureTo
         case shutterFrom, shutterTo
         case isoFrom, isoTo
+        case durationFrom, durationTo
     }
 
     var body: some View {
@@ -35,6 +40,16 @@ struct FilterView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     dateSection
+
+                    if store.availableMediaKinds.count > 1 {
+                        Divider()
+                        mediaSection
+                    }
+
+                    if store.durationRange != nil {
+                        Divider()
+                        durationSection
+                    }
 
                     Divider()
                     fileTypesSection
@@ -85,7 +100,7 @@ struct FilterView: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-            TextField("Search name, camera, lens…", text: $store.filter.searchText)
+            TextField("Search name, type, camera, lens…", text: $store.filter.searchText)
                 .textFieldStyle(.plain)
             if !store.filter.searchText.isEmpty {
                 Button {
@@ -128,7 +143,7 @@ struct FilterView: View {
                             displayedComponents: .date
                         )
                     } else {
-                        Text("This folder contains no dated photos.")
+                        Text("This folder contains no dated items.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -164,7 +179,50 @@ struct FilterView: View {
         }
     }
 
-    // MARK: - Camera settings
+    // MARK: - Media
+
+    private var mediaSection: some View {
+        FilterDisclosureSection(title: "Media", isExpanded: $mediaExpanded) {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(store.availableMediaKinds, id: \.self) { kind in
+                    Toggle(isOn: mediaKindBinding(kind)) {
+                        labeledCount(kind.label, store.mediaKindCounts[kind, default: 0])
+                    }
+                }
+            }
+        }
+    }
+
+    private var durationSection: some View {
+        FilterDisclosureSection(title: "Video duration", isExpanded: $durationExpanded) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 5) {
+                    Text("From")
+                    validatedTextField(
+                        $durationFromText,
+                        field: .durationFrom,
+                        width: 76,
+                        invalid: !durationDraftIsValid
+                    )
+                    Text("to").foregroundStyle(.secondary)
+                    validatedTextField(
+                        $durationToText,
+                        field: .durationTo,
+                        width: 76,
+                        invalid: !durationDraftIsValid
+                    )
+                }
+                .padding(.leading, 20)
+                Text("Use m:ss or h:mm:ss")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 20)
+                if !durationDraftIsValid { invalidRangeMessage }
+            }
+            .onChange(of: durationFromText) { scheduleSettingCommit() }
+            .onChange(of: durationToText) { scheduleSettingCommit() }
+        }
+    }
 
     private var cameraSettingsSection: some View {
         FilterDisclosureSection(title: "Camera settings", isExpanded: $cameraSettingsExpanded) {
@@ -440,6 +498,20 @@ struct FilterView: View {
         }
     }
 
+    private func mediaKindBinding(_ kind: MediaKind) -> Binding<Bool> {
+        Binding {
+            !store.filter.excludedMediaKinds.contains(kind)
+        } set: { on in
+            var filter = store.filter
+            if on {
+                filter.excludedMediaKinds.remove(kind)
+            } else {
+                filter.excludedMediaKinds.insert(kind)
+            }
+            store.filter = filter
+        }
+    }
+
     // MARK: - Range drafts
 
     private var apertureDraftIsValid: Bool {
@@ -457,6 +529,12 @@ struct FilterView: View {
     private var isoDraftIsValid: Bool {
         guard let from = Self.parseISO(isoFromText),
               let to = Self.parseISO(isoToText) else { return false }
+        return from <= to
+    }
+
+    private var durationDraftIsValid: Bool {
+        guard let from = Self.parseDuration(durationFromText),
+              let to = Self.parseDuration(durationToText) else { return false }
         return from <= to
     }
 
@@ -496,6 +574,18 @@ struct FilterView: View {
         filter.isoEnabled = from != available.lowerBound || to != available.upperBound
     }
 
+    private func commitDurationDrafts(to filter: inout PhotoFilter) {
+        guard let available = store.durationRange,
+              let parsedFrom = Self.parseDuration(durationFromText),
+              let parsedTo = Self.parseDuration(durationToText),
+              parsedFrom <= parsedTo else { return }
+        let from = Self.snapDuration(parsedFrom, toDisplayedBound: available.lowerBound)
+        let to = Self.snapDuration(parsedTo, toDisplayedBound: available.upperBound)
+        filter.durationFrom = from
+        filter.durationTo = to
+        filter.durationEnabled = from != available.lowerBound || to != available.upperBound
+    }
+
     private func syncAllSettingDrafts() {
         if let range = store.apertureRange {
             let from = store.filter.apertureFrom > 0 ? store.filter.apertureFrom : range.lowerBound
@@ -514,6 +604,12 @@ struct FilterView: View {
             let to = store.filter.isoTo > 0 ? store.filter.isoTo : range.upperBound
             isoFromText = Self.formatISO(from)
             isoToText = Self.formatISO(to)
+        }
+        if let range = store.durationRange {
+            let from = store.filter.durationEnabled ? store.filter.durationFrom : range.lowerBound
+            let to = store.filter.durationEnabled ? store.filter.durationTo : range.upperBound
+            durationFromText = Self.formatDuration(from)
+            durationToText = Self.formatDuration(to)
         }
     }
 
@@ -535,6 +631,7 @@ struct FilterView: View {
         commitApertureDrafts(to: &updated)
         commitShutterDrafts(to: &updated)
         commitISODrafts(to: &updated)
+        commitDurationDrafts(to: &updated)
         if updated != store.filter {
             // One assignment means one pass across the photo list even if
             // several camera-setting fields changed before the debounce fired.
@@ -556,6 +653,10 @@ struct FilterView: View {
             isoFromText = Self.formatISO(store.filter.isoFrom)
         case .isoTo where !isoDraftIsValid:
             isoToText = Self.formatISO(store.filter.isoTo)
+        case .durationFrom where !durationDraftIsValid:
+            durationFromText = Self.formatDuration(store.filter.durationFrom)
+        case .durationTo where !durationDraftIsValid:
+            durationToText = Self.formatDuration(store.filter.durationTo)
         default:
             break
         }
@@ -597,6 +698,36 @@ struct FilterView: View {
         return number
     }
 
+    private static func parseDuration(_ text: String) -> Double? {
+        var value = normalizedNumberText(text).lowercased()
+        if value.hasSuffix("s") { value.removeLast() }
+        let fields = value.split(separator: ":", omittingEmptySubsequences: false)
+        let seconds: Double?
+        switch fields.count {
+        case 1:
+            seconds = Double(fields[0])
+        case 2:
+            if let minutes = Double(fields[0]), minutes >= 0,
+               let remainder = Double(fields[1]), remainder >= 0, remainder < 60 {
+                seconds = minutes * 60 + remainder
+            } else {
+                seconds = nil
+            }
+        case 3:
+            if let hours = Double(fields[0]), hours >= 0,
+               let minutes = Double(fields[1]), minutes >= 0, minutes < 60,
+               let remainder = Double(fields[2]), remainder >= 0, remainder < 60 {
+                seconds = hours * 3600 + minutes * 60 + remainder
+            } else {
+                seconds = nil
+            }
+        default:
+            seconds = nil
+        }
+        guard let seconds, seconds.isFinite, seconds >= 0 else { return nil }
+        return seconds
+    }
+
     private static func normalizedNumberText(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: " ", with: "")
@@ -615,6 +746,10 @@ struct FilterView: View {
         MetadataFormat.iso(value)
     }
 
+    private static func formatDuration(_ value: Double) -> String {
+        MediaDurationFormat.display(value)
+    }
+
     /// Display formatting rounds some legal EXIF values. If the user-entered
     /// value equals what a folder bound displays, retain the exact bound so a
     /// neutral full range cannot accidentally exclude its edge photo.
@@ -628,6 +763,10 @@ struct FilterView: View {
 
     private static func snapISO(_ value: Double, toDisplayedBound bound: Double) -> Double {
         parseISO(formatISO(bound)) == value ? bound : value
+    }
+
+    private static func snapDuration(_ value: Double, toDisplayedBound bound: Double) -> Double {
+        parseDuration(formatDuration(bound)) == value ? bound : value
     }
 
     private func labeledCount(_ label: String, _ count: Int) -> some View {

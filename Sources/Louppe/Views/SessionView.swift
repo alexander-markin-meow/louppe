@@ -6,7 +6,8 @@ import AppKit
 ///
 /// Hotkey map (README's table must stay in sync with `handleKey`):
 ///   F yes · D no · S 100% zoom · A phone-size zoom · R clear all
-///   Q browser · W info panel · E export · Space next · ←/→ prev/next
+///   Q browser · W info panel · E export · Space video play/pause (photo: next)
+///   ←/→ prev/next
 ///   ↑/↓ prev/next in the Gallery view · same-column photo in the Grid view
 ///   Tab/G switch view · Z/⌘Z undo · ⌘+/⌘− grid size
 ///   ⌘A select all · ⌘⇧←/→ select to first/last · Esc clear selection
@@ -59,8 +60,8 @@ struct SessionView: View {
 
     private var clearAllRatingsMessage: String {
         let count = store.ratedCount
-        let photos = count == 1 ? "1 photo" : "\(count) photos"
-        return "This will remove the Yes or No rating from \(photos). You can undo it with ⌘Z."
+        let items = count == 1 ? "1 item" : "\(count) items"
+        return "This will remove the Yes or No rating from \(items). You can undo it with ⌘Z."
     }
 
     private var isCleanUpConfirmPresented: Binding<Bool> {
@@ -82,11 +83,11 @@ struct SessionView: View {
         let counts = store.cleanUpCounts(for: mode)
         switch mode {
         case .selection:
-            return "Move \(photosPhrase(counts.photos)) to the Trash?"
+            return "Move \(itemsPhrase(counts.photos)) to the Trash?"
         case .trashNo:
-            return "Move \(photosPhrase(counts.photos)) marked “No” to the Trash?"
+            return "Move \(itemsPhrase(counts.photos)) marked “No” to the Trash?"
         case .keepOnlyYes:
-            return "Move \(photosPhrase(counts.photos)) not marked “Yes” to the Trash?"
+            return "Move \(itemsPhrase(counts.photos)) not marked “Yes” to the Trash?"
         }
     }
 
@@ -97,11 +98,11 @@ struct SessionView: View {
         var parts = ["\(files) will be moved to Trash (RAW+JPEG pair counts as two), freeing \(space) of space."]
         switch mode {
         case .selection:
-            parts.append("Only the selected photos will leave the folder; everything else stays.")
+            parts.append("Only the selected items will leave the folder; everything else stays.")
         case .trashNo:
-            parts.append("Among the photos being considered, photos marked “Yes” and unrated photos stay in the folder.")
+            parts.append("Among the items being considered, items marked “Yes” and unrated items stay in the folder.")
         case .keepOnlyYes:
-            parts.append("Among the photos being considered, only those marked “Yes” stay in the folder.")
+            parts.append("Among the items being considered, only those marked “Yes” stay in the folder.")
         }
         // Spell out the rating-based scope so nothing outside it is trashed
         // (or spared) by surprise. A direct selection is already explicit.
@@ -109,24 +110,24 @@ struct SessionView: View {
             switch store.cleanUpScope {
             case .all:
                 if store.filter.isActive {
-                    parts.append("All \(store.items.count) photos in the folder are considered, including the ones the filter currently hides.")
+                    parts.append("All \(store.items.count) items in the folder are considered, including the ones the filter currently hides.")
                 }
             case .filtered:
                 if store.filter.isActive {
                     let hidden = store.items.count - store.visibleIndices.count
-                    parts.append("Only the \(store.visibleIndices.count) photos the filter shows are considered — the \(hidden) hidden ones aren't touched.")
+                    parts.append("Only the \(store.visibleIndices.count) items the filter shows are considered — the \(hidden) hidden ones aren't touched.")
                 }
             case .selected:
                 let count = store.cleanUpScopeCount(for: .selected)
-                let phrase = count == 1 ? "1 selected photo is" : "\(count) selected photos are"
-                parts.append("Only \(phrase) considered — every unselected photo stays in the folder.")
+                let phrase = count == 1 ? "1 selected item is" : "\(count) selected items are"
+                parts.append("Only \(phrase) considered — every unselected item stays in the folder.")
             }
         }
         return parts.joined(separator: "\n")
     }
 
-    private func photosPhrase(_ count: Int) -> String {
-        count == 1 ? "1 photo" : "\(count) photos"
+    private func itemsPhrase(_ count: Int) -> String {
+        count == 1 ? "1 item" : "\(count) items"
     }
 
     private var subtitle: String {
@@ -216,7 +217,7 @@ struct SessionView: View {
                     .labelStyle(.titleAndIcon)
             }
             .disabled(store.isCleaningUp)
-            .help("Choose another photo folder (⌘O)")
+            .help("Choose another media folder (⌘O)")
         }
 
         if #available(macOS 26.0, *) {
@@ -235,7 +236,7 @@ struct SessionView: View {
             .popover(isPresented: $store.isFilterPresented, arrowEdge: .bottom) {
                 FilterView(store: store)
             }
-            .help("Filter photos by metadata, date, subfolder, type, camera, or lens")
+            .help("Filter media by date, type, duration, subfolder, camera, or lens")
 
             Button {
                 store.isSortPresented.toggle()
@@ -245,7 +246,7 @@ struct SessionView: View {
             .popover(isPresented: $store.isSortPresented, arrowEdge: .bottom) {
                 SortView(store: store)
             }
-            .help("Sort photos by date, name, or metadata")
+            .help("Sort media by date, name, type, duration, or metadata")
 
             Picker("View", selection: $store.viewMode) {
                 Image(systemName: "photo").tag(ViewMode.gallery)
@@ -281,7 +282,7 @@ struct SessionView: View {
                 Image(systemName: "eraser")
             }
             .disabled(store.isCleaningUp || store.ratedCount == 0)
-            .help("Clear all photo ratings (R)")
+            .help("Clear all ratings (R)")
         }
 
         if #available(macOS 26.0, *) {
@@ -305,7 +306,7 @@ struct SessionView: View {
             } label: {
                 Image(systemName: "info.circle")
             }
-            .help("Show or hide photo information (W)")
+            .help("Show or hide media information (W)")
         }
 
         if #available(macOS 26.0, *) {
@@ -331,7 +332,7 @@ struct SessionView: View {
             .disabled(store.isCleaningUp)
             .menuIndicator(.hidden)
             .tint(Color.primary)
-            .help("Choose photos to move to the Trash")
+            .help("Choose items to move to the Trash")
         }
 
         if #available(macOS 26.0, *) {
@@ -353,7 +354,7 @@ struct SessionView: View {
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .tint(Color.louppeAccent)
-            .help("Export photos by rating — copy or move them to a folder (E or ⌘E)")
+            .help("Export media by rating — copy or move it to a folder (E or ⌘E)")
         }
     }
 
@@ -374,7 +375,9 @@ struct SessionView: View {
         }
     }
 
-    private func handleKey(_ event: NSEvent) -> Bool {
+    /// Internal so the key-routing boundary can be regression tested with
+    /// synthetic NSEvents without requiring macOS Accessibility permission.
+    func handleKey(_ event: NSEvent) -> Bool {
         // Leave command shortcuts (⌘Z, ⌘E…) to the menu bar, and don't steal
         // keys while the export sheet or a panel is up or the user is typing.
         guard case .ready = store.phase else { return false }
@@ -441,7 +444,6 @@ struct SessionView: View {
 
         if event.modifierFlags.intersection([.command, .option, .control]) != [] { return false }
         if NSApp.keyWindow?.firstResponder is NSTextView { return false }
-
         switch event.keyCode {
         case 123: store.goPrevious(); return true            // ←
         case 124: store.goNext(); return true                // →
@@ -462,7 +464,13 @@ struct SessionView: View {
             }
             return true
         case 48:  store.toggleViewMode(); return true        // Tab
-        case 49:  store.goNext(); return true                // Space: next, no rating
+        case 49:                                             // Space
+            if let item = store.currentItem, item.isVideo {
+                store.videoPlayback.toggle(item)
+            } else {
+                store.goNext()
+            }
+            return true
         case 53:                                             // Esc: drop the selection
             guard !store.selectedIndices.isEmpty else { return false }
             store.clearSelection()
@@ -495,6 +503,7 @@ struct SessionView: View {
             return false
         }
     }
+
 }
 
 /// The Clean Up menu body — the three trash actions plus the inline scope —

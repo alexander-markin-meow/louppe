@@ -1,7 +1,7 @@
-# Louppe: Photo Culling App
+# Louppe: Photo and Video Culling App
 
-Fast, keyboard-driven open source macOS app for reviewing a folder of photos and marking
-each one **Yes** (keep) or **No** (reject), then exporting any mix of ratings —
+Fast, keyboard-driven open source macOS app for reviewing a folder of photos and videos,
+marking each one **Yes** (keep) or **No** (reject), then exporting any mix of ratings —
 copied to a new folder, or moved there with the export dialog's opt-in
 **Move to…** mode. Originals are never modified or deleted — the only things
 that can move them are that explicit Move mode and the **Clean Up** command,
@@ -25,7 +25,7 @@ move — the photos you picked.
 | → | Next photo |
 | ← | Previous photo |
 | ↑ / ↓ | Previous / next photo in the Gallery view; previous / next row in the Grid view |
-| Space | Next photo without rating |
+| Space | Play/pause the current video; on a photo, move to the next item without rating |
 | F | Mark Yes (all selected photos), jump to next undecided |
 | D | Mark No (all selected photos), jump to next undecided |
 | S | Toggle 100% zoom / fit |
@@ -47,6 +47,11 @@ move — the photos you picked.
 In the **Grid view**: single-click a photo to cycle its rating
 (undecided → yes → no), double-click to open it big in the main view.
 
+Videos use their first frame as the thumbnail and show their duration at all
+times. Use the play/pause button to preview a video directly in the Grid, or
+open it in Gallery for the full native macOS player with timeline, volume,
+full-screen, and Picture in Picture controls. Only one video plays at a time.
+
 While a folder is being scanned, Louppe shows its name, full path, and running
 photo count. Use **Cancel Scan** in the toolbar or press **Esc** to stop the
 scan and return to the start screen; partial scan results are discarded.
@@ -64,8 +69,13 @@ checkbox lists; the subfolder list includes a **None** entry for files lying
 directly in the source folder. Different sections combine, so a date, camera,
 and ISO range can all be active at once.
 
-The adjacent sort menu orders the visible photos by date (the default), name,
-subfolder, file type, camera, lens, aperture, shutter speed, or ISO. Photos
+Mixed folders add a **Media** section for Photos/Videos and a **Video duration**
+range accepting `m:ss` or `h:mm:ss`. Activating a duration range shows matching
+videos only; leaving the full range untouched keeps every photo and video visible.
+
+The adjacent sort menu orders visible media by date (the default), name,
+subfolder, file type, media type, camera, lens, aperture, shutter speed, ISO,
+or video duration. Items
 missing the chosen metadata stay at the end in either direction.
 
 ### Selecting several photos
@@ -136,7 +146,8 @@ under the current unreleased version until that release actually ships.
 
 The fresh app appears at `dist/Louppe.app`. Copy it to `/Applications` to install.
 
-Run the focused logic checks with `./Tests/run_performance_checks.sh`. They use
+Run the focused logic checks with `./Tests/run_performance_checks.sh` and the
+native movie checks with `./Tests/run_video_checks.sh`. They use
 only Apple Command Line Tools and no external test framework. After any app change, also launch
 the installed build with `-openFolder` as described in
 [`AGENTS.md`](AGENTS.md); a compile-only check is not enough.
@@ -150,7 +161,9 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `SessionPersistence.swift` — serialized background sidecar encoding and I/O
 - `CleanUpWorker.swift` — background Trash/restore operations and linear merge
 - `FolderScanner.swift` — recursive folder scan, RAW+JPEG pairing, sorting
-- `ImagePipeline.swift` — image decoding (ImageIO), thumbnail caches, prefetching
+- `ImagePipeline.swift` — image decoding and video first frames, thumbnail caches, prefetching
+- `VideoSupport.swift` — native video metadata and duration formatting
+- `VideoPlaybackController.swift` — shared native player lifecycle
 - `MetadataExtractor.swift` — EXIF extraction (dates, exposure settings, info panel fields)
 - `ExportManager.swift` — export dialog orchestration (copy/move, destination prompt)
 - `ExportWorker.swift` — background export copy/move loops, collision handling, pair rollback
@@ -172,8 +185,15 @@ Supported formats:
   `.MRW`, Epson `.ERF`
 - **Images** — `.JPG`/`.JPEG`, `.TIF`/`.TIFF`, `.PNG`, `.HEIC`/`.HEIF`/`.HIF`,
   `.WEBP`, `.AVIF`, `.JXL`, `.GIF`, `.BMP`, `.PSD`, `.TGA`, `.JP2`, `.ICO`
+- **Videos** — every local movie type and codec supported by macOS AVFoundation,
+  normally including QuickTime/MPEG-4 camera and phone footage such as `.MOV`,
+  `.MP4`, `.M4V`, `.3GP`, H.264, HEVC, and ProRes. Louppe also recognises
+  common `.AVI`, `.MKV`, `.WEBM`, `.MTS`/`.M2TS`, `.MPG`/`.MPEG`, `.WMV`,
+  `.FLV`, and `.INSV` files; playback depends on a native decoder being
+  available on that Mac.
 
-Other visual files (videos, a few rare RAW formats) still appear in the
+Other recognised visual files (including a few rare RAW formats and movies
+whose codec macOS cannot decode) still appear in the
 session as a grey "file isn't supported" placeholder, so nothing on the card
 is silently hidden — you can rate and export them like any other file.
 

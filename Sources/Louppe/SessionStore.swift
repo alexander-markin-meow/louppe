@@ -24,7 +24,11 @@ enum ZoomMode {
 final class SessionStore: ObservableObject {
     @Published var phase: AppPhase = .welcome
     @Published var items: [PhotoItem] = []
-    @Published var currentIndex: Int = 0
+    @Published var currentIndex: Int = 0 {
+        didSet {
+            if currentIndex != oldValue { videoPlayback.stop() }
+        }
+    }
     @Published var viewMode: ViewMode = .gallery
     @Published var showMetadataPanel = true
     @Published var showBrowser = true
@@ -51,6 +55,7 @@ final class SessionStore: ObservableObject {
     @Published var fullImageLoads = 0
     @Published var scanError: String?
     @Published var recentFolders: [URL] = []
+    let videoPlayback = VideoPlaybackController()
 
     /// The toolbar filter. Views only render `visibleIndices`; `items` stays
     /// the full list so ratings and the sidecar are never affected by filtering.
@@ -131,6 +136,7 @@ final class SessionStore: ObservableObject {
     private var ratingTally = (yes: 0, no: 0, undecided: 0)
 
     @Published private(set) var availableTypes: [String] = []
+    @Published private(set) var availableMediaKinds: [MediaKind] = []
     @Published private(set) var availableCameras: [String] = []
     @Published private(set) var availableLenses: [String] = []
     @Published private(set) var availableSubfolders: [String] = []
@@ -139,7 +145,9 @@ final class SessionStore: ObservableObject {
     @Published private(set) var apertureRange: ClosedRange<Double>?
     @Published private(set) var shutterRange: ClosedRange<Double>?
     @Published private(set) var isoRange: ClosedRange<Double>?
+    @Published private(set) var durationRange: ClosedRange<Double>?
     @Published private(set) var typeCounts: [String: Int] = [:]
+    @Published private(set) var mediaKindCounts: [MediaKind: Int] = [:]
     @Published private(set) var cameraCounts: [String: Int] = [:]
     @Published private(set) var lensCounts: [String: Int] = [:]
     @Published private(set) var subfolderCounts: [String: Int] = [:]
@@ -261,6 +269,7 @@ final class SessionStore: ObservableObject {
     private func rebuildDerivedData() {
         var tally = (yes: 0, no: 0, undecided: 0)
         var types: [String: Int] = [:]
+        var mediaKinds: [MediaKind: Int] = [:]
         var cameras: [String: Int] = [:]
         var lenses: [String: Int] = [:]
         var subfolders: [String: Int] = [:]
@@ -272,6 +281,8 @@ final class SessionStore: ObservableObject {
         var maximumShutter: Double?
         var minimumISO: Double?
         var maximumISO: Double?
+        var minimumDuration: Double?
+        var maximumDuration: Double?
         for item in items {
             switch item.rating {
             case .yes: tally.yes += 1
@@ -279,6 +290,7 @@ final class SessionStore: ObservableObject {
             case .undecided: tally.undecided += 1
             }
             types[item.fileTypeLabel, default: 0] += 1
+            mediaKinds[item.mediaKind, default: 0] += 1
             cameras[item.cameraLabel, default: 0] += 1
             lenses[item.lensLabel, default: 0] += 1
             subfolders[item.subfolderLabel, default: 0] += 1
@@ -299,13 +311,19 @@ final class SessionStore: ObservableObject {
                 minimumISO = minimumISO.map { min($0, iso) } ?? iso
                 maximumISO = maximumISO.map { max($0, iso) } ?? iso
             }
+            if let duration = item.duration, duration.isFinite, duration >= 0 {
+                minimumDuration = minimumDuration.map { min($0, duration) } ?? duration
+                maximumDuration = maximumDuration.map { max($0, duration) } ?? duration
+            }
         }
         ratingTally = tally
         typeCounts = types
+        mediaKindCounts = mediaKinds
         cameraCounts = cameras
         lensCounts = lenses
         subfolderCounts = subfolders
         availableTypes = types.keys.sorted()
+        availableMediaKinds = [.photo, .video].filter { mediaKinds[$0] != nil }
         availableCameras = cameras.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         availableLenses = lenses.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         // "None" (the folder root) always lists last, like the date list's
@@ -324,6 +342,10 @@ final class SessionStore: ObservableObject {
         apertureRange = Self.closedRange(minimum: minimumAperture, maximum: maximumAperture)
         shutterRange = Self.closedRange(minimum: minimumShutter, maximum: maximumShutter)
         isoRange = Self.closedRange(minimum: minimumISO, maximum: maximumISO)
+        durationRange = Self.closedRange(minimum: minimumDuration, maximum: maximumDuration)
+        if let activeID = videoPlayback.itemID, !items.contains(where: { $0.id == activeID }) {
+            videoPlayback.stop()
+        }
         rebuildSortedIndices()
     }
 
@@ -341,6 +363,7 @@ final class SessionStore: ObservableObject {
     private func synchronizeFilterRangesWithAvailableData() -> Bool {
         var updated = filter
         updated.excludedTypes.formIntersection(availableTypes)
+        updated.excludedMediaKinds.formIntersection(availableMediaKinds)
         updated.excludedCameras.formIntersection(availableCameras)
         updated.excludedLenses.formIntersection(availableLenses)
         updated.excludedSubfolders.formIntersection(availableSubfolders)
@@ -387,6 +410,16 @@ final class SessionStore: ObservableObject {
         updated.isoTo = iso.to
         updated.isoEnabled = iso.isActive
 
+        let duration = Self.synchronizedNumericRange(
+            from: updated.durationFrom,
+            to: updated.durationTo,
+            wasActive: updated.durationEnabled,
+            available: durationRange
+        )
+        updated.durationFrom = duration.from
+        updated.durationTo = duration.to
+        updated.durationEnabled = duration.isActive
+
         guard updated != filter else { return false }
         filter = updated
         return true
@@ -412,6 +445,10 @@ final class SessionStore: ObservableObject {
         if let available = isoRange {
             reset.isoFrom = available.lowerBound
             reset.isoTo = available.upperBound
+        }
+        if let available = durationRange {
+            reset.durationFrom = available.lowerBound
+            reset.durationTo = available.upperBound
         }
         filter = reset
     }
@@ -454,6 +491,7 @@ final class SessionStore: ObservableObject {
         visibleGroupTitles = [:]
         ratingTally = (0, 0, 0)
         availableTypes = []
+        availableMediaKinds = []
         availableCameras = []
         availableLenses = []
         availableSubfolders = []
@@ -462,7 +500,9 @@ final class SessionStore: ObservableObject {
         apertureRange = nil
         shutterRange = nil
         isoRange = nil
+        durationRange = nil
         typeCounts = [:]
+        mediaKindCounts = [:]
         cameraCounts = [:]
         lensCounts = [:]
         subfolderCounts = [:]
@@ -478,7 +518,7 @@ final class SessionStore: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose the folder with photos to review (an SD card's DCIM folder works too)."
+        panel.message = "Choose the folder with photos and videos to review (an SD card's DCIM folder works too)."
         panel.prompt = "Open Folder"
         if panel.runModal() == .OK, let url = panel.url {
             openFolder(url)
@@ -487,6 +527,7 @@ final class SessionStore: ObservableObject {
 
     func openFolder(_ url: URL) {
         guard !isCleaningUp, !isMovingExport else { return }
+        videoPlayback.stop()
         let preservesCurrentFilter = sourceFolder?.standardizedFileURL == url.standardizedFileURL
             && !items.isEmpty
         scanTask?.cancel()
@@ -601,7 +642,7 @@ final class SessionStore: ObservableObject {
         if !filterAlreadyApplied { applyFilter() }
         phase = loaded.isEmpty ? .welcome : .ready
         if loaded.isEmpty {
-            scanError = "No supported photos (.NEF, .RAF, .JPG, .JPEG, .TIF) were found in that folder."
+            scanError = "No recognised photos or videos were found in that folder."
         } else {
             saveSession()
         }
@@ -1034,12 +1075,12 @@ final class SessionStore: ObservableObject {
         if result.failedPhotos > 0 {
             let message: String
             if result.inconsistentPhotos > 0 {
-                message = "\(result.failedPhotos) photo\(result.failedPhotos == 1 ? "" : "s") couldn't be moved completely. "
+                message = "\(result.failedPhotos) item\(result.failedPhotos == 1 ? "" : "s") couldn't be moved completely. "
                     + "For \(result.inconsistentPhotos), rollback also failed; check both the source folder and Trash."
             } else {
                 message = result.failedPhotos == 1
-                    ? "1 photo couldn't be moved to the Trash and stayed in the folder."
-                    : "\(result.failedPhotos) photos couldn't be moved to the Trash and stayed in the folder."
+                    ? "1 item couldn't be moved to the Trash and stayed in the folder."
+                    : "\(result.failedPhotos) items couldn't be moved to the Trash and stayed in the folder."
             }
             cleanUpError = message
         }
@@ -1101,8 +1142,8 @@ final class SessionStore: ObservableObject {
             // risk restoring a rating onto the wrong photo.
             undoStack.removeAll()
             cleanUpError = result.lostPhotos == 1
-                ? "1 photo couldn't be restored from the Trash — it may have been deleted there."
-                : "\(result.lostPhotos) photos couldn't be restored from the Trash — they may have been deleted there."
+                ? "1 item couldn't be restored from the Trash — it may have been deleted there."
+                : "\(result.lostPhotos) items couldn't be restored from the Trash — they may have been deleted there."
             if result.inconsistentPhotos > 0 {
                 cleanUpError? += " For \(result.inconsistentPhotos), rollback also failed; check both the source folder and Trash."
             }
@@ -1288,7 +1329,7 @@ final class SessionStore: ObservableObject {
             let p = pos + offset
             guard visibleIndices.indices.contains(p) else { return nil }
             let item = items[visibleIndices[p]]
-            return item.isSupported ? item : nil
+            return item.mediaKind == .photo && item.isSupported ? item : nil
         }
         // Collapse repeated navigation/filter updates into one neighbourhood
         // warm-up. The visible image itself still starts immediately.
@@ -1391,6 +1432,7 @@ final class SessionStore: ObservableObject {
 
     func closeSession() {
         guard !isCleaningUp, !isMovingExport else { return }
+        videoPlayback.stop()
         scanTask?.cancel()
         scanTask = nil
         scanGeneration &+= 1

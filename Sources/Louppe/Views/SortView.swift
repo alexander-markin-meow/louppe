@@ -13,11 +13,13 @@ struct SortView: View {
                 keyRow("Name", .name)
                 keyRow("Subfolder", .subfolder, disabled: store.availableSubfolders.count <= 1)
                 keyRow("File type", .fileType)
+                keyRow("Media type", .mediaKind, disabled: store.availableMediaKinds.count <= 1)
                 keyRow("Camera", .camera)
                 keyRow("Lens", .lens)
                 keyRow("Aperture", .aperture, disabled: store.apertureRange == nil)
                 keyRow("Shutter speed", .shutterSpeed, disabled: store.shutterRange == nil)
                 keyRow("ISO", .iso, disabled: store.isoRange == nil)
+                keyRow("Video duration", .duration, disabled: store.durationRange == nil)
             }
 
             Divider()

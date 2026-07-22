@@ -10,6 +10,18 @@ enum Rating: String, Codable, Sendable {
     case no
 }
 
+enum MediaKind: String, Hashable, Sendable {
+    case photo
+    case video
+
+    var label: String {
+        switch self {
+        case .photo: return "Photos"
+        case .video: return "Videos"
+        }
+    }
+}
+
 struct PhotoItem: Identifiable, Sendable {
     /// Relative path of the primary file within the source folder — stable session key.
     let id: String
@@ -19,6 +31,14 @@ struct PhotoItem: Identifiable, Sendable {
     /// every filter pass and sort comparison.
     let displayName: String
     let fileTypeLabel: String
+    let mediaKind: MediaKind
+    /// Movie properties are read once during scanning. Images keep these nil;
+    /// views and filters never reopen every movie while scrolling or typing.
+    let duration: TimeInterval?
+    let videoDimensions: CGSize?
+    let videoCodec: String?
+    let videoFrameRate: Double?
+    let videoIsPlayable: Bool
     let captureDate: Date?
     /// Calendar-day bucket used by the specific-date filter. Capture dates are
     /// immutable, so normalizing once avoids rebuilding date components for
@@ -59,6 +79,12 @@ struct PhotoItem: Identifiable, Sendable {
         aperture: Double? = nil,
         shutterSpeed: Double? = nil,
         iso: Double? = nil,
+        mediaKind: MediaKind = .photo,
+        duration: TimeInterval? = nil,
+        videoDimensions: CGSize? = nil,
+        videoCodec: String? = nil,
+        videoFrameRate: Double? = nil,
+        videoIsPlayable: Bool = false,
         primaryModificationDate: Date? = nil,
         fileSize: Int64,
         pairedFileSize: Int64 = 0,
@@ -66,7 +92,11 @@ struct PhotoItem: Identifiable, Sendable {
         ratedAt: Date? = nil
     ) {
         let displayName = primaryURL.lastPathComponent
-        let fileTypeLabel = Self.makeFileTypeLabel(primaryURL: primaryURL, pairedURL: pairedURL)
+        let fileTypeLabel = Self.makeFileTypeLabel(
+            primaryURL: primaryURL,
+            pairedURL: pairedURL,
+            mediaKind: mediaKind
+        )
         let subfolderPath = (id as NSString).deletingLastPathComponent
         let subfolder = subfolderPath.isEmpty ? nil : subfolderPath
         self.id = id
@@ -74,6 +104,12 @@ struct PhotoItem: Identifiable, Sendable {
         self.pairedURL = pairedURL
         self.displayName = displayName
         self.fileTypeLabel = fileTypeLabel
+        self.mediaKind = mediaKind
+        self.duration = duration
+        self.videoDimensions = videoDimensions
+        self.videoCodec = videoCodec
+        self.videoFrameRate = videoFrameRate
+        self.videoIsPlayable = videoIsPlayable
         self.captureDate = captureDate
         self.captureDay = captureDate.map { Calendar.current.startOfDay(for: $0) }
         self.cameraModel = cameraModel
@@ -88,7 +124,7 @@ struct PhotoItem: Identifiable, Sendable {
         self.rating = rating
         self.ratedAt = ratedAt
 
-        var parts = [displayName, fileTypeLabel]
+        var parts = [displayName, fileTypeLabel, mediaKind.label]
         if let paired = pairedURL?.lastPathComponent { parts.append(paired) }
         if let subfolder { parts.append(subfolder) }
         if let cameraModel { parts.append(cameraModel) }
@@ -101,15 +137,23 @@ struct PhotoItem: Identifiable, Sendable {
         FolderScanner.rawExtensions.contains(primaryURL.pathExtension.lowercased())
     }
 
+    var isVideo: Bool { mediaKind == .video }
+
     /// Whether we can actually decode and preview this file. Unsupported visual
     /// files still appear in the session, just as a placeholder tile.
     var isSupported: Bool {
-        FolderScanner.supportedExtensions.contains(primaryURL.pathExtension.lowercased())
+        if isVideo { return videoIsPlayable }
+        return FolderScanner.supportedExtensions.contains(primaryURL.pathExtension.lowercased())
     }
 
-    private static func makeFileTypeLabel(primaryURL: URL, pairedURL: URL?) -> String {
+    private static func makeFileTypeLabel(
+        primaryURL: URL,
+        pairedURL: URL?,
+        mediaKind: MediaKind
+    ) -> String {
         if pairedURL != nil { return "RAW + JPEG" }
         let ext = primaryURL.pathExtension.lowercased()
+        if mediaKind == .video { return ext.isEmpty ? "VIDEO" : ext.uppercased() }
         if FolderScanner.rawExtensions.contains(ext) { return "RAW" }
         switch ext {
         case "jpg", "jpeg": return "JPEG"
@@ -251,19 +295,23 @@ struct PhotoSort: Equatable {
         case name
         case subfolder
         case fileType
+        case mediaKind
         case camera
         case lens
         case aperture
         case shutterSpeed
         case iso
+        case duration
 
         var ascendingLabel: String {
             switch self {
             case .captureDate: return "Oldest first"
             case .name, .subfolder, .fileType, .camera, .lens: return "A–Z"
+            case .mediaKind: return "Photos first"
             case .aperture: return "Widest first"
             case .shutterSpeed: return "Fastest first"
             case .iso: return "Lowest first"
+            case .duration: return "Shortest first"
             }
         }
 
@@ -271,9 +319,11 @@ struct PhotoSort: Equatable {
             switch self {
             case .captureDate: return "Newest first"
             case .name, .subfolder, .fileType, .camera, .lens: return "Z–A"
+            case .mediaKind: return "Videos first"
             case .aperture: return "Narrowest first"
             case .shutterSpeed: return "Slowest first"
             case .iso: return "Highest first"
+            case .duration: return "Longest first"
             }
         }
 
@@ -293,6 +343,8 @@ struct PhotoSort: Equatable {
                 return a.subfolderLabel == b.subfolderLabel
             case .fileType:
                 return a.fileTypeLabel == b.fileTypeLabel
+            case .mediaKind:
+                return a.mediaKind == b.mediaKind
             case .camera:
                 return a.cameraLabel == b.cameraLabel
             case .lens:
@@ -303,6 +355,8 @@ struct PhotoSort: Equatable {
                 return a.shutterSpeed == b.shutterSpeed
             case .iso:
                 return a.iso == b.iso
+            case .duration:
+                return a.duration.map { Int($0.rounded()) } == b.duration.map { Int($0.rounded()) }
             }
         }
 
@@ -319,6 +373,8 @@ struct PhotoSort: Equatable {
                 return item.subfolderLabel
             case .fileType:
                 return item.fileTypeLabel
+            case .mediaKind:
+                return item.mediaKind.label
             case .camera:
                 return item.cameraLabel
             case .lens:
@@ -332,6 +388,8 @@ struct PhotoSort: Equatable {
             case .iso:
                 guard let iso = item.iso else { return "Unknown ISO" }
                 return "ISO \(MetadataFormat.iso(iso))"
+            case .duration:
+                return item.duration.map { MediaDurationFormat.display($0) } ?? "Unknown duration"
             }
         }
     }
@@ -356,6 +414,11 @@ struct PhotoSort: Equatable {
             return stringsInOrder(a.fileTypeLabel, b.fileTypeLabel, ascending: ascending) {
                 dateThenNameInOrder(a, b)
             }
+        case .mediaKind:
+            let aValue = a.mediaKind == .photo ? 0 : 1
+            let bValue = b.mediaKind == .photo ? 0 : 1
+            if aValue != bValue { return ascending ? aValue < bValue : aValue > bValue }
+            return dateThenNameInOrder(a, b)
         case .camera:
             return optionalStringsInOrder(a.cameraModel, b.cameraModel, ascending: ascending) {
                 dateThenNameInOrder(a, b)
@@ -374,6 +437,10 @@ struct PhotoSort: Equatable {
             }
         case .iso:
             return optionalValuesInOrder(a.iso, b.iso, ascending: ascending) {
+                dateThenNameInOrder(a, b)
+            }
+        case .duration:
+            return optionalValuesInOrder(a.duration, b.duration, ascending: ascending) {
                 dateThenNameInOrder(a, b)
             }
         }
@@ -444,6 +511,7 @@ struct PhotoSort: Equatable {
             return false
         }
     }
+
 }
 
 /// One run of visible photos that share the active sort key's value.
@@ -511,6 +579,11 @@ struct PhotoFilter: Equatable {
     var isoEnabled = false
     var isoFrom = 0.0
     var isoTo = 0.0
+    var durationEnabled = false
+    var durationFrom = 0.0
+    var durationTo = 0.0
+    /// Media categories switched off in a mixed photo/video folder.
+    var excludedMediaKinds: Set<MediaKind> = []
     /// File-type labels the user has switched off. Empty = all types shown,
     /// so newly appearing types after a re-scan default to visible.
     var excludedTypes: Set<String> = []
@@ -526,6 +599,8 @@ struct PhotoFilter: Equatable {
             || apertureEnabled
             || shutterEnabled
             || isoEnabled
+            || durationEnabled
+            || !excludedMediaKinds.isEmpty
             || !excludedTypes.isEmpty
             || !excludedCameras.isEmpty
             || !excludedLenses.isEmpty
@@ -537,6 +612,7 @@ struct PhotoFilter: Equatable {
 /// Expensive, filter-wide work (date bounds and query normalization) is done
 /// once before walking the photo list.
 struct PreparedPhotoFilter {
+    let excludedMediaKinds: Set<MediaKind>
     let excludedTypes: Set<String>
     let excludedCameras: Set<String>
     let excludedLenses: Set<String>
@@ -548,9 +624,11 @@ struct PreparedPhotoFilter {
     let apertureRange: ClosedRange<Double>?
     let shutterRange: ClosedRange<Double>?
     let isoRange: ClosedRange<Double>?
+    let durationRange: ClosedRange<Double>?
     let searchTokens: [Substring]
 
     init(_ filter: PhotoFilter, calendar: Calendar = .current) {
+        excludedMediaKinds = filter.excludedMediaKinds
         excludedTypes = filter.excludedTypes
         excludedCameras = filter.excludedCameras
         excludedLenses = filter.excludedLenses
@@ -579,11 +657,18 @@ struct PreparedPhotoFilter {
             from: filter.isoFrom,
             to: filter.isoTo
         )
+        durationRange = Self.validRange(
+            enabled: filter.durationEnabled,
+            from: filter.durationFrom,
+            to: filter.durationTo,
+            allowsZero: true
+        )
         let query = PhotoItem.normalizeForSearch(filter.searchText.trimmingCharacters(in: .whitespaces))
         searchTokens = query.split(whereSeparator: \.isWhitespace)
     }
 
     func matches(_ item: PhotoItem) -> Bool {
+        if excludedMediaKinds.contains(item.mediaKind) { return false }
         if excludedTypes.contains(item.fileTypeLabel) { return false }
         if excludedCameras.contains(item.cameraLabel) { return false }
         if excludedLenses.contains(item.lensLabel) { return false }
@@ -607,14 +692,24 @@ struct PreparedPhotoFilter {
         if let isoRange {
             guard let iso = item.iso, isoRange.contains(iso) else { return false }
         }
+        if let durationRange {
+            guard let duration = item.duration, durationRange.contains(duration) else { return false }
+        }
         for token in searchTokens where !item.searchableText.contains(token) {
             return false
         }
         return true
     }
 
-    private static func validRange(enabled: Bool, from: Double, to: Double) -> ClosedRange<Double>? {
-        guard enabled, from.isFinite, to.isFinite, from > 0, from <= to else { return nil }
+    private static func validRange(
+        enabled: Bool,
+        from: Double,
+        to: Double,
+        allowsZero: Bool = false
+    ) -> ClosedRange<Double>? {
+        guard enabled, from.isFinite, to.isFinite,
+              (allowsZero ? from >= 0 : from > 0),
+              from <= to else { return nil }
         return from...to
     }
 }

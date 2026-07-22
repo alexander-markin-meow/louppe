@@ -49,8 +49,8 @@ final class ExportManager: ObservableObject {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.message = mode == .copy
-            ? "Choose where to copy the selected photos."
-            : "Choose where to move the selected photos."
+            ? "Choose where to copy the selected media."
+            : "Choose where to move the selected media."
         panel.prompt = "Export Here"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         export(
@@ -74,7 +74,7 @@ final class ExportManager: ObservableObject {
         let selected = items.filter { ratings.contains($0.rating) }
         let totalFiles = selected.reduce(0) { $0 + $1.allURLs.count }
         guard totalFiles > 0 else {
-            state = .failed("There are no photos with the selected ratings to export.")
+            state = .failed("There are no items with the selected ratings to export.")
             return
         }
         state = .working(mode: mode, done: 0, total: totalFiles)

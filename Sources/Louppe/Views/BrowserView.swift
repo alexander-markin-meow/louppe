@@ -16,19 +16,34 @@ struct BrowserView: View {
     /// Keyboard navigation keeps following as before.
     @State private var suppressNextFollow = false
 
+    /// Structural removals can put a different item at the same numeric
+    /// index. Key Browser rows by the media id so SwiftUI never reuses the
+    /// removed item's selection state for its successor.
+    private struct Entry: Identifiable {
+        let id: String
+        let index: Int
+    }
+
+    private var visibleEntries: [Entry] {
+        store.visibleIndices.compactMap { index in
+            guard store.items.indices.contains(index) else { return nil }
+            return Entry(id: store.items[index].id, index: index)
+        }
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 LazyVStack(spacing: 6) {
-                    ForEach(store.visibleIndices, id: \.self) { index in
-                        BrowserRow(store: store, index: index) {
+                    ForEach(visibleEntries) { entry in
+                        BrowserRow(store: store, index: entry.index) {
                             // Only set when the click will actually move
                             // currentIndex, so the flag is always consumed
                             // by the onChange it precedes.
-                            if index != store.currentIndex {
+                            if entry.index != store.currentIndex {
                                 suppressNextFollow = true
                             }
-                            store.setIndex(index)
+                            store.setIndex(entry.index)
                         }
                     }
                 }
@@ -36,7 +51,9 @@ struct BrowserView: View {
                 .padding(.vertical, 10)
                 .background(PersistentVerticalScroller())
             }
-            .onChange(of: store.currentIndex) {
+            // The current item's id can change while its numeric index stays
+            // the same after Clean Up or Move export.
+            .onChange(of: store.currentItem?.id) {
                 if suppressNextFollow {
                     suppressNextFollow = false
                     return
@@ -115,7 +132,7 @@ private struct BrowserRow: View {
                 }
                 ThumbnailView(
                     item: item,
-                    isCurrent: index == store.currentIndex,
+                    isCurrent: item.id == store.currentItem?.id,
                     isSelected: store.selectedIndices.contains(index)
                 )
                 .frame(width: 102, height: 102)
@@ -124,9 +141,7 @@ private struct BrowserRow: View {
                     store.handleThumbnailClick(at: index, plainClick: onPlainClick)
                 }
             }
-            // Keep the String identity: it is the follow-scroll target AND it
-            // resets ThumbnailView's cached @State image when Clean Up / undo
-            // remaps this absolute index to a different photo.
+            // Keep the String identity as the follow-scroll target.
             .id(item.id)
         }
     }

@@ -80,7 +80,9 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/SessionPersistence.swift` | Actor that serializes sidecar JSON encoding, reading, and atomic/fallback writes off-main |
 | `Sources/Louppe/CleanUpWorker.swift` | Background Trash/restore file loops, progress throttling, pair rollback, O(n+k) restoration merge |
 | `Sources/Louppe/FolderScanner.swift` | Recursive folder scan, RAW+JPEG pairing, chronological sort |
-| `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding, thumbnail memory+disk caches, prefetching |
+| `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding + AVFoundation first-frame generation, thumbnail memory+disk caches, prefetching |
+| `Sources/Louppe/VideoSupport.swift` | Native movie metadata loading, duration formatting |
+| `Sources/Louppe/VideoPlaybackController.swift` | One shared AVPlayer for Gallery/Grid playback |
 | `Sources/Louppe/MetadataExtractor.swift` | EXIF reading for capture dates + info panel |
 | `Sources/Louppe/ExportManager.swift` | Export dialog state machine: destination prompt, copy/move orchestration |
 | `Sources/Louppe/ExportWorker.swift` | Background export copy/move loops, collision suffixing, pair rollback for Move |
@@ -95,6 +97,7 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Views/MetadataPanel.swift` | Info panel (filename header, camera, exposure row, fields) |
 | `Sources/Louppe/Views/ThumbnailView.swift` | Async thumbnail tile + rating badge |
 | `Sources/Louppe/Views/FullImageView.swift` | Large photo with fit / 100% / phone-size zoom |
+| `Sources/Louppe/Views/VideoPlayerView.swift` | Native AVPlayerView bridge for Gallery/Grid playback |
 | `Sources/Louppe/Views/ExportView.swift` | Export dialog (mode + rating tiles → progress → done) |
 | `Tests/PerformanceChecks/main.swift` | Dependency-free search, ordered persistence, restoration-merge, and export copy/move regression checks |
 

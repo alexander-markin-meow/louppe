@@ -5,12 +5,12 @@ enum MetadataExtractor {
 
     /// The metadata read once per file during the folder scan.
     struct ScanInfo {
-        var captureDate: Date?
-        var cameraModel: String?
-        var lensModel: String?
-        var aperture: Double?
-        var shutterSpeed: Double?
-        var iso: Double?
+        var captureDate: Date? = nil
+        var cameraModel: String? = nil
+        var lensModel: String? = nil
+        var aperture: Double? = nil
+        var shutterSpeed: Double? = nil
+        var iso: Double? = nil
     }
 
     /// Reads the metadata used by filtering and sorting in a single pass during
@@ -40,6 +40,7 @@ enum MetadataExtractor {
 
     /// Full field list for the metadata panel.
     static func fields(for item: PhotoItem) -> [MetadataField] {
+        if item.isVideo { return videoFields(for: item) }
         var fields: [MetadataField] = []
         func add(_ label: String, _ value: String?) {
             guard let value, !value.isEmpty else { return }
@@ -99,6 +100,28 @@ enum MetadataExtractor {
             let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String ?? "E"
             add("GPS", String(format: "%.5f°%@, %.5f°%@", lat, latRef, lon, lonRef))
         }
+        return fields
+    }
+
+    private static func videoFields(for item: PhotoItem) -> [MetadataField] {
+        var fields: [MetadataField] = [
+            MetadataField(id: "Filename", label: "Filename", value: item.displayName),
+        ]
+        func add(_ label: String, _ value: String?) {
+            guard let value, !value.isEmpty else { return }
+            fields.append(MetadataField(id: label, label: label, value: value))
+        }
+        if let date = item.captureDate { add("Captured", AppDateFormat.dayAndTime(date)) }
+        add("Duration", MediaDurationFormat.display(item.duration))
+        if let size = item.videoDimensions {
+            add("Dimensions", "\(Int(size.width.rounded())) × \(Int(size.height.rounded()))")
+        }
+        add("Codec", item.videoCodec)
+        if let frameRate = item.videoFrameRate {
+            add("Frame rate", String(format: "%.2f fps", frameRate).replacingOccurrences(of: ".00 ", with: " "))
+        }
+        add("File size", ByteCountFormatter.string(fromByteCount: item.fileSize, countStyle: .file))
+        add("Type", item.fileTypeLabel)
         return fields
     }
 

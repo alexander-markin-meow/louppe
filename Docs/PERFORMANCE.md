@@ -26,6 +26,10 @@ operations belong elsewhere:
   coalesced; foreground and prefetch calls share the same in-flight operation,
   and a foreground join promotes utility prefetch work. With separate queues
   the current full image never waits behind tile backlog at all.
+- Video first frames share the bounded thumbnail lane, memory/disk cache, and
+  in-flight request coalescing. `AVAssetImageGenerator` is called
+  asynchronously from that background operation with exact zero-time
+  tolerances; never generate movie frames from a SwiftUI body or main actor.
 - `FolderScanner` reads per-file EXIF on concurrent workers
   (`DispatchQueue.concurrentPerform`, up to 8 chunks) because metadata
   extraction dominates scan time. Chunk slots are single-writer and
@@ -88,6 +92,9 @@ Thumbnail cache keys use each file's modification date captured by
 `ImagePipeline.cacheKey`: lazy grid cells can be recreated during scrolling,
 and synchronous `stat` calls there block the UI thread. Reappearing thumbnail
 cells also seed directly from the memory cache to avoid placeholder churn.
+Movie duration, playability, dimensions, codec, and frame rate are likewise
+captured once by FolderScanner's bounded metadata workers. Filter, sort, and
+Info views must use those values rather than reopening every `AVAsset`.
 
 ## Grid scrolling
 

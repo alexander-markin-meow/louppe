@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ImageIO
+import AVFoundation
 
 /// Decodes images with ImageIO (extracting embedded previews for RAW files),
 /// caches thumbnails in memory + on disk, and prefetches around the current photo.
@@ -48,6 +49,22 @@ final class ImagePipeline: @unchecked Sendable {
             self.operation = operation
         }
     }
+    private final class GeneratedImageBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var image: CGImage?
+
+        func store(_ image: CGImage?) {
+            lock.lock()
+            self.image = image
+            lock.unlock()
+        }
+
+        func load() -> CGImage? {
+            lock.lock()
+            defer { lock.unlock() }
+            return image
+        }
+    }
     private let inFlightLock = NSLock()
     private var inFlight: [DecodeRequest: PendingDecode] = [:]
 
@@ -91,7 +108,7 @@ final class ImagePipeline: @unchecked Sendable {
             qualityOfService: .userInitiated,
             queuePriority: .normal
         ) { [self] in
-            loadThumbnailSync(url: item.primaryURL, key: key)
+            loadThumbnailSync(item: item, key: key)
         }
     }
 
@@ -189,7 +206,7 @@ final class ImagePipeline: @unchecked Sendable {
 
     // MARK: - Decoding
 
-    private func loadThumbnailSync(url: URL, key: String) -> NSImage? {
+    private func loadThumbnailSync(item: PhotoItem, key: String) -> NSImage? {
         if let cached = thumbCache.object(forKey: key as NSString) { return cached }
 
         // Try the on-disk thumbnail cache first.
@@ -200,7 +217,10 @@ final class ImagePipeline: @unchecked Sendable {
             return image
         }
 
-        guard let cgImage = decode(url: url, maxPixel: Self.thumbPixelSize) else { return nil }
+        let cgImage = item.isVideo
+            ? decodeFirstVideoFrame(url: item.primaryURL, maxPixel: Self.thumbPixelSize)
+            : decode(url: item.primaryURL, maxPixel: Self.thumbPixelSize)
+        guard let cgImage else { return nil }
         let image = NSImage(cgImage: cgImage, size: .zero)
         thumbCache.setObject(image, forKey: key as NSString, cost: Self.cost(of: cgImage))
 
@@ -221,6 +241,29 @@ final class ImagePipeline: @unchecked Sendable {
         let image = NSImage(cgImage: cgImage, size: .zero)
         fullCache.setObject(image, forKey: key as NSString, cost: Self.cost(of: cgImage))
         return image
+    }
+
+    /// Exact first displayable movie frame. This runs on the existing bounded
+    /// thumbnail queue, never the main actor, and shares image thumbnails'
+    /// memory/disk caching and request coalescing.
+    private func decodeFirstVideoFrame(url: URL, maxPixel: CGFloat) -> CGImage? {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let box = GeneratedImageBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        generator.generateCGImageAsynchronously(for: .zero) { image, _, _ in
+            box.store(image)
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 15) == .success else {
+            generator.cancelAllCGImageGeneration()
+            return nil
+        }
+        return box.load()
     }
 
     /// ImageIO decode. For RAW files this pulls the embedded preview rather than
@@ -271,8 +314,8 @@ final class ImagePipeline: @unchecked Sendable {
     /// independent of the live filesystem after scanning.
     static func cacheKey(for item: PhotoItem) -> String {
         let mtime = item.primaryModificationDate?.timeIntervalSince1970 ?? 0
-        // "v2" invalidates thumbnails cached before the pixelation fix.
-        return "\(item.primaryURL.path)|\(mtime)|v2"
+        // v3 adds video first-frame thumbnails to the shared cache.
+        return "\(item.primaryURL.path)|\(mtime)|\(item.mediaKind.rawValue)|v3"
     }
 
     private func diskFileName(for key: String) -> String {

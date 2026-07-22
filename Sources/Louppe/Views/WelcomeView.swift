@@ -42,7 +42,7 @@ struct WelcomeView: View {
             Text("Louppe")
                 .font(.largeTitle.bold())
                 .foregroundStyle(Color.louppeAccent)
-            Text("Pick a folder of photos, mark each one Yes or No,\nthen export the keepers. Originals are never changed.")
+            Text("Pick a folder of photos and videos, mark each one Yes or No,\nthen export the keepers. Originals are never changed.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
 
@@ -142,8 +142,8 @@ struct ScanningView: View {
     }
 
     private var progressText: String {
-        guard found > 0 else { return "Looking for photos…" }
-        return found == 1 ? "1 photo found" : "\(found.formatted()) photos found"
+        guard found > 0 else { return "Looking for media…" }
+        return found == 1 ? "1 item found" : "\(found.formatted()) items found"
     }
 }
 
