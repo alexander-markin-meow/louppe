@@ -1,10 +1,20 @@
 import SwiftUI
 import AppKit
+import Sparkle
 
 @main
 struct LouppeApp: App {
     @NSApplicationDelegateAdaptor(LouppeApplicationDelegate.self) private var appDelegate
     @StateObject private var store = SessionStore()
+    private let updaterController: SPUStandardUpdaterController
+
+    init() {
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+    }
 
     var body: some Scene {
         Window("Louppe", id: "main") {
@@ -34,6 +44,12 @@ struct LouppeApp: App {
                 Button("About Louppe") {
                     NSApp.orderFrontStandardAboutPanel(options: [.credits: Self.aboutCredits])
                 }
+            }
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesView(
+                    updater: updaterController.updater,
+                    isFileOperationRunning: store.isCleaningUp || store.isMovingExport
+                )
             }
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") {
@@ -95,6 +111,10 @@ struct LouppeApp: App {
                 .keyboardShortcut("-")
                 .disabled(store.viewMode != .grid)
             }
+        }
+
+        Settings {
+            UpdaterSettingsView(updater: updaterController.updater)
         }
     }
 

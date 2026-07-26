@@ -5,7 +5,13 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-07-22
+## 1.7.0 (9) — 2026-07-26
+
+- Added secure automatic updates. Louppe checks daily, downloads verified
+  releases in the background, installs them safely on quit, and offers a
+  manual **Check for Updates…** command plus Settings toggles for automatic
+  checks and downloads. Both the update feed and archive are cryptographically
+  signed, and archives are verified before extraction.
 
 - Added first-class video review using native macOS playback. Videos now use
   their first frame as the thumbnail, always show their duration in the

@@ -13,6 +13,11 @@ Grab the latest build from **[Releases](https://github.com/alexander-markin-meow
 
 This app isn't notarized by Apple, so on first launch macOS will warn it can't verify the developer. Right-click the app → **Open** → **Open** again in the dialog. That's a one-time step; it opens normally after that.
 
+After that first install, Louppe checks for signed updates once a day and
+downloads them in the background. Updates install safely when Louppe quits.
+Use **Louppe → Check for Updates…** at any time, or change automatic checking
+and downloading under **Louppe → Settings…**.
+
 ## Using the app
 
 Pick a folder (an SD card works), review, then press **⌘E** to copy — or
@@ -141,13 +146,20 @@ Requires Apple's Command Line Tools (already installed). From this folder:
 ./build_app.sh
 ```
 
+Sparkle is downloaded from its public release using a pinned checksum. The
+build script explicitly disables Swift Package Manager's optional Keychain
+lookup, so no GitHub login or password is required.
+
 Release versions come from [`VERSION`](VERSION), and the release build verifies
 that [`CHANGELOG.md`](CHANGELOG.md) contains the same marketing version and
 build number before packaging the app. Every shipped release or update must
 have its own version/build pair and history entry; development changes remain
 under the current unreleased version until that release actually ships.
 
-The fresh app appears at `dist/Louppe.app`. Copy it to `/Applications` to install.
+The fresh app and its release archive appear at `dist/Louppe.app` and
+`dist/Louppe.zip`. Copy the app to `/Applications` to install. Release owners
+must also follow [`Docs/UPDATES.md`](Docs/UPDATES.md) to sign the exact archive
+and regenerate `appcast.xml` before publishing a GitHub release.
 
 Run the focused logic checks with `./Tests/run_performance_checks.sh` and the
 native movie checks with `./Tests/run_video_checks.sh`. They use
@@ -160,6 +172,7 @@ the installed build with `-openFolder` as described in
 Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 
 - `LouppeApp.swift` — app entry point, menu commands
+- `UpdaterViews.swift` — automatic updater menu and Settings controls
 - `SessionStore.swift` — ratings, undo, navigation, session persistence
 - `SessionPersistence.swift` — serialized background sidecar encoding and I/O
 - `CleanUpWorker.swift` — background Trash/restore operations and linear merge
@@ -178,6 +191,9 @@ See `AGENTS.md` for a full architecture map, build/verify instructions, and
 project invariants (useful for both humans and AI assistants).
 See [`Docs/PERFORMANCE.md`](Docs/PERFORMANCE.md) for cache budgets, concurrency
 boundaries, derived-data rules, and performance regression checks.
+See [`Docs/CODEBASE_AUDIT.md`](Docs/CODEBASE_AUDIT.md) for the prioritized
+file-safety, reliability, architecture, performance, accessibility, and
+release-quality improvement roadmap.
 
 Supported formats:
 

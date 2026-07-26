@@ -22,9 +22,12 @@ if ! grep -Fq "## $MARKETING_VERSION ($BUILD_NUMBER) " "$CHANGELOG_FILE"; then
 fi
 
 echo "Compiling Louppe $MARKETING_VERSION ($BUILD_NUMBER)…"
-swift build -c release
+# Sparkle is a public, checksum-pinned binary. Do not ask macOS Keychain for
+# unrelated github.com credentials while downloading it.
+swift build --disable-keychain -c release
 
 OUTPUT_APP="dist/Louppe.app"
+OUTPUT_ARCHIVE="dist/Louppe.zip"
 # This repository can live in a File Provider-managed Documents folder, which
 # immediately reattaches com.apple.FinderInfo to app bundles and makes strict
 # signature verification fail. Assemble and verify on the local temp volume,
@@ -32,11 +35,23 @@ OUTPUT_APP="dist/Louppe.app"
 STAGING_ROOT="$(mktemp -d /private/tmp/Louppe-build.XXXXXX)"
 trap 'rm -rf "$STAGING_ROOT"' EXIT
 APP_DIR="$STAGING_ROOT/Louppe.app"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" \
+    "$APP_DIR/Contents/Frameworks"
 
 cp .build/release/Louppe "$APP_DIR/Contents/MacOS/Louppe"
 cp AppIcon/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 cp CHANGELOG.md "$APP_DIR/Contents/Resources/Version History.md"
+
+SPARKLE_FRAMEWORK="$(find .build/artifacts -type d \
+    -path '*/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework' \
+    -print -quit)"
+if [[ -z "$SPARKLE_FRAMEWORK" ]]; then
+    echo "Sparkle.framework was not found in SwiftPM's build artifacts." >&2
+    exit 1
+fi
+# ditto preserves the framework's versioned symlinks and executable bits.
+ditto --noextattr --noqtn "$SPARKLE_FRAMEWORK" \
+    "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -67,6 +82,20 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>https://raw.githubusercontent.com/alexander-markin-meow/louppe/main/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>ZT/Kv98/mVd/uo2iUyBb0Gj0ShZqZ+FdfthHBjyH86k=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <real>86400</real>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <key>SURequireSignedFeed</key>
+    <true/>
 </dict>
 </plist>
 PLIST
@@ -78,6 +107,9 @@ codesign --verify --deep --strict "$APP_DIR"
 rm -rf "$OUTPUT_APP"
 mkdir -p "$(dirname "$OUTPUT_APP")"
 ditto --noextattr --noqtn "$APP_DIR" "$OUTPUT_APP"
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$STAGING_ROOT/Louppe.zip"
+cp "$STAGING_ROOT/Louppe.zip" "$OUTPUT_ARCHIVE"
 
 echo ""
 echo "Done → $PWD/$OUTPUT_APP"
+echo "Archive → $PWD/$OUTPUT_ARCHIVE"

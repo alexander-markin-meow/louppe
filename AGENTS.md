@@ -16,7 +16,7 @@ after changes.
 cp -R dist/Louppe.app /Applications/    # install (remove old copy first)
 xattr -cr /Applications/Louppe.app      # copy can attach Finder metadata
 codesign --verify --deep --strict /Applications/Louppe.app
-swift build                             # quick debug check with the selected Xcode toolchain
+swift build --disable-keychain          # quick debug check; public dependencies need no login
 ```
 
 `build_app.sh` bundles the binary + icon + Info.plist in `/private/tmp`, strips
