@@ -134,7 +134,7 @@ struct SessionView: View {
         guard !store.items.isEmpty else { return "" }
         let position = store.visibleIndices.isEmpty
             ? 0
-            : (store.visibleIndices.firstIndex(of: store.currentIndex) ?? 0) + 1
+            : (store.currentVisiblePosition ?? 0) + 1
         var text = "\(position) of \(store.visibleIndices.count)"
         if store.filter.isActive {
             text += " (of \(store.items.count) total)"
@@ -216,7 +216,7 @@ struct SessionView: View {
                 Label(store.sourceFolder?.lastPathComponent ?? "Folder", systemImage: "folder")
                     .labelStyle(.titleAndIcon)
             }
-            .disabled(store.isCleaningUp)
+            .disabled(store.isFileOperationRunning)
             .help("Choose another media folder (⌘O)")
         }
 
@@ -274,14 +274,14 @@ struct SessionView: View {
             } label: {
                 Image(systemName: "arrow.uturn.backward")
             }
-            .disabled(store.isCleaningUp || !store.canUndo)
+            .disabled(store.isFileOperationRunning || !store.canUndo)
             .help("Undo the last rating or clean-up (Z or ⌘Z)")
             Button {
                 store.requestClearAllRatings()
             } label: {
                 Image(systemName: "eraser")
             }
-            .disabled(store.isCleaningUp || store.ratedCount == 0)
+            .disabled(store.isFileOperationRunning || store.ratedCount == 0)
             .help("Clear all ratings (R)")
         }
 
@@ -329,7 +329,7 @@ struct SessionView: View {
             } label: {
                 Image(systemName: "trash")
             }
-            .disabled(store.isCleaningUp)
+            .disabled(store.isFileOperationRunning)
             .menuIndicator(.hidden)
             .tint(Color.primary)
             .help("Choose items to move to the Trash")
@@ -350,7 +350,7 @@ struct SessionView: View {
                     // Nudge up a touch to visually center the share glyph.
                     .offset(y: -1)
             }
-            .disabled(store.isCleaningUp)
+            .disabled(store.isFileOperationRunning)
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .tint(Color.louppeAccent)
@@ -381,7 +381,7 @@ struct SessionView: View {
         // Leave command shortcuts (⌘Z, ⌘E…) to the menu bar, and don't steal
         // keys while the export sheet or a panel is up or the user is typing.
         guard case .ready = store.phase else { return false }
-        if store.isCleaningUp {
+        if store.isFileOperationRunning {
             // Command shortcuts continue to the menu bar, whose mutating
             // actions are disabled/guarded. Keep only view controls live.
             if event.modifierFlags.contains(.command) { return false }
@@ -515,7 +515,7 @@ struct CleanUpMenuItems: View {
         Button(store.selectionCleanUpTitle) {
             store.requestCleanUp(.selection)
         }
-        .disabled(store.isCleaningUp || !store.hasCleanUpTargets(for: .selection))
+        .disabled(store.isFileOperationRunning || !store.hasCleanUpTargets(for: .selection))
         Divider()
         Picker("For “No” / “Yes” Actions", selection: $store.cleanUpScope) {
             cleanUpScopeLabel("All Photos", scope: .all)
@@ -526,16 +526,16 @@ struct CleanUpMenuItems: View {
                 .tag(CleanUpScope.selected)
         }
         .pickerStyle(.inline)
-        .disabled(store.isCleaningUp)
+        .disabled(store.isFileOperationRunning)
         Divider()
         Button("Move “No” to Trash…") {
             store.requestCleanUp(.trashNo)
         }
-        .disabled(store.isCleaningUp || !store.hasCleanUpTargets(for: .trashNo))
+        .disabled(store.isFileOperationRunning || !store.hasCleanUpTargets(for: .trashNo))
         Button("Keep Only “Yes”…") {
             store.requestCleanUp(.keepOnlyYes)
         }
-        .disabled(store.isCleaningUp || !store.hasCleanUpTargets(for: .keepOnlyYes))
+        .disabled(store.isFileOperationRunning || !store.hasCleanUpTargets(for: .keepOnlyYes))
     }
 
     private func cleanUpScopeLabel(_ title: String, scope: CleanUpScope) -> Text {

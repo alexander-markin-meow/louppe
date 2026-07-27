@@ -5,13 +5,62 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-07-26
+## 1.7.0 (9) — 2026-07-27
 
 - Added secure automatic updates. Louppe checks daily, downloads verified
   releases in the background, installs them safely on quit, and offers a
   manual **Check for Updates…** command plus Settings toggles for automatic
   checks and downloads. Both the update feed and archive are cryptographically
   signed, and archives are verified before extraction.
+
+- Made Export safer for RAW+JPEG pairs. Copy and Move now reserve one matching
+  collision suffix for both files, partial Copy failures roll back the first
+  file, and Copy can be stopped without leaving half a pair. Active copies also
+  block Quit, folder changes, and update installation until they finish or
+  stop safely. Export now rejects destinations inside the reviewed folder and
+  checks write permission and available space before starting.
+
+- Added crash- and power-loss recovery for Copy, Move, Clean Up, and Clean Up
+  undo. Each file change now has a durable checkpoint tied to the exact volume
+  and file identity. On the next launch Louppe safely removes incomplete copies
+  or restores originals before opening a folder, never overwrites an existing
+  file, and offers Retry Recovery when a drive is unavailable.
+
+- Adopted Swift 6 language mode with complete concurrency checking. Scanner
+  chunk collection, export callbacks, video metadata reads, and playback
+  observer cleanup now have explicit thread-safe ownership.
+
+- Made RAW+JPEG pairing deterministic across rescans and preserved distinct
+  case-only basenames on case-sensitive volumes.
+
+- Removed the silent five-level scan cutoff. Legitimately deep photo folders
+  are now scanned while symbolic-link directories are explicitly skipped to
+  prevent loops.
+
+- Corrected Info-panel counts and sizes for RAW+JPEG pairs. Multi-selection
+  now distinguishes selected photos/media items from the underlying file
+  count, and paired metadata shows both component sizes plus the total.
+
+- Made rating persistence observable and recoverable. Louppe now keeps a
+  current Application Support backup, loads whichever valid snapshot is
+  newest, warns when a folder is read-only or neither save destination works,
+  and offers an inline Retry Saving action. Corrupt, mismatched, unsafe, and
+  unsupported-version session files are left untouched instead of silently
+  replaced.
+
+- Folder switching, rescanning, pairing-mode changes, Close Session, and Quit
+  now wait asynchronously for the newest ratings to reach the folder or
+  backup. Quit offers retry/cancel/explicit quit-without-saving choices on a
+  total save failure instead of blocking the main thread.
+
+- Added an automatic release-package preflight. Every release build now
+  verifies the app and archive signatures, versions, Sparkle framework and
+  security keys, feed structure, and archive extraction; publishing mode also
+  verifies the feed/archive cryptographically and checks all enclosure data.
+- Added a least-privilege macOS 26 GitHub Actions gate for strict Swift 6
+  compilation, unit/logic/scrollbar/video checks, and release packaging. It
+  requires no private updater key; real Trash round trips remain a local
+  release check.
 
 - Added first-class video review using native macOS playback. Videos now use
   their first frame as the thumbnail, always show their duration in the
@@ -41,6 +90,23 @@ release bundle.
   seconds and leave stale ✓/✗ badges in the Browser column. The same fix
   speeds up rating a large selection (⌘A then F/D) and undoing such a batch
   with ⌘Z.
+- Keyboard navigation, range selection, prefetch, and the toolbar position no
+  longer scan the full visible photo list on every step. One cached location
+  map is rebuilt with filtering/grouping, keeping those interactions constant
+  time in very large folders.
+- Moved session sorting, filtering, grouping, and item/location lookup into a
+  pure tested index behind the existing app state. Grid groups now retain
+  stable identities without allocating an enumerated copy on each render, and
+  1k/10k/100k baselines plus Instruments signposts make future performance
+  work measurable.
+- Moved range, edge, command-click, rubber-band, filter, and rescan selection
+  rules into a pure stable-ID state behind the session controller. Expanded
+  app-level tests verify selection filtering, anchor movement, batch
+  rating/undo, and the zero-match safety boundary.
+- Rescanning or rebuilding RAW+JPEG pairing now preserves the exact current
+  photo and multi-selection by stable file ID even when array positions
+  change. Rating undo also follows the intended photo by ID rather than an old
+  numeric position.
 - Fixed the Browser column freezing its contents in long sessions: thumbnails
   could keep old ✓/✗ badges (most visibly after Clear All Ratings) and the
   purple current-photo frame could sit on the wrong thumbnail until the view

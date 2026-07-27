@@ -26,8 +26,12 @@ final class BrowserSelectionTests: XCTestCase {
         let removedID = store.currentItem!.id
         let successorID = store.items[2].id
 
-        store.exportMoveWillStart()
-        store.finishExportMove(movedIDs: [removedID])
+        XCTAssertTrue(store.exportWillStart(mode: .move))
+        store.finishExport(
+            mode: .move,
+            movedIDs: [removedID],
+            requiresRecovery: false
+        )
 
         XCTAssertEqual(store.currentIndex, 1)
         XCTAssertEqual(store.currentItem?.id, successorID)

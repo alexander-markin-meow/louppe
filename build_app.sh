@@ -110,6 +110,8 @@ ditto --noextattr --noqtn "$APP_DIR" "$OUTPUT_APP"
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$STAGING_ROOT/Louppe.zip"
 cp "$STAGING_ROOT/Louppe.zip" "$OUTPUT_ARCHIVE"
 
+"$PWD/Scripts/verify_release.sh"
+
 echo ""
 echo "Done → $PWD/$OUTPUT_APP"
 echo "Archive → $PWD/$OUTPUT_ARCHIVE"

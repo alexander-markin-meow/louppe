@@ -48,7 +48,7 @@ struct LouppeApp: App {
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView(
                     updater: updaterController.updater,
-                    isFileOperationRunning: store.isCleaningUp || store.isMovingExport
+                    isFileOperationRunning: store.isFileOperationRunning
                 )
             }
             CommandGroup(replacing: .newItem) {
@@ -56,18 +56,18 @@ struct LouppeApp: App {
                     store.promptForSourceFolder()
                 }
                 .keyboardShortcut("o")
-                .disabled(store.isCleaningUp || store.isMovingExport)
+                .disabled(store.isFileOperationRunning)
 
                 Button("Rescan Folder") {
                     store.rescan()
                 }
                 .keyboardShortcut("r")
-                .disabled(store.sourceFolder == nil || store.isCleaningUp || store.isMovingExport)
+                .disabled(store.sourceFolder == nil || store.isFileOperationRunning)
 
                 Button("Close Session") {
                     store.closeSession()
                 }
-                .disabled(store.sourceFolder == nil || store.isCleaningUp || store.isMovingExport)
+                .disabled(store.sourceFolder == nil || store.isFileOperationRunning)
             }
             CommandGroup(replacing: .undoRedo) {
                 // Undoes ratings and clean-ups alike, so just "Undo".
@@ -75,19 +75,19 @@ struct LouppeApp: App {
                     store.undo()
                 }
                 .keyboardShortcut("z")
-                .disabled(store.isCleaningUp || store.isMovingExport || !store.canUndo)
+                .disabled(store.isFileOperationRunning || !store.canUndo)
 
                 Button("Clear All Ratings") {
                     store.requestClearAllRatings()
                 }
-                .disabled(store.ratedCount == 0 || store.isCleaningUp || store.isMovingExport)
+                .disabled(store.ratedCount == 0 || store.isFileOperationRunning)
             }
             CommandGroup(after: .saveItem) {
                 Button("Export…") {
                     store.isExportPresented = true
                 }
                 .keyboardShortcut("e")
-                .disabled(store.items.isEmpty || store.isCleaningUp || store.isMovingExport)
+                .disabled(store.items.isEmpty || store.isFileOperationRunning)
 
                 Divider()
 
@@ -96,7 +96,7 @@ struct LouppeApp: App {
                 Menu("Clean Up") {
                     CleanUpMenuItems(store: store)
                 }
-                .disabled(store.items.isEmpty || store.isCleaningUp || store.isMovingExport)
+                .disabled(store.items.isEmpty || store.isFileOperationRunning)
             }
             CommandGroup(after: .toolbar) {
                 Button("Zoom In") {
@@ -152,30 +152,88 @@ struct LouppeApp: App {
     }
 }
 
-/// A Trash/restore or Move-export batch cannot be made transactional by the
-/// filesystem. Keep the process alive until its worker has either completed or
-/// rolled a partial RAW+JPEG operation back, instead of allowing Quit to
-/// strand half a pair.
+/// Keep the process alive until file operations are safe and the newest rating
+/// snapshot reaches stable storage. AppKit's terminate-later handshake avoids
+/// freezing the main thread during the final save.
 @MainActor
 private final class LouppeApplicationDelegate: NSObject, NSApplicationDelegate {
     weak var store: SessionStore?
+    private var isPreparingToTerminate = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if store?.isMovingExport == true {
+        if store?.isRecoveringInterruptedOperations == true {
             let alert = NSAlert()
-            alert.messageText = "Export is still moving files"
-            alert.informativeText = "Wait for the move to finish, then quit Louppe."
+            alert.messageText = "File recovery is still running"
+            alert.informativeText = "Wait for Louppe to finish making the interrupted operation safe, then quit."
             alert.alertStyle = .warning
             alert.runModal()
             return .terminateCancel
         }
-        guard store?.isCleaningUp == true else { return .terminateNow }
+        if let operation = store?.activeFileOperation {
+            let alert = NSAlert()
+            switch operation {
+            case .exportCopy:
+                alert.messageText = "Export is still copying files"
+                alert.informativeText = "Stop the copy or wait for it to finish, then quit Louppe."
+            case .exportMove:
+                alert.messageText = "Export is still moving files"
+                alert.informativeText = "Wait for the move to finish, then quit Louppe."
+            case .cleanUp:
+                alert.messageText = "Clean Up is still running"
+                alert.informativeText = "Wait for the Trash or restore progress to finish, then quit Louppe."
+            }
+            alert.alertStyle = .warning
+            alert.runModal()
+            return .terminateCancel
+        }
+        guard let store else { return .terminateNow }
+        guard !isPreparingToTerminate else { return .terminateLater }
+        isPreparingToTerminate = true
+        attemptFinalSave(store: store, application: sender)
+        return .terminateLater
+    }
 
+    private func attemptFinalSave(
+        store: SessionStore,
+        application: NSApplication
+    ) {
+        Task { @MainActor [weak self, weak store] in
+            guard let self, let store else {
+                application.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            let result = await store.saveSessionForTermination()
+            if result?.canDiscardInMemoryState != false {
+                self.isPreparingToTerminate = false
+                application.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            self.presentSaveFailure(store: store, application: application)
+        }
+    }
+
+    private func presentSaveFailure(
+        store: SessionStore,
+        application: NSApplication
+    ) {
         let alert = NSAlert()
-        alert.messageText = "Clean Up is still running"
-        alert.informativeText = "Wait for the Trash or restore progress to finish, then quit Louppe."
-        alert.alertStyle = .warning
-        alert.runModal()
-        return .terminateCancel
+        alert.messageText = "Your latest ratings aren't saved"
+        alert.informativeText = "Louppe couldn't save them in the photo folder or its backup. "
+            + "Retry after reconnecting the volume, freeing space, or fixing permissions."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Retry Saving")
+        alert.addButton(withTitle: "Cancel Quit")
+        alert.addButton(withTitle: "Quit Without Saving")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            attemptFinalSave(store: store, application: application)
+        case .alertThirdButtonReturn:
+            isPreparingToTerminate = false
+            application.reply(toApplicationShouldTerminate: true)
+        default:
+            isPreparingToTerminate = false
+            application.reply(toApplicationShouldTerminate: false)
+        }
     }
 }

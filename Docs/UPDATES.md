@@ -54,6 +54,7 @@ building Louppe neither needs nor requests access to a saved GitHub login.
 
    ```sh
    ./Scripts/prepare_update_feed.sh
+   ./Scripts/verify_release.sh --publishing
    ```
 
 4. Create GitHub release `v<MARKETING_VERSION>` and upload the exact generated
@@ -66,7 +67,9 @@ building Louppe neither needs nor requests access to a saved GitHub login.
 The archive name stays `Louppe.zip`; its versioned GitHub tag makes the URL
 unique. `prepare_update_feed.sh` embeds only the current changelog entry,
 creates no delta files, signs the archive reference, and signs the complete
-feed.
+feed. `verify_release.sh --publishing` then refuses the release if its
+version/build, archive length or signature, feed signature, enclosure URL,
+minimum macOS version, embedded framework, or app signature is inconsistent.
 
 ## Local verification
 
@@ -78,6 +81,7 @@ GitHub. Useful checks:
 codesign --verify --deep --strict dist/Louppe.app
 otool -L dist/Louppe.app/Contents/MacOS/Louppe
 plutil -p dist/Louppe.app/Contents/Info.plist
+./Scripts/verify_release.sh
 
 SPARKLE_TOOLS="$(find .build/artifacts -type d -path '*/Sparkle/bin' -print -quit)"
 "$SPARKLE_TOOLS/sign_update" \

@@ -11,14 +11,18 @@ swiftc \
     -module-cache-path .build/performance-checks/module-cache \
     -parse-as-library \
     Sources/Louppe/Models.swift \
+    Sources/Louppe/PreparedSessionIndex.swift \
+    Sources/Louppe/SelectionState.swift \
     Sources/Louppe/AppDateFormat.swift \
     Sources/Louppe/FolderScanner.swift \
     Sources/Louppe/MetadataExtractor.swift \
     Sources/Louppe/VideoSupport.swift \
     Sources/Louppe/ImagePipeline.swift \
     Sources/Louppe/VideoPlaybackController.swift \
+    Sources/Louppe/FileOperationJournal.swift \
     Sources/Louppe/CleanUpWorker.swift \
     Sources/Louppe/ExportWorker.swift \
+    Sources/Louppe/ExportDestinationValidator.swift \
     Sources/Louppe/SessionPersistence.swift \
     Sources/Louppe/SessionStore.swift \
     Tests/PerformanceChecks/main.swift \

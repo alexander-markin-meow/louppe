@@ -23,6 +23,19 @@ and downloading under **Louppe → Settings…**.
 Pick a folder (an SD card works), review, then press **⌘E** to copy — or
 move — the photos you picked.
 
+RAW+JPEG pairs keep one matching basename at the destination, including when
+Louppe adds a collision suffix. If one member cannot be copied, the other is
+rolled back so the destination does not retain half a pair. A long Copy can be
+stopped safely from its progress view; completed photos remain copied. Louppe
+refuses export destinations inside the folder being reviewed.
+
+Copy, Move, Clean Up, and Clean Up undo keep a durable per-file safety record.
+If Louppe, the Mac, or a drive stops unexpectedly between file steps, the next
+launch verifies the exact files and returns them to a safe source state before
+opening a folder. Louppe never overwrites a file during recovery; if a drive is
+missing or a file no longer matches, it leaves everything untouched and offers
+**Retry Recovery**.
+
 ### Keyboard shortcuts
 
 | Key | Action |
@@ -98,9 +111,11 @@ missing the chosen metadata stay at the end in either direction.
 - With several photos selected, **F** and **D** rate them all at once and jump
   to the next undecided photo — one ⌘Z undoes the whole batch. In the Light
   Table, clicking any photo inside the selection cycles the rating for all of
-  them. The toolbar counter shows how many photos are selected. The Info panel
-  switches to a selection summary with every camera, lens, capture-date span,
-  combined file size, and file type represented in the selection.
+  them. The toolbar counter shows how many items are selected. The Info panel
+  switches to a selection summary with the selected item and underlying file
+  counts, every camera, lens, capture-date span, combined size, and file type
+  represented in the selection. RAW+JPEG details show both files' sizes and
+  their total.
 - **Esc**, a plain click, or an arrow key drops the selection.
 
 ### Cleaning up the folder
@@ -135,8 +150,16 @@ anything moves.
 
 - Ratings: a hidden `.louppe_session.json` file inside the photo folder
   (or in `~/Library/Application Support/Louppe/Sessions/` if the folder is
-  read-only, e.g. a locked SD card). Reopening a folder resumes the session.
+  read-only, e.g. a locked SD card). The newest valid copy wins. Louppe shows
+  **Retry Saving** if the folder copy is unavailable or neither location can
+  save, and does not silently discard an unsafe session during folder
+  switching, rescanning, Close Session, or Quit.
 - Thumbnails cache: `~/Library/Caches/Louppe/` (safe to delete anytime).
+- Interrupted-operation records:
+  `~/Library/Application Support/Louppe/Operations/`. These small path/state
+  records normally disappear as soon as an operation finishes; an unresolved
+  record remains so recovery can be retried. They never contain photo data or
+  credentials.
 
 ## Rebuilding from source
 
@@ -160,12 +183,22 @@ The fresh app and its release archive appear at `dist/Louppe.app` and
 `dist/Louppe.zip`. Copy the app to `/Applications` to install. Release owners
 must also follow [`Docs/UPDATES.md`](Docs/UPDATES.md) to sign the exact archive
 and regenerate `appcast.xml` before publishing a GitHub release.
+`./Scripts/verify_release.sh` checks a local package without opening Keychain;
+its `--publishing` mode performs the key-backed feed and archive verification
+required before upload.
 
 Run the focused logic checks with `./Tests/run_performance_checks.sh` and the
 native movie checks with `./Tests/run_video_checks.sh`. They use
 only Apple Command Line Tools and no external test framework. After any app change, also launch
 the installed build with `-openFolder` as described in
 [`AGENTS.md`](AGENTS.md); a compile-only check is not enough.
+
+The repository's `Quality` GitHub Actions workflow repeats strict Swift 6,
+XCTest, deterministic logic/recovery, scrollbar, video, and local release
+package checks on macOS 26. It intentionally skips the two real Trash/restore
+checks, which must still pass locally before installing or releasing a build.
+The workflow has read-only repository access and never uses the private
+Sparkle signing key.
 
 ## Source layout
 
@@ -174,7 +207,10 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `LouppeApp.swift` — app entry point, menu commands
 - `UpdaterViews.swift` — automatic updater menu and Settings controls
 - `SessionStore.swift` — ratings, undo, navigation, session persistence
-- `SessionPersistence.swift` — serialized background sidecar encoding and I/O
+- `PreparedSessionIndex.swift` — pure item-ID, sort, filter, stable-group, and navigation maps
+- `SelectionState.swift` — pure stable-ID selection, range, toggle, filter, and rescan rules
+- `SessionPersistence.swift` — typed background sidecar/backup saves, recovery, and schema validation
+- `FileOperationJournal.swift` — durable per-file Copy/Move/Trash/undo recovery
 - `CleanUpWorker.swift` — background Trash/restore operations and linear merge
 - `FolderScanner.swift` — recursive folder scan, RAW+JPEG pairing, sorting
 - `ImagePipeline.swift` — image decoding and video first frames, thumbnail caches, prefetching
@@ -183,6 +219,7 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `MetadataExtractor.swift` — EXIF extraction (dates, exposure settings, info panel fields)
 - `ExportManager.swift` — export dialog orchestration (copy/move, destination prompt)
 - `ExportWorker.swift` — background export copy/move loops, collision handling, pair rollback
+- `ExportDestinationValidator.swift` — source-tree, permission, and free-space export preflight
 - `Models.swift` — the photo item and session file formats
 - `Views/` — welcome screen, session toolbar + hotkeys, Gallery view, Browser,
   Grid view, info panel, thumbnails, export dialog

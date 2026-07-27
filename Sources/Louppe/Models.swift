@@ -181,7 +181,10 @@ struct PhotoItem: Identifiable, Sendable {
         return urls
     }
 
-    var totalFileSize: Int64 { fileSize + pairedFileSize }
+    var totalFileSize: Int64 {
+        let (total, overflowed) = fileSize.addingReportingOverflow(pairedFileSize)
+        return overflowed ? Int64.max : total
+    }
 
     static func normalizeForSearch(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
@@ -196,6 +199,9 @@ struct PhotoItem: Identifiable, Sendable {
 /// camera/lens/type values are retained rather than collapsed to “Mixed”.
 struct PhotoSelectionSummary: Equatable {
     let count: Int
+    let fileCount: Int
+    let photoCount: Int
+    let videoCount: Int
     let cameras: [String]
     let lenses: [String]
     let captureDayRange: ClosedRange<Date>?
@@ -205,6 +211,9 @@ struct PhotoSelectionSummary: Equatable {
 
     init(items: [PhotoItem]) {
         count = items.count
+        fileCount = items.reduce(0) { $0 + $1.allURLs.count }
+        photoCount = items.count { $0.mediaKind == .photo }
+        videoCount = items.count { $0.mediaKind == .video }
         cameras = Self.distinctMetadataLabels(items.map(\.cameraModel))
         lenses = Self.distinctMetadataLabels(items.map(\.lensModel))
 
@@ -294,8 +303,8 @@ enum ExportMode: Equatable, Sendable {
 // MARK: - Session sort
 
 /// How the toolbar sort menu orders the visible photos.
-struct PhotoSort: Equatable {
-    enum Key: Hashable {
+struct PhotoSort: Equatable, Sendable {
+    enum Key: Hashable, Sendable {
         case captureDate
         case name
         case subfolder
@@ -355,13 +364,14 @@ struct PhotoSort: Equatable {
             case .lens:
                 return a.lensLabel == b.lensLabel
             case .aperture:
-                return a.aperture == b.aperture
+                return groupNumberBits(a.aperture) == groupNumberBits(b.aperture)
             case .shutterSpeed:
-                return a.shutterSpeed == b.shutterSpeed
+                return groupNumberBits(a.shutterSpeed) == groupNumberBits(b.shutterSpeed)
             case .iso:
-                return a.iso == b.iso
+                return groupNumberBits(a.iso) == groupNumberBits(b.iso)
             case .duration:
-                return a.duration.map { Int($0.rounded()) } == b.duration.map { Int($0.rounded()) }
+                return roundedDurationBucket(a.duration)
+                    == roundedDurationBucket(b.duration)
             }
         }
 
@@ -396,6 +406,53 @@ struct PhotoSort: Equatable {
             case .duration:
                 return item.duration.map { MediaDurationFormat.display($0) } ?? "Unknown duration"
             }
+        }
+
+        /// Stable identity for a Grid section. Unlike an enumerated array
+        /// offset or the first visible photo, this survives filtering members
+        /// in and out of an otherwise unchanged metadata group.
+        func groupID(for item: PhotoItem) -> PhotoGroup.ID {
+            let value: PhotoGroup.ID.Value
+            switch self {
+            case .captureDate:
+                value = .date(item.captureDay)
+            case .name:
+                value = .ungrouped
+            case .subfolder:
+                value = .text(item.subfolderLabel)
+            case .fileType:
+                value = .text(item.fileTypeLabel)
+            case .mediaKind:
+                value = .mediaKind(item.mediaKind)
+            case .camera:
+                value = .text(item.cameraLabel)
+            case .lens:
+                value = .text(item.lensLabel)
+            case .aperture:
+                value = .numberBits(groupNumberBits(item.aperture))
+            case .shutterSpeed:
+                value = .numberBits(groupNumberBits(item.shutterSpeed))
+            case .iso:
+                value = .numberBits(groupNumberBits(item.iso))
+            case .duration:
+                value = .roundedDuration(roundedDurationBucket(item.duration))
+            }
+            return PhotoGroup.ID(key: self, value: value)
+        }
+
+        private func groupNumberBits(_ value: Double?) -> UInt64? {
+            guard let value, value.isFinite else { return nil }
+            // Swift considers -0 and +0 equal, so keep their group identity
+            // equal too even though their raw IEEE bit patterns differ.
+            return (value == 0 ? 0.0 : value).bitPattern
+        }
+
+        private func roundedDurationBucket(_ value: TimeInterval?) -> Int? {
+            guard let value,
+                  value.isFinite,
+                  value >= 0,
+                  value <= Double(Int.max) else { return nil }
+            return Int(value.rounded())
         }
     }
     var key: Key = .captureDate
@@ -522,7 +579,24 @@ struct PhotoSort: Equatable {
 /// One run of visible photos that share the active sort key's value.
 /// `title` is nil when division is off (or the key never divides), which
 /// tells the views to draw no header at all.
-struct PhotoGroup: Equatable {
+struct PhotoGroup: Equatable, Identifiable, Sendable {
+    struct ID: Hashable, Sendable {
+        enum Value: Hashable, Sendable {
+            case ungrouped
+            case date(Date?)
+            case text(String)
+            case mediaKind(MediaKind)
+            case numberBits(UInt64?)
+            case roundedDuration(Int?)
+        }
+
+        let key: PhotoSort.Key?
+        let value: Value
+
+        static let ungrouped = ID(key: nil, value: .ungrouped)
+    }
+
+    let id: ID
     let title: String?
     let indices: [Int]
 }

@@ -12,15 +12,24 @@ final class ExportManager: ObservableObject {
         let mode: ExportMode
         /// Files that reached the destination.
         let files: Int
-        /// Copy only: files that couldn't be copied.
-        let failedFiles: Int
-        /// Move only: photos rolled back and left in the source folder.
+        /// Photos whose pair-level copy or move was rolled back.
         let failedPhotos: Int
-        /// Move only: photos whose rollback also failed (a pair may be split).
+        /// Photos whose rollback also failed (destination may retain a
+        /// partial copy, or a moved pair may be split).
         let inconsistentPhotos: Int
+        /// Copy only: the photographer stopped the operation. Completed photos
+        /// remain copied; the in-progress photo was rolled back.
+        let cancelled: Bool
+        /// The operation's durable checkpoint could not be written.
+        let journalFailure: Bool
+        /// Louppe has started restoring the conservative pre-export state.
+        let recoveryRequired: Bool
         let destination: URL
 
-        var isClean: Bool { failedFiles == 0 && failedPhotos == 0 && inconsistentPhotos == 0 }
+        var isClean: Bool {
+            !cancelled && failedPhotos == 0 && inconsistentPhotos == 0
+                && !journalFailure && !recoveryRequired
+        }
     }
 
     enum State: Equatable {
@@ -31,18 +40,33 @@ final class ExportManager: ObservableObject {
     }
 
     @Published var state: State = .summary
+    @Published private(set) var isCancellingCopy = false
+    private var copyCancelFlag: ExportWorker.CancelFlag?
 
     func reset() {
         state = .summary
+        isCancellingCopy = false
+        copyCancelFlag = nil
     }
 
     func promptDestinationAndExport(
+        sourceFolder: URL?,
         items: [PhotoItem],
         ratings: Set<Rating>,
         mode: ExportMode,
-        onMoveWillStart: @escaping @MainActor () -> Void,
-        onMoveDidFinish: @escaping @MainActor (_ movedIDs: [String]) -> Void
+        onOperationWillStart: @escaping @MainActor (_ mode: ExportMode) -> Bool,
+        onOperationDidFinish: @escaping @MainActor (
+            _ mode: ExportMode,
+            _ movedIDs: [String],
+            _ requiresRecovery: Bool
+        ) -> Void
     ) {
+        let selected = items.filter { ratings.contains($0.rating) }
+        guard !selected.isEmpty else {
+            state = .failed("There are no items with the selected ratings to export.")
+            return
+        }
+
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -53,33 +77,49 @@ final class ExportManager: ObservableObject {
             : "Choose where to move the selected media."
         panel.prompt = "Export Here"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        do {
+            try ExportDestinationValidator.validate(
+                sourceFolder: sourceFolder,
+                destination: destination,
+                items: selected,
+                mode: mode
+            )
+        } catch {
+            state = .failed(error.localizedDescription)
+            return
+        }
+
         export(
-            items: items,
-            ratings: ratings,
+            selected: selected,
             mode: mode,
             to: destination,
-            onMoveWillStart: onMoveWillStart,
-            onMoveDidFinish: onMoveDidFinish
+            onOperationWillStart: onOperationWillStart,
+            onOperationDidFinish: onOperationDidFinish
         )
     }
 
     private func export(
-        items: [PhotoItem],
-        ratings: Set<Rating>,
+        selected: [PhotoItem],
         mode: ExportMode,
         to destination: URL,
-        onMoveWillStart: @MainActor () -> Void,
-        onMoveDidFinish: @escaping @MainActor (_ movedIDs: [String]) -> Void
+        onOperationWillStart: @MainActor (_ mode: ExportMode) -> Bool,
+        onOperationDidFinish: @escaping @MainActor (
+            _ mode: ExportMode,
+            _ movedIDs: [String],
+            _ requiresRecovery: Bool
+        ) -> Void
     ) {
-        let selected = items.filter { ratings.contains($0.rating) }
         let totalFiles = selected.reduce(0) { $0 + $1.allURLs.count }
-        guard totalFiles > 0 else {
-            state = .failed("There are no items with the selected ratings to export.")
+        guard totalFiles > 0, onOperationWillStart(mode) else {
+            state = .failed("Another file operation is already running. Wait for it to finish, then try again.")
             return
         }
+
+        isCancellingCopy = false
+        let cancelFlag = mode == .copy ? ExportWorker.CancelFlag() : nil
+        copyCancelFlag = cancelFlag
         state = .working(mode: mode, done: 0, total: totalFiles)
-        // Raise the store's in-flight flag before any file leaves the folder.
-        if mode == .move { onMoveWillStart() }
 
         let progress: ExportWorker.Progress = { [weak self] done, total in
             Task { @MainActor [weak self] in
@@ -88,40 +128,76 @@ final class ExportManager: ObservableObject {
                 self.state = .working(mode: mode, done: done, total: total)
             }
         }
-        Task.detached(priority: .userInitiated) {
+
+        let worker = Task.detached(priority: .userInitiated) { () -> WorkerResult in
             switch mode {
             case .copy:
-                let result = ExportWorker.copy(selected, to: destination, progress: progress)
-                await MainActor.run {
-                    self.state = .finished(Outcome(
-                        mode: .copy,
-                        files: result.copiedFiles,
-                        failedFiles: result.failedFiles,
-                        failedPhotos: 0,
-                        inconsistentPhotos: 0,
-                        destination: destination
-                    ))
-                }
+                return .copy(ExportWorker.copy(
+                    selected,
+                    to: destination,
+                    isCancelled: { cancelFlag?.isSet ?? false },
+                    progress: progress
+                ))
             case .move:
-                let result = ExportWorker.move(selected, to: destination, progress: progress)
-                await MainActor.run {
-                    // Always deliver, even an empty list — the store clears
-                    // its in-flight flag here.
-                    onMoveDidFinish(result.movedItemIDs)
-                    self.state = .finished(Outcome(
-                        mode: .move,
-                        files: result.movedFiles,
-                        failedFiles: 0,
-                        failedPhotos: result.failedPhotos,
-                        inconsistentPhotos: result.inconsistentPhotos,
-                        destination: destination
-                    ))
-                }
+                return .move(ExportWorker.move(
+                    selected,
+                    to: destination,
+                    progress: progress
+                ))
+            }
+        }
+
+        Task { @MainActor in
+            let result = await worker.value
+            copyCancelFlag = nil
+            isCancellingCopy = false
+            switch result {
+            case .copy(let copy):
+                onOperationDidFinish(.copy, [], copy.requiresRecovery)
+                state = .finished(Outcome(
+                    mode: .copy,
+                    files: copy.copiedFiles,
+                    failedPhotos: copy.failedPhotos,
+                    inconsistentPhotos: copy.inconsistentPhotos,
+                    cancelled: copy.cancelled,
+                    journalFailure: copy.journalFailure,
+                    recoveryRequired: copy.requiresRecovery,
+                    destination: destination
+                ))
+            case .move(let move):
+                // Always deliver, even an empty list — the store clears its
+                // in-flight state here.
+                onOperationDidFinish(
+                    .move,
+                    move.requiresRecovery ? [] : move.movedItemIDs,
+                    move.requiresRecovery
+                )
+                state = .finished(Outcome(
+                    mode: .move,
+                    files: move.movedFiles,
+                    failedPhotos: move.failedPhotos,
+                    inconsistentPhotos: move.inconsistentPhotos,
+                    cancelled: false,
+                    journalFailure: move.journalFailure,
+                    recoveryRequired: move.requiresRecovery,
+                    destination: destination
+                ))
             }
         }
     }
 
+    func cancelCopy() {
+        guard case .working(mode: .copy, done: _, total: _) = state else { return }
+        isCancellingCopy = true
+        copyCancelFlag?.set()
+    }
+
     func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private enum WorkerResult: Sendable {
+        case copy(ExportWorker.CopyResult)
+        case move(ExportWorker.MoveResult)
     }
 }

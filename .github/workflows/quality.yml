@@ -1,0 +1,54 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Swift, filesystem, UI logic, and release package
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Report Apple toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+
+      - name: Strict Swift 6 build
+        run: |
+          swift build --disable-keychain \
+            -Xswiftc -strict-concurrency=complete \
+            -Xswiftc -warnings-as-errors
+
+      - name: XCTest
+        run: swift test --disable-keychain
+
+      - name: Deterministic logic and recovery checks
+        env:
+          LOUPPE_SKIP_REAL_TRASH: "1"
+        run: ./Tests/run_performance_checks.sh
+
+      - name: Scrollbar checks
+        run: ./Tests/run_scrollbar_checks.sh
+
+      - name: Native video checks
+        run: ./Tests/run_video_checks.sh
+
+      - name: Release build and local preflight
+        run: ./build_app.sh

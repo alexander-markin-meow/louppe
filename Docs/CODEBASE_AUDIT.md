@@ -3,7 +3,7 @@
 Audit date: 2026-07-26
 
 This audit covers the complete application source, build and release scripts,
-documentation, and test suites. The current codebase is about 7,400 lines of
+documentation, and test suites. The current app source is about 10,400 lines of
 Swift. The audit included release and debug builds, strict-concurrency
 diagnostics, all focused test scripts, the XCTest suite, package/signature
 inspection, and a real installed-app launch against a disposable photo folder.
@@ -19,18 +19,85 @@ The following checks pass on the audited revision:
 
 - Release app build and strict code-signature verification.
 - Installed-app launch, folder scan, RAW+JPEG pairing, and sidecar creation.
-- 31/31 performance, persistence, cleanup, and export checks.
+- 57/57 performance, persistence, recovery, cleanup, export, and metadata
+  checks, including two real macOS Trash/restore checks.
 - 9/9 scrollbar behavior checks.
 - 18/18 native video checks.
-- 5/5 XCTest cases.
+- 9/9 XCTest cases.
 - Signed Sparkle feed, signed archive metadata, embedded updater framework,
   and extraction/signature verification of the release zip.
 
-A Swift build with complete strict-concurrency diagnostics also succeeds, but
-it reports warnings in `FolderScanner`, `ExportManager`, `VideoSupport`, and
-`VideoPlaybackController`. Those warnings become compile errors after moving
-the package to Swift 6 language mode, so they should be treated as migration
-work rather than ignored.
+The package now builds in Swift 6 language mode with complete strict
+concurrency checking and zero warnings.
+
+## Implementation progress
+
+Completed on 2026-07-26–27 after the audit:
+
+- **P1-1:** Copy and Move share a batch destination plan. One collision suffix
+  is reserved for every member of a photo, partial Copy failures roll back, and
+  Copy cancellation cannot leave an in-progress half-pair.
+- **P1-2:** `SessionStore.activeFileOperation` now covers Clean Up, Copy, and
+  Move. Copy blocks Quit, folder/session mutation, conflicting operations, and
+  updater installation until it completes or stops safely.
+- **P1-3:** Copy, Move, Trash, and Trash undo now write a durable, per-file
+  operation journal before touching media. Launch recovery verifies stable
+  volume/inode identities, restores the conservative source state, never
+  overwrites an existing file, and remains retryable when a volume is absent.
+- **P2-1:** Export rejects the source folder and symlink-resolved descendants,
+  checks destination writability, and preflights capacity for Copy and
+  cross-volume Move.
+- **P2-6:** The package now defaults to Swift 6 language mode. Scanner chunk
+  collection, export callbacks, AVFoundation metadata reads, and notification
+  observer cleanup pass complete strict-concurrency checking.
+- **P2-2:** RAW+JPEG grouping now has stable path/group ordering and respects
+  the source volume's filename case sensitivity.
+- **P2-3:** The silent depth-five cutoff is removed. Deep media is scanned,
+  while symbolic-link directories are explicitly skipped and cancellation
+  remains active.
+- **P2-8:** The Info panel distinguishes selected items from their underlying
+  file count, uses “media items” when videos are included, and shows primary,
+  paired, and total sizes for a RAW+JPEG pair.
+- **P1-4:** Persistence now returns typed folder/backup/failure results,
+  maintains a current fallback, chooses the newest valid snapshot, exposes a
+  Retry Saving warning, and uses asynchronous Quit coordination.
+- **P2-4:** Version, source-folder, relative-path, uniqueness, paired-name, and
+  rating values are validated before a session is applied. Unsafe or future
+  sidecars are preserved and block automatic replacement.
+- **P2-5:** Selection and rating history now use `PhotoItem.id` as their stable
+  authority. Rescan snapshots current/selected IDs before clearing the old
+  generation, then remaps them through the rebuilt ID→index map.
+- **P3-5 (release portion):** Every package build runs a local app/archive/feed
+  preflight; publishing mode additionally verifies the feed and archive
+  signatures against the owner's Keychain key and checks enclosure metadata.
+- **P3-1/P3-2 (prepared-index portion):** A pure `PreparedSessionIndex` now
+  owns item-ID, sorting, filtering, stable groups, header, and visible-location
+  maps behind the existing `SessionStore` facade. One derived location map serves
+  range selection, horizontal/vertical navigation, next-undecided, prefetch,
+  and toolbar position lookups in O(1) instead of repeatedly scanning the
+  visible list and groups. Grid sections now have metadata-derived stable IDs
+  and avoid a render-time enumerated-array allocation.
+- **P3-2 (measurement portion):** Instruments signposts cover index rebuild,
+  sort, filter, and group phases. Deterministic 1k/10k/100k fixtures record a
+  local comparison baseline and validate every visible map.
+- **P3-1 (selection portion):** Pure `SelectionState` now owns the explicit
+  index/stable-ID projections plus range, edge, command-toggle, rubber-band,
+  filter-intersection, and rescan-remapping rules behind `SessionStore`.
+- **P2-9 (CI portion):** A least-privilege macOS 26 GitHub Actions workflow
+  now gates strict Swift 6 compilation, XCTest, 55 deterministic
+  logic/recovery cases, scrollbar/video suites, and the local release-package
+  preflight without private updater credentials.
+- Thirty new focused regression cases cover pairing and recursive-scan
+  determinism, pair-safe export, unsafe destinations, accurate item/file
+  metadata, stale-backup precedence, corruption recovery, schema rejection,
+  total persistence failure, crash-state recovery, exact file identity,
+  recovery idempotency, ID-safe rating undo, rescan identity preservation,
+  stable Grid groups, 1k/10k/100k prepared-index structure, selection
+  remapping/filtering, batch rating/undo, and zero-match safety.
+
+The highest-value remaining reliability work is broader app-level/CI coverage
+(**P2-9**). Updater-key backup and notarization (**P1-5**) remain
+owner/release-process work.
 
 ## What is already strong
 
@@ -64,31 +131,24 @@ work rather than ignored.
 
 ## Findings
 
-### P1-1 — Copy export does not keep a RAW+JPEG pair transactional
+### P1-1 — Completed: pair-transactional Copy and shared collision naming
 
-`ExportWorker.copy` flattens all selected items into one file list and copies
-each file independently. If the first half of a pair copies and the second
-fails, the destination contains a partial pair even though Louppe presents the
-pair as one photo.
+At the audit baseline, Copy flattened every selected item into an independent
+file list and Copy/Move chose collision suffixes per file. A second-member
+failure could leave half a pair, while a collision against only `SHOT.NEF`
+could produce `SHOT (1).NEF` beside unmatched `SHOT.JPG`.
 
-There is a related naming problem in both Copy and Move: collision suffixes
-are selected independently for each file. For example, if `SHOT.NEF` already
-exists but `SHOT.JPG` does not, a new pair can become `SHOT (1).NEF` and
-`SHOT.JPG`. They no longer share a basename and may not pair when the
-destination is opened in Louppe.
+Implemented:
 
-Recommended change:
+- `ExportWorker.makePlan` reserves the complete batch before I/O.
+- Every member of a `PhotoItem` receives one shared suffix, and later
+  same-named items cannot collide with earlier reservations.
+- Copy works per photo and removes already-copied members when a later member
+  fails.
+- Copy and Move use the same plan; neither replaces an existing destination
+  file.
 
-1. Add an `ExportPlan` that reserves every destination URL before touching the
-   filesystem.
-2. Choose one shared suffix per `PhotoItem`, so every member of a pair keeps
-   the same basename.
-3. Copy one photo at a time. If a member fails, remove the members copied for
-   that photo and report one failed photo, not just one failed file.
-4. Use a small staging directory inside the destination when it is on the same
-   volume, then rename completed files into place.
-
-Acceptance checks:
+Passing acceptance checks:
 
 - A collision against either pair member gives both files the same suffix.
 - An injected second-file failure leaves no partial copy in the destination.
@@ -96,90 +156,89 @@ Acceptance checks:
 - A failed photo does not prevent later photos from being attempted.
 - Copy and Move share the same tested destination-planning rules.
 
-### P1-2 — Copy export is not represented as an active file operation
+### P1-2 — Completed: Copy uses the shared active file-operation state
 
-`SessionStore.isMovingExport` protects Move export, but there is no equivalent
-state for Copy. The export sheet cannot be dismissed while working, yet the
-application can still quit or begin an updater-driven relaunch while a long
-copy is in progress. That can leave a partial destination with no useful
-explanation to the photographer.
+At the audit baseline, Move and Clean Up blocked Quit and session mutations,
+but Copy had no in-flight state beyond its modal sheet.
 
-Recommended change:
+Implemented:
 
-- Replace the separate cleanup/move flags with a single
-  `FileOperationCoordinator` whose state describes scanning, copying, moving,
-  trashing, or restoring.
-- Block Quit, folder replacement, rescan, conflicting commands, and update
-  installation for every state that cannot be safely interrupted.
-- Add explicit cancellation to Copy. Cancellation should finish or roll back
-  the photo currently being copied, retain completed photos, and report the
-  exact result.
-- Make the updater consult the same coordinator before allowing a relaunch.
+- `SessionStore.activeFileOperation` is the single state for Clean Up, Copy,
+  and Move.
+- Quit, folder replacement, rescan, rating/selection changes, undo, conflicting
+  file operations, and the manual updater are blocked while it is active. The
+  application delegate refuses an automatic updater relaunch too.
+- Copy has an explicit Stop button. It keeps completed photos and rolls back
+  the in-progress pair before clearing the state.
 
-Acceptance checks:
+Passing acceptance checks:
 
 - Quit and update installation cannot interrupt a copy between pair members.
 - Buttons and menu commands derive their enabled state from one source.
-- Cancelling reports completed, skipped, and failed photo/file counts.
+- Cancelling reports the completed file count, keeps completed photos, and
+  explains that the in-progress photo was rolled back.
 - Moving originals remains available only through the two sanctioned paths.
 
-### P1-3 — File-operation rollback is memory-only
+### P1-3 — Completed: durable, identity-verified file-operation recovery
 
-Clean Up and Move correctly block normal Quit and roll back a partial pair
-when a call fails. A crash, forced quit, power loss, disconnected SD card, or
-system restart can still occur between moving the first and second file.
-Because rollback data exists only in memory, the next launch cannot explain
-or repair that state.
+Implemented:
 
-Recommended change:
+- `FileOperationJournal` atomically activates one immutable operation plan,
+  then writes a small per-file checkpoint. A 10,000-file job updates one tiny
+  state record per step rather than repeatedly rewriting a giant journal.
+- Export Copy and Move stage files through operation-owned hidden temporary
+  paths before the final rename. Trash records the source identity before
+  `trashItem` and its system-selected destination immediately afterward.
+- Every staged or completed file is tied to its volume, device number, and
+  inode. Recovery refuses a same-named replacement and never overwrites an
+  existing source.
+- Active Copy journals remove only operation-owned partial copies. Active
+  Move and Trash journals restore the source state; active Trash undo
+  journals finish restoring the source state. A committed marker preserves a
+  fully completed operation if the process stopped before journal cleanup.
+- Launch recovery runs off the main actor before a requested folder opens.
+  Destructive/session-changing actions and Quit remain blocked while it runs.
+  Missing volumes or identity conflicts leave the journal and files untouched
+  with a persistent Retry Recovery action.
 
-- Before the first move, atomically write a compact operation journal in
-  Application Support. Record operation ID, source and destination paths,
-  planned members, and each completed step.
-- Flush a step before and after each filesystem move.
-- Remove the journal only after the operation and session state are safely
-  committed.
-- On launch, detect an unfinished journal and offer a plain-language choice:
-  restore the source state or complete the operation.
-- Never infer that a missing file was intentionally deleted.
+Passing acceptance checks:
 
-Acceptance checks:
+- Simulated termination after Copy staging/finalization removes the partial
+  copy and leaves the original.
+- Simulated termination before or after a Move rename restores the exact
+  source file.
+- Trash and Trash-undo interruption fixtures recover in the correct direction.
+- Recovery is idempotent, committed operations preserve their results, and a
+  same-named replacement remains untouched and retryable.
+- Journals contain paths, stable identity, and state only—never media contents
+  or credentials.
 
-- A test process terminated after moving one member can recover on next run.
-- Recovery is idempotent; running it twice does not move or overwrite files.
-- A disconnected volume pauses recovery and names the missing volume.
-- Journals contain paths and state only, never image data or credentials.
+### P1-4 — Completed: observable, ordered session persistence
 
-### P1-4 — Session persistence failures are invisible
+At the audit baseline, encoding and both write destinations could fail
+silently, reads collapsed absence/corruption/permissions into `nil`, the
+fallback could become stale, and termination blocked the main thread.
 
-`SessionPersistence.save` silently returns when encoding, sidecar writing, and
-fallback writing fail. `read` also treats an unreadable or corrupt session as
-if no session existed. The UI therefore cannot tell the photographer that
-recent ratings might not have been saved.
+Implemented:
 
-The fallback file can also become stale. A later successful sidecar save does
-not refresh or remove an older Application Support fallback, so a missing or
-corrupt sidecar can resurrect older ratings.
+- Save returns typed sidecar, backup-only, total-failure, and superseded
+  outcomes with categorized permission, capacity, volume, and encoding causes.
+- A successful save refreshes the Application Support snapshot. Reads validate
+  both candidates and apply the newest valid `scannedAt` value rather than
+  blindly preferring the sidecar.
+- `SessionStore` shows a persistent, non-modal Retry Saving banner for
+  backup-only or unsafe state. A later successful sidecar save clears it.
+- Folder switching, rescan, pairing-mode changes, and Close Session keep the
+  live session until the snapshot is safe.
+- Quit uses AppKit's terminate-later flow. A total failure offers Retry,
+  Cancel Quit, or explicit Quit Without Saving.
 
-Recommended change:
+Passing acceptance checks:
 
-- Return a typed save result: sidecar saved, fallback saved, retryable failure,
-  or permanent failure.
-- Publish persistence health in `SessionStore` and show a non-blocking warning
-  when ratings are not currently safe.
-- Keep a last-known-good backup before replacing a decodable session.
-- When the sidecar succeeds, either update the fallback snapshot or remove it.
-- Distinguish “no session,” “unsupported version,” “corrupt session,” and
-  “permission denied.”
-- Use AppKit's asynchronous terminate-later flow instead of blocking the main
-  thread with a semaphore for up to three seconds.
-
-Acceptance checks:
-
-- Simulated permission and disk-full errors appear in the UI and can retry.
-- A corrupt sidecar never silently overwrites the last-known-good session.
-- The newest successful snapshot always wins across sidecar and fallback.
-- Quitting after a last-second rating either saves it or clearly refuses Quit.
+- Corrupt sidecars recover from the current last-known-good backup.
+- A newer backup wins over a stale but valid sidecar.
+- Failure of both destinations is a typed failure and retains a retry snapshot.
+- No main-thread semaphore remains in the persistence/termination path.
 
 ### P1-5 — Updater release signing has a single-key operational risk
 
@@ -188,15 +247,20 @@ updater-enabled copies of Louppe depend on the matching private Ed25519 key,
 which is stored in the release owner's Keychain. Loss of that key would make a
 normal trusted update path impossible.
 
-Recommended change:
+Implemented so far:
+
+- `Scripts/verify_release.sh` checks the exact app and archive on every release
+  build. `--publishing` also verifies the signed appcast and enclosure archive
+  with Sparkle, plus version/build, URL, byte length, minimum macOS, embedded
+  framework, and extraction/signature integrity.
+- The private signing key remains outside Git and the app bundle.
+
+Remaining owner-operated changes:
 
 - Make an encrypted offline backup of the exported private key and test one
   restore on a separate macOS account.
 - Keep `Docs/UPDATES.md` as the release checklist and require its verification
   steps before publishing.
-- Add a release preflight that verifies version/build, archive signature,
-  appcast signature, enclosure URL, minimum macOS version, and that the
-  archive has not changed since signing.
 - When practical, use Developer ID signing, hardened runtime, and Apple
   notarization. Sparkle's signature remains necessary; notarization solves
   first-install trust and reduces Gatekeeper friction.
@@ -207,143 +271,132 @@ Acceptance checks:
 - A release cannot pass preflight with a stale feed or changed archive.
 - No private signing material is stored in Git, the app bundle, or build logs.
 
-### P2-1 — Export destinations are not validated against the source tree
+### P2-1 — Completed: export destination safety and capacity preflight
 
-The folder picker allows the source folder or one of its descendants. Copying
-into the source tree can cause duplicates to appear on the next scan. Moving
-into a child folder makes photos leave and then reappear under a different
-relative path. This is surprising and complicates session ratings.
+At the audit baseline, the picker allowed the source folder or a descendant,
+which could make copies duplicate on rescan or moved photos reappear under
+new IDs.
 
-Recommended change:
+Implemented:
 
-- Resolve standardized and file-resource paths for source and destination.
-- Reject the exact source folder.
-- Warn and require a deliberate second confirmation for a descendant
-  destination, or reject descendants entirely for Move.
-- Preflight destination writability and available capacity before starting.
+- Source and destination are standardized and symlinks are resolved.
+- The exact source and all descendants are rejected for both modes.
+- Destination directory/write permission is checked.
+- Available capacity is checked for Copy and cross-volume Move; same-volume
+  Move is allowed to use its normal rename path without requiring the full
+  media size free.
 
-Acceptance checks:
+Passing acceptance checks:
 
 - Symlinked paths cannot bypass the source/descendant check.
 - Same-folder Move never becomes an accidental rename.
 - The dialog explains why an unsafe destination is unavailable.
 
-### P2-2 — RAW+JPEG choice is not deterministic in duplicate-name edge cases
+### P2-2 — Completed: deterministic, volume-aware RAW+JPEG pairing
 
-`FolderScanner` groups by a lowercased extensionless path and selects
-`raws.first` and `jpegs.first`. Filesystem enumeration and dictionary order
-are not an interface guarantee. A folder containing unusual duplicates such
-as `.jpg` and `.jpeg`, or case-only filename differences on a case-sensitive
-volume, may pair a different combination after a rescan.
+At the audit baseline, filesystem enumeration and Dictionary order could
+change which unusual duplicate became the chosen pair, while unconditional
+lowercasing could merge case-only names on a case-sensitive volume.
 
-Recommended change:
+Implemented:
 
-- Sort discovered URLs by standardized relative path before grouping.
-- Define and test a stable extension preference when more than one RAW or
-  JPEG candidate exists.
-- Preserve case-sensitive identities while using a separate normalized key
-  only where the volume's behavior permits it.
-- Log ambiguous groups and present their leftovers as independent items.
+- File paths and group keys are sorted before pair choice.
+- Pair candidates and leftovers use a stable path order.
+- Basenames are case-folded only when the source volume reports
+  case-insensitive names.
+- Reversed-input and case-sensitive-volume regression fixtures are included.
 
-Acceptance checks:
+Passing acceptance checks:
 
 - Repeated scans of the same tree create identical item IDs and pairs.
 - Reversing enumerator input order does not change the result.
 - Case-sensitive-volume fixtures do not merge distinct photos.
 
-### P2-3 — The fixed scan-depth limit silently omits deep folders
+### P2-3 — Completed: complete deep scanning with explicit loop prevention
 
-Scanning stops below depth five to avoid pathological trees. The enumerator
-already does not follow package descendants, and normal symbolic-link
-handling can be made explicit. A photographer with a legitimate deeper
-archive receives no notice that media was omitted.
+At the audit baseline, scanning silently stopped below depth five.
 
-Recommended change:
+Implemented:
 
-- Prefer an explicit loop-safe recursive policy using resource identifiers.
-- If the limit is retained, count skipped directories and tell the user.
-- Add a setting only if real-world measurements show that a configurable
-  depth is necessary; do not expose implementation detail by default.
+- The arbitrary depth cutoff is removed.
+- Symbolic-link directories are detected and skipped explicitly.
+- Package descendants remain skipped and cooperative cancellation remains
+  active.
+- A depth-eight fixture with a link back to its root verifies completeness and
+  loop prevention.
 
-Acceptance checks:
+Passing acceptance checks:
 
 - Deep fixtures are either scanned or produce a visible skipped-folder count.
 - Symlink loops and packages do not cause unbounded traversal.
 - Cancellation remains responsive on very large trees.
 
-### P2-4 — Session schema fields are written but not validated
+### P2-4 — Completed: explicit session-schema validation
 
-The sidecar contains `version` and `sourcePath`, but reads decode and apply it
-without an explicit schema-version decision. Future model changes could either
-fail silently or interpret data with the wrong assumptions. A copied sidecar
-may also describe a different source path.
+The only supported schema is version 1. Reads now validate that version, the
+canonical source folder, unique safe relative filenames, paired basenames, and
+rating values. A future-version or different-folder sidecar blocks the session
+with a visible explanation even if an older fallback exists, so the current
+app never overwrites data it may not understand. Corrupt/invalid data uses a
+valid current-folder backup when available; otherwise it is preserved and the
+folder is not opened.
 
-Recommended change:
+Passing acceptance checks:
 
-- Introduce explicit decoding and migration per supported schema version.
-- Reject unknown future versions with a warning while preserving the file.
-- Decide and document whether copying a whole folder should intentionally
-  carry ratings. If yes, accept the path mismatch but update `sourcePath` on
-  the next save; if no, ask before importing.
-- Add a `lastSuccessfulSave` value for diagnostics.
+- Future-version, wrong-folder, malformed-rating, and traversal fixtures are
+  rejected without replacement.
+- A valid backup can recover a corrupt version-1 sidecar.
+- The current policy is conservative: copying/moving a folder requires the
+  embedded `sourcePath` to be updated deliberately before ratings are applied.
 
-Acceptance checks:
+### P2-5 — Completed: stable identity across item generations
 
-- Old fixtures migrate deterministically.
-- Future-version and malformed fixtures never get overwritten automatically.
-- The source-path policy is covered by tests and visible to the user.
+Implemented:
 
-### P2-5 — Selection and navigation rely heavily on array indices
+- `SelectionState.itemIDs` is the stable multi-selection authority;
+  `selectedIndices` remains the published render-facing projection used by
+  the lazy Browser and Grid.
+- The derived rebuild creates an `itemIndexByID` map alongside sorted and
+  visible locations. Selection remapping and rating undo resolve IDs through
+  that current-generation map.
+- Rating undo records each `PhotoItem.id` plus its former rating/time, and
+  restores the former current photo by ID. It can no longer apply a rating to
+  the wrong photo after an index changes.
+- A same-folder rescan or pairing rebuild snapshots current and selected IDs
+  before `items`/`visibleIndices` are cleared. When the new scan finishes,
+  surviving visible IDs are remapped and the former current photo is restored.
+- Clean Up, Clean Up undo, and Move export preserve the current item by ID
+  when it survives, with the prior same-position successor fallback when the
+  current item itself left the folder.
 
-The current model is carefully defended, but `selectedIndices`,
-`visibleIndices`, undo snapshots, and navigation positions remain coupled to
-the current order of `items`. Every structural mutation must clear or remap
-indices correctly. This is the class of state that caused the earlier stale
-visible-index crash.
+Passing acceptance checks:
 
-Recommended change:
+- A real asynchronous four-file rescan changes the current photo's array
+  position while preserving the exact current ID and two-photo selection.
+- A rating undo follows its photo after a forced array reorder and returns the
+  current pointer to that same ID.
+- Existing Browser/Grid follow-scroll, cleanup successor, filtering, range
+  selection, and restoration checks remain unchanged.
 
-- Keep `PhotoItem.id` as the stable selection and undo identity.
-- Maintain an `id → item index` map rebuilt with other derived data.
-- Store visible item IDs or a versioned prepared index whose lifetime is tied
-  to the current item generation.
-- Preserve current behavior where an empty multi-selection means “current
-  photo only,” but give that concept an explicit type.
+### P2-6 — Completed: Swift 6 strict-concurrency migration
 
-Acceptance checks:
+At the audit baseline, complete diagnostics found a non-Sendable scanner
+cancellation/buffer capture, a detached export callback capture, concurrent
+access to one AVFoundation track, and non-Sendable notification tokens in a
+nonisolated deinitializer.
 
-- Reorder, filter, rescan, cleanup, and restore tests preserve the intended
-  current photo and selection by ID.
-- No public operation can observe indices created for an older item
-  generation.
-- Browser and Grid follow-scroll behavior remains unchanged.
+Implemented:
 
-### P2-6 — Swift 6 strict-concurrency migration is not complete
+- Scanner cancellation is `@Sendable`, and bounded workers publish ordered
+  chunks through a lock-protected Sendable owner.
+- Export detached work captures Sendable request/result values and returns to
+  `MainActor` before invoking session callbacks.
+- AVFoundation track properties load sequentially on the existing background
+  scanner worker.
+- Notification tokens live in lock-protected Sendable owners.
+- `Package.swift` now defaults to Swift 6 language mode.
 
-The package currently compiles in Swift 5 language mode. Complete diagnostics
-identify these concrete migration areas:
-
-- `FolderScanner`: a non-Sendable cancellation closure and a concurrent
-  mutable `UnsafeMutableBufferPointer` capture.
-- `ExportManager`: a main-actor callback captured by `Task.detached`.
-- `VideoSupport`: concurrent `async let` access to the same AVFoundation track.
-- `VideoPlaybackController`: non-Sendable notification observer tokens
-  accessed from a nonisolated deinitializer.
-
-Recommended change:
-
-- Replace the scanner's buffer mutation with a structured task group returning
-  indexed chunks, and make cancellation explicitly `@Sendable`.
-- Give export work a Sendable request/result boundary; invoke callbacks only
-  after returning to `MainActor`.
-- Load AVFoundation track properties sequentially unless measurement proves
-  the tiny parallel gain matters.
-- Own observer cleanup on the main actor or use token wrappers with an
-  explicit isolation policy.
-- Enable strict-concurrency warnings in the normal build immediately, then
-  switch the language mode only after the warnings reach zero.
-
-Acceptance checks:
+Passing acceptance checks:
 
 - `swift build` and `swift test` produce zero strict-concurrency warnings.
 - The package compiles in Swift 6 language mode on the current SDK.
@@ -374,46 +427,63 @@ Acceptance checks:
 - Peak memory stays bounded on a representative 100 MP file.
 - Pan/zoom does not block keyboard rating or video playback.
 
-### P2-8 — Some file-count and size labels are misleading
+### P2-8 — Correct file-count and size wording — completed
 
-The multi-selection panel says “files selected,” but its count is the number
-of `PhotoItem` values. A RAW+JPEG pair counts as one selected item while
-representing two files. Single-item metadata also reports the primary file's
-size rather than the pair's combined size.
-
-Recommended change:
-
-- Say “photos selected” or “items selected.”
-- When useful, show both counts: “12 photos · 19 files.”
-- Show primary and paired sizes separately plus their total.
-- Use “media items” when a selection contains video.
+The multi-selection panel now shows both the selected photo/media-item count
+and underlying file count. Selections containing video use “media items.”
+Single RAW+JPEG metadata shows primary, paired, and combined sizes.
 
 Acceptance checks:
 
 - Pair, unpaired photo, video, and mixed-selection fixtures produce accurate
-  wording and totals.
+  counts and totals.
 - No destructive confirmation understates the number of filesystem entries.
 
-### P2-9 — Automated coverage is useful but narrow
+### P2-9 — CI gate and selection coverage completed; broader UI coverage remains
 
-The focused suites exercise important algorithms, yet only five XCTest cases
-currently cover app-level behavior. There is no repository CI workflow.
-Important untested seams include updater configuration, session failure
-states, filter combinations, selection across structural changes, export
-preflight, pair collision planning, update release packaging, and
-accessibility labels.
+The focused suites exercise important algorithms, and nine XCTest cases
+currently cover app-level behavior.
+Important untested seams include updater configuration, more view-level
+session failure states, accessibility labels, and the recovery presentation
+itself. Pair collision planning, persistence recovery/schema failures, export
+preflight, selection across a real rescan, journal crash states, and local
+update release packaging now have focused checks.
 
-Recommended change:
+Implemented:
 
-- Move pure filter/sort/selection logic behind small types that XCTest can
-  instantiate without a window.
+- `.github/workflows/quality.yml` runs on pull requests, pushes to `main`, and
+  manual dispatch using GitHub's native `macos-26` image.
+- Repository permission is read-only, concurrent obsolete runs are cancelled,
+  and the job has a 30-minute ceiling.
+- The job reports its Xcode/Swift/SDK versions, treats strict-concurrency
+  warnings as errors, runs XCTest plus deterministic logic, scrollbar, and
+  native video suites, then packages and verifies the local release archive.
+- CI explicitly skips only the two real Trash/restore cases. Those remain a
+  required local pre-install/release gate because hosted Trash behavior is not
+  a dependable product signal.
+- No private Sparkle key is present or requested. CI performs the same
+  structural feed/archive checks as routine local builds; publishing remains
+  the owner's separate key-backed step.
+
+Completed:
+
+- Filter/sort/group/location behavior lives behind `PreparedPhotoFilter` and
+  `PreparedSessionIndex`; selection behavior lives behind `SelectionState`.
+- Four app-level selection cases verify filtering, range/toggle anchors, batch
+  rating plus undo, and zero-match safety through `SessionStore`.
+
+Remaining work:
+
 - Add fault-injectable filesystem adapters for persistence and export tests.
-- Add a package/release test that extracts `Louppe.zip`, verifies signing,
-  checks every required Sparkle key, and verifies the appcast.
-- Add GitHub Actions using the current macOS/Xcode image. PR builds require no
-  private updater key; signing-feed tests use a disposable key.
+- Add app-level assertions for recovery warnings, total save failure, and
+  updater configuration/presentation.
+- **Completed locally:** package/release preflight extracts `Louppe.zip`,
+  verifies signing, checks every required Sparkle key, and validates the
+  appcast structure. Publishing mode performs key-backed verification.
 - Retain the existing real Trash/restore test locally because CI Trash
   behavior may differ.
+- Add a disposable Sparkle signing key test if feed-generation behavior moves
+  into CI; never upload the owner's real key.
 
 Acceptance checks:
 
@@ -424,14 +494,16 @@ Acceptance checks:
 
 ### P3-1 — Large state/view files slow safe changes
 
-`SessionStore.swift` is about 1,500 lines and `FilterView.swift` about 850.
+`SessionStore.swift` is about 2,000 lines and `FilterView.swift` about 850.
 Both collect several separable responsibilities, which makes unrelated
 changes harder to review and test.
 
 Recommended extraction order:
 
-1. `PreparedSessionIndex`: filtering, sorting, day groups, position maps.
-2. `SelectionState`: current item, explicit selection, range operations.
+1. **Completed:** `PreparedSessionIndex`: item IDs, filtering, sorting, stable
+   groups, headers, and position maps.
+2. **Completed:** `SelectionState`: explicit/stable selection, range, edge,
+   toggle, rubber-band, filter intersection, and generation remapping.
 3. `RatingHistory`: rating mutations, counts, and undo entries.
 4. `FileOperationCoordinator`: cleanup/export state and recovery.
 5. `SessionRepository`: persistence requests, health, and migrations.
@@ -448,28 +520,43 @@ Acceptance checks:
 - Each extracted component has focused tests before old code is removed.
 - `SessionStore` continues to publish UI state only from the main actor.
 
-### P3-2 — Navigation has avoidable linear searches
+### P3-2 — Navigation lookup, measurement, and Grid identity completed
 
-Several navigation and status paths call `visibleIndices.firstIndex(of:)`.
-Vertical movement also searches groups. This is acceptable for ordinary
-folders, but it becomes repeated O(n) work during keyboard navigation in very
-large sessions.
+At the audit baseline, navigation and status paths repeatedly called
+`visibleIndices.firstIndex(of:)`, while vertical movement also searched every
+group.
 
-Recommended change:
+Implemented:
 
-- First add signposts and baseline folders at 1k, 10k, and 100k items.
-- If navigation exceeds one display frame, cache item-index/ID to visible
-  position and group/row position as part of `PreparedSessionIndex`.
-- Give day groups stable IDs and avoid `Array(enumerated())` allocations in
-  every Grid render.
+- `rebuildVisibleGroups()` now builds one item-index → global/group location
+  map in the same O(n) pass as group titles.
+- Range selection, select-to-edge, horizontal and vertical navigation,
+  next-undecided, full-image prefetch, filter visibility checks, and the
+  toolbar's current position reuse O(1) lookups.
+- The map is cleared with other derived session data and rebuilt only when
+  filter/sort/group/session inputs invalidate it.
+- A 5,000-item fixture verifies map correctness across reverse sorting,
+  filtering, group sorting, and disabling group division.
+- `PreparedSessionIndex` emits points-of-interest signposts around item-map,
+  sort, filter, and group phases.
+- Synthetic 1k, 10k, and 100k fixtures now record comparison baselines while
+  asserting complete visible-location coverage.
+- Groups use metadata-derived IDs that survive filtering their former first
+  photo. Grid renders the groups directly without allocating
+  `Array(enumerated())` on every body evaluation.
+
+Remaining measurement work:
+
+- Record release-mode CPU and peak-memory baselines with representative real
+  folders before changing cache budgets or the lazy layouts.
 - Do not replace the lazy Grid or Browser; their bounded rendering is a
   deliberate strength.
 
 Acceptance checks:
 
+- Derived-map correctness stays covered across sort/filter/group changes.
 - Arrow-key navigation and selection update remain under one frame at the
-  agreed large-folder target.
-- Derived maps rebuild only after inputs that can invalidate them.
+  agreed large-folder target once signpost baselines exist.
 - Memory growth is measured and documented alongside speed gains.
 
 ### P3-3 — Video and image async bridges should become structured
@@ -519,7 +606,7 @@ Acceptance checks:
 - Rating and selection are understandable without color.
 - Every icon-only control announces an action and current state.
 
-### P3-5 — Diagnostics and release automation are minimal
+### P3-5 — Release preflight completed; diagnostics remain minimal
 
 Most failures are currently collapsed into a short UI message or ignored.
 There is no structured log for scan duration, cache behavior, persistence,
@@ -533,8 +620,8 @@ Recommended change:
   export batches.
 - Offer “Copy Diagnostics” with versions, recent non-sensitive error codes,
   and performance counts—never photo paths unless the user explicitly opts in.
-- Automate release preflight and archive verification while keeping the real
-  updater private key local/offline.
+- **Completed:** automate release preflight and archive verification while
+  keeping the real updater private key local/offline.
 - Review Sparkle updates regularly and verify its pinned checksum when bumped.
 
 Acceptance checks:
@@ -549,34 +636,41 @@ Acceptance checks:
 
 ### Milestone 1 — File safety
 
-1. Build the shared export destination planner and pair-level Copy rollback
-   (`P1-1`).
-2. Introduce the unified file-operation coordinator and safe Copy cancellation
-   (`P1-2`).
-3. Add a durable move/trash journal and launch recovery (`P1-3`).
-4. Validate export destinations and available space (`P2-1`).
+1. **Completed:** build the shared export destination planner and pair-level
+   Copy rollback (`P1-1`).
+2. **Completed:** introduce the unified file-operation coordinator and safe
+   Copy cancellation (`P1-2`).
+3. **Completed:** add a durable Copy/Move/Trash/undo journal and launch
+   recovery (`P1-3`).
+4. **Completed:** validate export destinations and available space (`P2-1`).
 
 Exit condition: power loss, Quit, collision, or a single-file failure cannot
 silently split a pair or overwrite an existing file.
 
 ### Milestone 2 — Rating durability
 
-1. Return typed persistence results and expose save health (`P1-4`).
-2. Make sidecar/fallback precedence explicit.
-3. Add schema migration and corruption handling (`P2-4`).
-4. Replace termination blocking with asynchronous termination coordination.
+1. **Completed:** return typed persistence results and expose save health
+   (`P1-4`).
+2. **Completed:** make sidecar/fallback precedence explicit and keep the
+   backup current.
+3. **Completed for schema v1:** validate the schema and preserve unsupported
+   or corrupt data (`P2-4`).
+4. **Completed:** replace termination blocking with asynchronous termination
+   coordination.
 
 Exit condition: Louppe always tells the photographer whether the latest
 ratings are safely stored, and recoverable data is never silently discarded.
 
 ### Milestone 3 — Stable model and concurrency
 
-1. Make scanning and pair choice deterministic (`P2-2`, `P2-3`).
-2. Move selection/navigation identity from array positions to stable IDs
-   (`P2-5`).
-3. Fix the strict-concurrency warning groups and enable them in normal builds
-   (`P2-6`).
-4. Add coverage and CI as each seam becomes testable (`P2-9`).
+1. **Completed:** scanning is deterministic, volume-aware, complete for deep
+   folders, and explicit about loop prevention (`P2-2`, `P2-3`).
+2. **Completed:** move selection and rating-history identity from array
+   positions to stable IDs (`P2-5`).
+3. **Completed:** fix the strict-concurrency warning groups and make Swift 6
+   language mode the package default (`P2-6`).
+4. **Completed for the current suites:** add a macOS 26 CI gate and extend
+   coverage as each seam becomes testable (`P2-9`).
 
 Exit condition: a full Swift 6 language-mode build and every test suite pass
 with zero concurrency warnings.
@@ -585,9 +679,10 @@ with zero concurrency warnings.
 
 1. Extract pure prepared-index, selection, rating-history, persistence, and
    filter-editor components (`P3-1`).
-2. Add signposts and representative 1k/10k/100k baselines.
-3. Optimize navigation maps and stable Grid group identity only where the
-   measurements justify it (`P3-2`).
+2. **Completed for prepared indexing:** add signposts and representative
+   1k/10k/100k structural baselines.
+3. **Completed:** optimize navigation maps and stable Grid group identity
+   without changing the lazy layouts (`P3-2`).
 4. Replace semaphore-based media probing with structured async work (`P3-3`).
 5. Implement accurate, memory-bounded 100% zoom (`P2-7`).
 
@@ -596,10 +691,9 @@ without increasing UI-thread work or cache budgets unexpectedly.
 
 ### Milestone 5 — Release quality and inclusive UX
 
-1. Correct file/item wording and paired size display (`P2-8`).
-2. Complete the keyboard and VoiceOver audit (`P3-4`).
-3. Add structured diagnostics and release preflight (`P3-5`).
-4. Back up and restore-test the updater key; add Developer ID signing and
+1. Complete the keyboard and VoiceOver audit (`P3-4`).
+2. Add structured diagnostics; release preflight is complete (`P3-5`).
+3. Back up and restore-test the updater key; add Developer ID signing and
    notarization when the owner is ready (`P1-5`).
 
 Exit condition: releases are repeatable, first install is trusted by macOS,

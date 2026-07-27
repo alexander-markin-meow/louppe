@@ -65,11 +65,7 @@ enum FolderScanner {
         recognizedExtensions.contains(ext.lowercased()) || isVideoExtension(ext)
     }
 
-    /// SD cards nest photos under e.g. DCIM/100NIKON/, so scan recursively —
-    /// but not endlessly, in case of symlink loops or pathological trees.
-    static let maxScanDepth = 5
-
-    private struct FileFacts {
+    private struct FileFacts: Sendable {
         let size: Int64
         let creationDate: Date?
         let modificationDate: Date?
@@ -103,7 +99,7 @@ enum FolderScanner {
     static func scan(
         _ root: URL,
         pairingMode: RawJPEGPairingMode = .together,
-        isCancelled: () -> Bool = { false },
+        isCancelled: @Sendable () -> Bool = { false },
         progress: (Int) -> Void
     ) throws -> [PhotoItem] {
         let fm = FileManager.default
@@ -111,6 +107,8 @@ enum FolderScanner {
             at: root,
             includingPropertiesForKeys: [
                 .isRegularFileKey,
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
                 .fileSizeKey,
                 .creationDateKey,
                 .contentModificationDateKey,
@@ -125,7 +123,13 @@ enum FolderScanner {
         var factsByURL: [URL: FileFacts] = [:]
         for case let url as URL in enumerator {
             if isCancelled() { throw CancellationError() }
-            if enumerator.level > maxScanDepth {
+            let navigationValues = try? url.resourceValues(forKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+            ])
+            // Scan legitimate deeply nested archives without a silent depth
+            // cutoff, but never traverse a symbolic-link directory loop.
+            if navigationValues?.isSymbolicLink == true {
                 enumerator.skipDescendants()
                 continue
             }
@@ -150,43 +154,18 @@ enum FolderScanner {
             if files.count % 25 == 0 { progress(files.count) }
         }
 
-        // Group RAW+JPEG pairs: same folder, same base filename.
-        var groups: [String: [URL]] = [:]
-        for url in files {
-            if isCancelled() { throw CancellationError() }
-            let key = url.deletingPathExtension().path.lowercased()
-            groups[key, default: []].append(url)
-        }
+        let volumeIsCaseSensitive = (try? root.resourceValues(
+            forKeys: [.volumeSupportsCaseSensitiveNamesKey]
+        ).volumeSupportsCaseSensitiveNames) ?? false
 
         // Pair building is cheap; collect every (primary, paired) pair first
         // so the expensive per-file metadata reads can run in parallel below.
-        var pairs: [(primary: URL, paired: URL?)] = []
-        pairs.reserveCapacity(files.count)
-        for (_, urls) in groups {
-            if isCancelled() { throw CancellationError() }
-            // Videos are always independent media, even when a camera gives a
-            // RAW and sidecar movie the same base name. Only RAW + JPEG is a
-            // pair; pairing a RAW with MOV/PNG/TIFF would make the latter
-            // disappear from the review session.
-            let videos = urls.filter { isVideoExtension($0.pathExtension) }
-            for video in videos { pairs.append((video, nil)) }
-
-            let images = urls.filter { !isVideoExtension($0.pathExtension) }
-            let raws = images.filter { rawExtensions.contains($0.pathExtension.lowercased()) }
-            let jpegs = images.filter { ["jpg", "jpeg"].contains($0.pathExtension.lowercased()) }
-
-            if pairingMode == .together, let raw = raws.first, let jpeg = jpegs.first {
-                pairs.append((raw, jpeg))
-                // Rare leftovers (e.g., two RAWs or JPEGs with the same base
-                // name) become separate items without duplicating either side
-                // of the one real pair.
-                for extra in images where extra != raw && extra != jpeg {
-                    pairs.append((extra, nil))
-                }
-            } else {
-                for url in images { pairs.append((url, nil)) }
-            }
-        }
+        let pairs = pairFiles(
+            files,
+            pairingMode: pairingMode,
+            caseSensitiveNames: volumeIsCaseSensitive
+        )
+        if isCancelled() { throw CancellationError() }
 
         var result = try makeItems(
             for: pairs,
@@ -206,6 +185,65 @@ enum FolderScanner {
         return result
     }
 
+    /// Deterministic RAW+JPEG pairing independent of filesystem enumerator and
+    /// Dictionary iteration order. Internal so the ordering contract can be
+    /// regression tested without scanning real media.
+    static func pairFiles(
+        _ files: [URL],
+        pairingMode: RawJPEGPairingMode,
+        caseSensitiveNames: Bool
+    ) -> [(primary: URL, paired: URL?)] {
+        var groups: [String: [URL]] = [:]
+        for url in files.sorted(by: stableURLOrder) {
+            let basePath = url.deletingPathExtension().standardizedFileURL.path
+            let key = caseSensitiveNames
+                ? basePath
+                : basePath.folding(
+                    options: [.caseInsensitive, .diacriticInsensitive],
+                    locale: Locale(identifier: "en_US_POSIX")
+                )
+            groups[key, default: []].append(url)
+        }
+
+        var pairs: [(primary: URL, paired: URL?)] = []
+        pairs.reserveCapacity(files.count)
+        for key in groups.keys.sorted() {
+            guard let grouped = groups[key] else { continue }
+            let urls = grouped.sorted(by: stableURLOrder)
+            // Videos are always independent media, even when a camera gives a
+            // RAW and sidecar movie the same base name. Only RAW + JPEG is a
+            // pair; pairing a RAW with MOV/PNG/TIFF would make the latter
+            // disappear from the review session.
+            let videos = urls.filter { isVideoExtension($0.pathExtension) }
+            for video in videos { pairs.append((video, nil)) }
+
+            let images = urls.filter { !isVideoExtension($0.pathExtension) }
+            let raws = images.filter {
+                rawExtensions.contains($0.pathExtension.lowercased())
+            }
+            let jpegs = images.filter {
+                ["jpg", "jpeg"].contains($0.pathExtension.lowercased())
+            }
+
+            if pairingMode == .together, let raw = raws.first, let jpeg = jpegs.first {
+                pairs.append((raw, jpeg))
+                // Rare leftovers (e.g., two RAWs or JPEGs with the same base
+                // name) become separate items without duplicating either side
+                // of the one real pair.
+                for extra in images where extra != raw && extra != jpeg {
+                    pairs.append((extra, nil))
+                }
+            } else {
+                for url in images { pairs.append((url, nil)) }
+            }
+        }
+        return pairs
+    }
+
+    private static func stableURLOrder(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.standardizedFileURL.path < rhs.standardizedFileURL.path
+    }
+
     /// How many EXIF readers run at once during a scan. Header parsing mixes
     /// file I/O with CPU work, so a handful of workers saturates it without
     /// competing with the rest of the system.
@@ -221,53 +259,77 @@ enum FolderScanner {
         for pairs: [(primary: URL, paired: URL?)],
         factsByURL: [URL: FileFacts],
         rootPath: String,
-        isCancelled: () -> Bool
+        isCancelled: @Sendable () -> Bool
     ) throws -> [PhotoItem] {
         guard !pairs.isEmpty else { return [] }
         let chunkSize = max(1, (pairs.count + maxMetadataConcurrency - 1) / maxMetadataConcurrency)
         let chunkStarts = Array(stride(from: 0, to: pairs.count, by: chunkSize))
-        var chunkResults = [[PhotoItem]](repeating: [], count: chunkStarts.count)
-        chunkResults.withUnsafeMutableBufferPointer { slots in
-            DispatchQueue.concurrentPerform(iterations: chunkStarts.count) { chunkIndex in
-                let start = chunkStarts[chunkIndex]
-                let end = min(start + chunkSize, pairs.count)
-                var items: [PhotoItem] = []
-                items.reserveCapacity(end - start)
-                for (primary, paired) in pairs[start..<end] {
-                    // A cancelled scan's partial chunk is discarded by the
-                    // throw below, so stopping mid-chunk is safe.
-                    if isCancelled() { return }
-                    let facts = factsByURL[primary]
-                    let isVideo = isVideoExtension(primary.pathExtension)
-                    let info = isVideo ? MetadataExtractor.ScanInfo() : MetadataExtractor.scanInfo(for: primary)
-                    let videoInfo = isVideo ? VideoMetadataExtractor.scanInfo(for: primary) : nil
-                    let captureDate = info.captureDate ?? facts?.creationDate
-                    items.append(PhotoItem(
-                        id: relativePath(of: primary, under: rootPath),
-                        primaryURL: primary,
-                        pairedURL: paired,
-                        captureDate: captureDate,
-                        cameraModel: info.cameraModel,
-                        lensModel: info.lensModel,
-                        aperture: info.aperture,
-                        shutterSpeed: info.shutterSpeed,
-                        iso: info.iso,
-                        mediaKind: isVideo ? .video : .photo,
-                        duration: videoInfo?.duration,
-                        videoDimensions: videoInfo?.dimensions,
-                        videoCodec: videoInfo?.codec,
-                        videoFrameRate: videoInfo?.frameRate,
-                        videoIsPlayable: videoInfo?.isPlayable ?? false,
-                        primaryModificationDate: facts?.modificationDate,
-                        fileSize: facts?.size ?? 0,
-                        pairedFileSize: paired.flatMap { factsByURL[$0]?.size } ?? 0
-                    ))
-                }
-                slots[chunkIndex] = items
+        let chunkResults = ChunkResults(count: chunkStarts.count)
+        DispatchQueue.concurrentPerform(iterations: chunkStarts.count) { chunkIndex in
+            let start = chunkStarts[chunkIndex]
+            let end = min(start + chunkSize, pairs.count)
+            var items: [PhotoItem] = []
+            items.reserveCapacity(end - start)
+            for (primary, paired) in pairs[start..<end] {
+                // A cancelled scan's partial chunk is discarded by the
+                // throw below, so stopping mid-chunk is safe.
+                if isCancelled() { return }
+                let facts = factsByURL[primary]
+                let isVideo = isVideoExtension(primary.pathExtension)
+                let info = isVideo ? MetadataExtractor.ScanInfo() : MetadataExtractor.scanInfo(for: primary)
+                let videoInfo = isVideo ? VideoMetadataExtractor.scanInfo(for: primary) : nil
+                let captureDate = info.captureDate ?? facts?.creationDate
+                items.append(PhotoItem(
+                    id: relativePath(of: primary, under: rootPath),
+                    primaryURL: primary,
+                    pairedURL: paired,
+                    captureDate: captureDate,
+                    cameraModel: info.cameraModel,
+                    lensModel: info.lensModel,
+                    aperture: info.aperture,
+                    shutterSpeed: info.shutterSpeed,
+                    iso: info.iso,
+                    mediaKind: isVideo ? .video : .photo,
+                    duration: videoInfo?.duration,
+                    videoDimensions: videoInfo?.dimensions,
+                    videoCodec: videoInfo?.codec,
+                    videoFrameRate: videoInfo?.frameRate,
+                    videoIsPlayable: videoInfo?.isPlayable ?? false,
+                    primaryModificationDate: facts?.modificationDate,
+                    fileSize: facts?.size ?? 0,
+                    pairedFileSize: paired.flatMap { factsByURL[$0]?.size } ?? 0
+                ))
             }
+            chunkResults.store(items, at: chunkIndex)
         }
         if isCancelled() { throw CancellationError() }
-        return chunkResults.flatMap { $0 }
+        return chunkResults.flattened()
+    }
+
+    /// `DispatchQueue.concurrentPerform` requires a Sendable capture. The
+    /// previous unsafe mutable-buffer capture had one writer per slot but was
+    /// rejected by Swift 6's concurrency model. This box keeps the same
+    /// bounded parallelism and deterministic chunk order while synchronizing
+    /// only the tiny per-chunk assignment.
+    private final class ChunkResults: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [[PhotoItem]]
+
+        init(count: Int) {
+            values = [[PhotoItem]](repeating: [], count: count)
+        }
+
+        func store(_ items: [PhotoItem], at index: Int) {
+            lock.lock()
+            values[index] = items
+            lock.unlock()
+        }
+
+        func flattened() -> [PhotoItem] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values.flatMap { $0 }
+        }
     }
 
     private static func relativePath(of url: URL, under rootPath: String) -> String {

@@ -65,19 +65,19 @@ enum VideoMetadataExtractor {
                 )
             }
 
-            async let naturalSize = track.load(.naturalSize)
-            async let transform = track.load(.preferredTransform)
-            async let nominalFrameRate = track.load(.nominalFrameRate)
-            async let descriptions = track.load(.formatDescriptions)
-            let size = try await naturalSize
-            let preferredTransform = try await transform
+            // AVAssetTrack is not Sendable. Loading several properties from
+            // the same track through concurrent `async let`s becomes a data
+            // race error in Swift 6; these lightweight header reads stay on
+            // the scanner's background worker and run sequentially instead.
+            let size = try await track.load(.naturalSize)
+            let preferredTransform = try await track.load(.preferredTransform)
             let transformed = size.applying(preferredTransform)
             let width = abs(transformed.width)
             let height = abs(transformed.height)
             let dimensions = width > 0 && height > 0 ? CGSize(width: width, height: height) : nil
-            let frameRateValue = try await nominalFrameRate
+            let frameRateValue = try await track.load(.nominalFrameRate)
             let frameRate = frameRateValue > 0 ? Double(frameRateValue) : nil
-            let formatDescriptions = try await descriptions
+            let formatDescriptions = try await track.load(.formatDescriptions)
             let codec = formatDescriptions.first.map(codecLabel)
 
             return VideoScanInfo(

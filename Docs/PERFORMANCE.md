@@ -10,11 +10,13 @@ decoding, sidecar persistence, or Clean Up.
 snapshots and apply completed results, but potentially slow encoding and file
 operations belong elsewhere:
 
-- `SessionPersistence` is an actor. It serializes JSON encoding, sidecar reads,
-  and atomic writes. Save sequence numbers prevent a late older task from
-  replacing a newer sidecar. Rescan awaits its final save before reopening;
-  app termination briefly waits for the final actor save (including a snapshot
-  already queued by Close Session) so the last rating is not lost.
+- `SessionPersistence` is an actor. It serializes JSON encoding, typed
+  sidecar/backup outcomes, schema validation, newest-valid reads, and atomic
+  writes. Save sequence numbers prevent a late older task from replacing a
+  newer snapshot. Folder switching, rescan, pairing-mode rebuild, and Close
+  Session await a safe result before discarding the live item array. App
+  termination uses AppKit's asynchronous terminate-later reply, so it can
+  retry/refuse an unsafe Quit without blocking the main actor.
 - `CleanUpWorker` receives immutable snapshots and uses a fresh `FileManager`
   inside its detached task. Trash and restore roll back RAW+JPEG pairs after a
   partial failure and explicitly warn if rollback itself fails. `SessionStore`
@@ -32,14 +34,14 @@ operations belong elsewhere:
   tolerances; never generate movie frames from a SwiftUI body or main actor.
 - `FolderScanner` reads per-file EXIF on concurrent workers
   (`DispatchQueue.concurrentPerform`, up to 8 chunks) because metadata
-  extraction dominates scan time. Chunk slots are single-writer and
-  concatenated in order, and the final chronological sort settles ordering, so
-  output is identical to a serial pass (verified by order-hash benchmark).
-  The `isCancelled` closure is polled from those workers and **must be safe to
-  call from any thread** — a bare `{ Task.isCancelled }` silently reads false
-  on GCD threads, which is why `SessionStore.openFolder` bridges task
-  cancellation through `FolderScanner.CancelFlag` via
-  `withTaskCancellationHandler`.
+  extraction dominates scan time. Workers return chunks through a small
+  lock-protected `ChunkResults` owner and the chunks are concatenated in index
+  order; the final chronological sort settles ordering, so output is identical
+  to a serial pass (verified by order-hash benchmark). The `isCancelled`
+  closure is `@Sendable` and polled from those workers; a bare
+  `{ Task.isCancelled }` silently reads false on GCD threads, which is why
+  `SessionStore.openFolder` bridges task cancellation through
+  `FolderScanner.CancelFlag` via `withTaskCancellationHandler`.
 
 Do not move filesystem loops or JSON encoding back onto `SessionStore`.
 
@@ -155,6 +157,23 @@ the session after the user has left the scanning view.
 - cached calendar-day counts and folder-wide aperture/shutter/ISO ranges;
 - a sorted index list reused by filter-only changes;
 - cached visible day groups and day-start indices.
+- one visible-location map containing each item index's global position,
+  group, and position inside that group. Navigation, range selection,
+  prefetch, and toolbar status must use this map rather than scanning
+  `visibleIndices` or `visibleGroups` on every key press.
+- one `PhotoItem.id` → current item-index map. Stable selected IDs and rating
+  undo entries resolve through it only after a structural rebuild. A
+  same-folder rescan snapshots current/selected IDs before clearing the old
+  arrays, then remaps surviving visible IDs after the new filter/group
+  generation is ready.
+
+`FolderScanner.pairFiles` sorts file paths and group keys before choosing a
+RAW/JPEG pair, so filesystem enumeration and Dictionary order cannot change
+pair choice between rescans. It folds basename case only on case-insensitive
+volumes; case-sensitive volumes keep case-only names as distinct photos.
+Folder traversal has no arbitrary depth cutoff; symbolic-link directories and
+package descendants are skipped explicitly, so deep archives remain complete
+without following loops.
 
 After any structural replacement of `items`, call `rebuildDerivedData()` and
 then `applyFilter()`. Rating-only changes must update the tally through
@@ -183,24 +202,109 @@ Restoration uses `mergeRestoredItems` rather than repeated array insertion. It
 is O(n+k), retains survivor ordering, and omits only photos whose Trash files
 could not be restored.
 
+## Durable file-operation journal
+
+Copy, Move, Trash, and Trash undo create an immutable plan in
+`~/Library/Application Support/Louppe/Operations/` before their first
+filesystem change. The plan directory is activated with one atomic rename.
+Each file then owns an independent checkpoint under `steps/`; advancing file
+9,000 rewrites only that small record, so journal work remains O(1) per file
+and O(n) for the complete batch.
+
+Every plan captures source/destination paths plus stable volume/device/inode
+identity. Staged and completed checkpoints capture the resulting file's
+identity too. Recovery validates identity before removing or moving anything,
+never overwrites an existing path, and leaves an unresolved journal retryable
+when a volume is disconnected or a same-named replacement is present.
+
+Export files move through operation-owned `.louppe-<operation>-<index>.partial`
+paths before their final rename. This makes both crash positions recoverable:
+before final rename the journal owns the unique temporary path; afterward the
+staged identity still identifies the same inode at the destination. Trash is
+the exceptional path because macOS chooses its destination. Its `.started`
+checkpoint is written before `trashItem`; if termination happens before the
+returned URL can be recorded, recovery searches the correct volume's Trash by
+device/inode rather than guessing from the filename.
+
+`SessionStore` runs recovery off-main before honoring a launch folder request.
+File operations, folder/session mutation, updater installation, and Quit stay
+blocked while it runs. A missing volume or identity conflict keeps the files
+untouched and exposes Retry Recovery. After recovery of an operation that may
+have moved source files, the current folder is rescanned.
+
 ## Export lifecycle
 
 Export shares Clean Up's three-phase shape: the main actor snapshots the
 photos with the chosen ratings, `ExportWorker` runs the copy or move loop
-off-main (reusing `ThrottledProgress`), and the main actor applies one
-result. Copy never mutates the session. A Move export raises
-`isMovingExport`, which blocks folder switching, rescan, undo, Clear All
-Ratings, Clean Up, and Quit until the worker finishes; `finishExportMove`
-then drops the fully moved photos by id, clears the (now index-stale) undo
-stack, rebuilds derived data, re-applies the filter, and snapshots a save.
-The modal sheet keeps rating and navigation keys away while export runs.
+off-main (reusing `ThrottledProgress`), and the main actor applies one result.
+`ExportWorker.makePlan` reserves every destination name first and chooses one
+collision suffix per photo, keeping RAW+JPEG basenames matched. Copy rolls back
+members of a partially failed or cancelled pair; photos completed before a
+cancel remain at the destination. Move uses the same plan and retains its
+source rollback.
+
+`SessionStore.activeFileOperation` is the only in-flight authority for Clean
+Up, Copy, and Move. It blocks folder switching, rescan, rating/selection
+mutation, undo, Clear All Ratings, conflicting operations, updater
+installation, and Quit. `finishExport` clears it for both modes; after Move it
+also drops fully moved photos by id, clears the now-index-stale undo stack,
+rebuilds derived data, re-applies the filter, and snapshots a save. The modal
+sheet keeps rating and navigation keys away while export runs.
+
+Before the worker starts, `ExportDestinationValidator` rejects the source
+folder and its descendants after resolving symlinks, checks destination write
+permission, and checks available capacity for Copy or a cross-volume Move.
+Same-volume Move is a rename and does not need the full media size free.
+
+## Prepared session index
+
+`PreparedSessionIndex` owns the pure item-ID, sort, filter, group, header, and
+visible-position maps behind `SessionStore`. `SessionStore` still publishes the
+arrays consumed by SwiftUI, but navigation and indexing behavior can now be
+tested without constructing a window or observable object.
+
+The index emits Instruments points-of-interest intervals named **Rebuild Item
+Index**, **Sort Session**, **Filter Session**, and **Build Visible Groups**.
+Use these signposts before changing its algorithms or adding another derived
+map.
+
+The deterministic check includes synthetic 1k, 10k, and 100k-item metadata
+fixtures. On the 2026-07-26 development build, their conservative unoptimized
+baseline was:
+
+| Items | ID map + camera sort | JPEG filter + 25 groups/locations |
+|---:|---:|---:|
+| 1,000 | 13 ms | 1 ms |
+| 10,000 | 117 ms | 8 ms |
+| 100,000 | 1,607 ms | 104 ms |
+
+These numbers are a comparison baseline, not hard-coded pass/fail limits;
+hosted CI machines vary. Structural counts and every location mapping are
+asserted. Grid sections use metadata-derived stable IDs, so filtering a
+group's former first member does not make SwiftUI discard and recreate the
+remaining section.
+
+## Selection state
+
+`SelectionState` is the pure authority for explicit indices and their stable
+item IDs. `SessionStore` publishes its index projection to SwiftUI and remains
+responsible for the current item, playback, and prefetch side effects.
+
+The pure state owns range, edge, command-toggle, rubber-band, filter
+intersection, and rescan remapping rules. An empty explicit selection still
+means “the current visible item”; when a filter has zero matches, the effective
+selection is truly empty. Focused logic and app-level XCTest cases protect
+these rules so future controller extraction cannot silently rate hidden media
+or remap a selection by stale numeric position.
 
 ## Verification checklist
 
 Run after performance-sensitive changes:
 
 1. `./Tests/run_performance_checks.sh` (uses disposable files for a real
-   Trash/restore pair round trip and rollback check)
+   Trash/restore pair round trip and rollback check). In a restricted sandbox,
+   `LOUPPE_SKIP_REAL_TRASH=1` runs the other 55 checks; this is not a substitute
+   for the full 57-check verification before installing a build.
 2. `swift build`
 3. `./build_app.sh`
 4. Replace `/Applications/Louppe.app` with `dist/Louppe.app`.

@@ -91,7 +91,13 @@ enum MetadataExtractor {
            let height = props[kCGImagePropertyPixelHeight] as? Int {
             add("Dimensions", "\(width) × \(height)")
         }
-        add("File size", ByteCountFormatter.string(fromByteCount: item.fileSize, countStyle: .file))
+        if item.pairedURL != nil {
+            add("Primary size", formattedFileSize(item.fileSize))
+            add("Paired size", formattedFileSize(item.pairedFileSize))
+            add("Total size", formattedFileSize(item.totalFileSize))
+        } else {
+            add("File size", formattedFileSize(item.fileSize))
+        }
         add("Type", item.fileTypeLabel)
 
         if let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
@@ -120,9 +126,13 @@ enum MetadataExtractor {
         if let frameRate = item.videoFrameRate {
             add("Frame rate", String(format: "%.2f fps", frameRate).replacingOccurrences(of: ".00 ", with: " "))
         }
-        add("File size", ByteCountFormatter.string(fromByteCount: item.fileSize, countStyle: .file))
+        add("File size", formattedFileSize(item.fileSize))
         add("Type", item.fileTypeLabel)
         return fields
+    }
+
+    private static func formattedFileSize(_ byteCount: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
     }
 
     private static func formatShutter(_ seconds: Double) -> String {

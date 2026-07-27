@@ -13,10 +13,14 @@ struct PerformanceChecks {
         try durationFilterAndSortHandleImagesAsMissingValues()
         try durationFormattingCoversShortAndLongMovies()
         try selectionSummaryKeepsEveryDistinctMetadataValue()
+        try pairedMetadataReportsEveryFileSize()
         try metadataSortKeepsMissingValuesLast()
         try subfolderFacetFiltersAndSortsByRelativePath()
         try folderScannerHonorsCancellation()
         try folderScannerStopsAfterProgressCancellation()
+        try folderScannerFindsDeepMediaWithoutFollowingSymlinkLoop()
+        try rawJPEGPairingIsDeterministic()
+        try caseSensitivePairingKeepsDistinctBasenames()
         try videoNeverBecomesThePairForSameNamedRaw()
         try rawAndTiffStayIndependent()
         try rawJPEGPairingCanBeDisabled()
@@ -25,17 +29,43 @@ struct PerformanceChecks {
         try linearRestoreMergePreservesOrderAndOmitsLostPhoto()
         try await olderSidecarSaveCannotOverwriteNewerSnapshot()
         try await emptySidecarSnapshotIsPersisted()
-        try cleanUpPairRoundTripsThroughTrash()
-        try cleanUpPairFailureRollsBackFirstFile()
+        try await newerBackupWinsOverStaleSidecar()
+        try await corruptSidecarRecoversFromBackup()
+        try await invalidSessionSchemasAreRejected()
+        try await persistenceReportsBackupAndTotalFailure()
         try exportCollisionSuffixSkipsTakenNames()
+        try exportPairCollisionUsesSharedSuffix()
         try exportCopyCopiesEveryFileAndKeepsSources()
+        try exportCopyPairRollsBackOnPartialFailure()
+        try exportCopyCanCancelWithoutPartialPair()
         try exportMoveReportsFullyMovedPhotos()
         try exportMovePairRollsBackOnPartialFailure()
         try exportMoveRefusesInPlaceDestination()
+        try exportDestinationRejectsSourceAndDescendant()
+        try operationJournalRemovesInterruptedCopyIdempotently()
+        try operationJournalRestoresInterruptedMove()
+        try operationJournalPreservesCommittedExport()
+        try operationJournalRefusesSameNamedReplacement()
+        try operationJournalRestoresInterruptedTrash()
+        try operationJournalCompletesInterruptedTrashUndo()
+        try completedWorkerRemovesItsJournal()
+        try preparedSessionIndexKeepsStableGroupIdentity()
+        try preparedSessionIndexScaleBaselines()
+        try selectionStatePreservesImplicitCurrentAndToggleRules()
+        try selectionStateRangesFiltersAndRemapsByID()
+        try visibleLocationMapTracksDerivedState()
+        try ratingUndoFollowsStableIdentityAfterReorder()
+        try await rescanPreservesCurrentPhotoAndSelectionByID()
         try clearAllRatingsPublishesOnceForLargeSessions()
         try batchRatingUndoRestoresEveryRating()
         try exportMoveRemovalUpdatesSessionState()
-        print("Performance checks passed (31/31)")
+        if ProcessInfo.processInfo.environment["LOUPPE_SKIP_REAL_TRASH"] == "1" {
+            print("Performance checks passed (55/57; 2 real Trash checks explicitly skipped)")
+        } else {
+            try cleanUpPairRoundTripsThroughTrash()
+            try cleanUpPairFailureRollsBackFirstFile()
+            print("Performance checks passed (57/57)")
+        }
     }
 
     private static func preparedFilterMatchesFoldedMetadataTokens() throws {
@@ -209,6 +239,9 @@ struct PerformanceChecks {
 
         let summary = PhotoSelectionSummary(items: items)
         try expect(summary.count == 4, "selection summary should retain the selected item count")
+        try expect(summary.fileCount == 5, "selection summary should count both members of a paired photo")
+        try expect(summary.photoCount == 4 && summary.videoCount == 0,
+                   "selection summary should retain the selected media kinds")
         try expect(
             Set(summary.cameras) == ["Nikon Z8", "Sony α1", "Canon EOS R5", "Fujifilm GFX100 II"],
             "selection summary should retain every distinct camera"
@@ -236,6 +269,31 @@ struct PerformanceChecks {
             sameDay.captureDayRange == firstDay...firstDay,
             "same-day selections should collapse to one calendar date"
         )
+
+        let mixed = PhotoSelectionSummary(items: [
+            makeItem(id: "PHOTO.JPG"),
+            makeItem(id: "VIDEO.MOV", mediaKind: .video, videoIsPlayable: true),
+        ])
+        try expect(
+            mixed.fileCount == 2 && mixed.photoCount == 1 && mixed.videoCount == 1,
+            "mixed selections should report both media kinds and filesystem entries"
+        )
+    }
+
+    private static func pairedMetadataReportsEveryFileSize() throws {
+        let item = makeItem(
+            id: "PAIR.NEF",
+            pairedURL: URL(fileURLWithPath: "/tmp/PAIR.JPG"),
+            fileSize: 40,
+            pairedFileSize: 5
+        )
+        let fields = MetadataExtractor.fields(for: item)
+        let labels = Set(fields.map(\.label))
+        try expect(
+            labels.isSuperset(of: ["Primary size", "Paired size", "Total size"]),
+            "paired metadata should identify each file's size and their total"
+        )
+        try expect(!labels.contains("File size"), "paired metadata should not imply that the primary size is the whole pair")
     }
 
     private static func metadataSortKeepsMissingValuesLast() throws {
@@ -341,16 +399,93 @@ struct PerformanceChecks {
             try Data("placeholder".utf8).write(to: url)
         }
 
-        var shouldCancel = false
+        let cancelFlag = FolderScanner.CancelFlag()
         var didCancel = false
         do {
-            _ = try FolderScanner.scan(folder, isCancelled: { shouldCancel }) { found in
-                if found >= 25 { shouldCancel = true }
+            _ = try FolderScanner.scan(folder, isCancelled: { cancelFlag.isSet }) { found in
+                if found >= 25 { cancelFlag.set() }
             }
         } catch is CancellationError {
             didCancel = true
         }
         try expect(didCancel, "an in-progress folder scan should stop after cancellation")
+    }
+
+    private static func folderScannerFindsDeepMediaWithoutFollowingSymlinkLoop() throws {
+        let folder = try disposableFolder(named: "DeepScan")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var deep = folder
+        for level in 1...8 {
+            deep.appendPathComponent("Level\(level)", isDirectory: true)
+        }
+        try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+        try Data("placeholder".utf8).write(to: deep.appendingPathComponent("DEEP.JPG"))
+        try FileManager.default.createSymbolicLink(
+            at: deep.appendingPathComponent("LoopToRoot", isDirectory: true),
+            withDestinationURL: folder
+        )
+
+        let items = try FolderScanner.scan(folder) { _ in }
+        try expect(items.count == 1, "deep scan should find one real photo and never follow the loop")
+        try expect(
+            items[0].id.hasSuffix("Level8/DEEP.JPG"),
+            "media below the former depth cutoff should appear in the session"
+        )
+    }
+
+    private static func rawJPEGPairingIsDeterministic() throws {
+        let root = URL(fileURLWithPath: "/tmp/DeterministicPairing")
+        let files = [
+            root.appendingPathComponent("SHOT.NEF"),
+            root.appendingPathComponent("SHOT.JPG"),
+            root.appendingPathComponent("SHOT.DNG"),
+            root.appendingPathComponent("OTHER.JPG"),
+        ]
+        let forward = FolderScanner.pairFiles(
+            files,
+            pairingMode: .together,
+            caseSensitiveNames: false
+        )
+        let reversed = FolderScanner.pairFiles(
+            Array(files.reversed()),
+            pairingMode: .together,
+            caseSensitiveNames: false
+        )
+        let describe: ([(primary: URL, paired: URL?)]) -> [String] = {
+            $0.map {
+                "\($0.primary.lastPathComponent)|\($0.paired?.lastPathComponent ?? "-")"
+            }
+        }
+        try expect(
+            describe(forward) == describe(reversed),
+            "pair choice and leftover order must not depend on enumerator input order"
+        )
+    }
+
+    private static func caseSensitivePairingKeepsDistinctBasenames() throws {
+        let root = URL(fileURLWithPath: "/tmp/CaseSensitivePairing")
+        let files = [
+            root.appendingPathComponent("SHOT.NEF"),
+            root.appendingPathComponent("shot.JPG"),
+        ]
+        let sensitive = FolderScanner.pairFiles(
+            files,
+            pairingMode: .together,
+            caseSensitiveNames: true
+        )
+        let insensitive = FolderScanner.pairFiles(
+            files,
+            pairingMode: .together,
+            caseSensitiveNames: false
+        )
+        try expect(
+            sensitive.count == 2 && sensitive.allSatisfy { $0.paired == nil },
+            "case-sensitive volumes must keep case-distinct basenames independent"
+        )
+        try expect(
+            insensitive.count == 1 && insensitive[0].paired != nil,
+            "case-insensitive volumes should still pair case-only filename variants"
+        )
     }
 
     private static func videoNeverBecomesThePairForSameNamedRaw() throws {
@@ -440,10 +575,21 @@ struct PerformanceChecks {
         defer { try? FileManager.default.removeItem(at: folder) }
 
         let persistence = SessionPersistence()
-        await persistence.save(session(rating: Rating.yes.rawValue), for: folder, sequence: 2)
-        await persistence.save(session(rating: Rating.no.rawValue), for: folder, sequence: 1)
+        _ = await persistence.save(
+            session(rating: Rating.yes.rawValue, folder: folder),
+            for: folder,
+            sequence: 2
+        )
+        _ = await persistence.save(
+            session(rating: Rating.no.rawValue, folder: folder),
+            for: folder,
+            sequence: 1
+        )
         let loaded = await persistence.read(for: folder)
-        try expect(loaded?.entries.first?.rating == Rating.yes.rawValue, "older save should not replace newer sidecar")
+        try expect(
+            loaded.session?.entries.first?.rating == Rating.yes.rawValue,
+            "older save should not replace newer sidecar"
+        )
     }
 
     private static func emptySidecarSnapshotIsPersisted() async throws {
@@ -459,9 +605,144 @@ struct PerformanceChecks {
             scannedAt: Date(timeIntervalSince1970: 0),
             entries: []
         )
-        await persistence.save(empty, for: folder, sequence: 1)
+        _ = await persistence.save(empty, for: folder, sequence: 1)
         let loaded = await persistence.read(for: folder)
-        try expect(loaded?.entries.isEmpty == true, "empty ready session should replace a stale sidecar")
+        try expect(
+            loaded.session?.entries.isEmpty == true,
+            "empty ready session should replace a stale sidecar"
+        )
+    }
+
+    private static func newerBackupWinsOverStaleSidecar() async throws {
+        let root = try disposableFolder(named: "PersistenceNewest")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Photos", isDirectory: true)
+        let backup = root.appendingPathComponent("Backup", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let persistence = SessionPersistence(backupDirectory: backup)
+        let old = session(
+            rating: Rating.no.rawValue,
+            folder: folder,
+            scannedAt: Date(timeIntervalSince1970: 1)
+        )
+        let new = session(
+            rating: Rating.yes.rawValue,
+            folder: folder,
+            scannedAt: Date(timeIntervalSince1970: 2)
+        )
+        _ = await persistence.save(old, for: folder, sequence: 1)
+        let sidecar = folder.appendingPathComponent(SessionConstants.sidecarName)
+        let oldSidecar = try Data(contentsOf: sidecar)
+        _ = await persistence.save(new, for: folder, sequence: 2)
+        try oldSidecar.write(to: sidecar, options: .atomic)
+
+        let loaded = await persistence.read(for: folder)
+        try expect(loaded.origin == .backup, "the newest valid snapshot should win even when it is the backup")
+        try expect(
+            loaded.session?.entries.first?.rating == Rating.yes.rawValue,
+            "a stale sidecar must not resurrect an older rating"
+        )
+    }
+
+    private static func corruptSidecarRecoversFromBackup() async throws {
+        let root = try disposableFolder(named: "PersistenceRecovery")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Photos", isDirectory: true)
+        let backup = root.appendingPathComponent("Backup", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let persistence = SessionPersistence(backupDirectory: backup)
+        _ = await persistence.save(
+            session(rating: Rating.yes.rawValue, folder: folder),
+            for: folder,
+            sequence: 1
+        )
+        try Data("not-json".utf8).write(
+            to: folder.appendingPathComponent(SessionConstants.sidecarName),
+            options: .atomic
+        )
+
+        let loaded = await persistence.read(for: folder)
+        try expect(loaded.origin == .backup, "a corrupt sidecar should recover from the last-known-good backup")
+        try expect(loaded.recoveryMessage != nil, "backup recovery should be visible to the photographer")
+        try expect(
+            loaded.session?.entries.first?.rating == Rating.yes.rawValue,
+            "backup recovery should preserve the saved rating"
+        )
+    }
+
+    private static func invalidSessionSchemasAreRejected() async throws {
+        let root = try disposableFolder(named: "PersistenceSchema")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Photos", isDirectory: true)
+        let backup = root.appendingPathComponent("Backup", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let persistence = SessionPersistence(backupDirectory: backup)
+        let sidecar = folder.appendingPathComponent(SessionConstants.sidecarName)
+        _ = await persistence.save(
+            session(rating: Rating.yes.rawValue, folder: folder),
+            for: folder,
+            sequence: 1
+        )
+
+        var invalidVersion = session(rating: Rating.yes.rawValue, folder: folder)
+        invalidVersion.version = 99
+        try writeSessionFixture(invalidVersion, to: sidecar)
+        var loaded = await persistence.read(for: folder)
+        try expect(
+            loaded.blockingMessage != nil,
+            "an unsupported sidecar must be left untouched even when an older backup is valid"
+        )
+
+        let wrongFolder = session(
+            rating: Rating.yes.rawValue,
+            folder: root.appendingPathComponent("Different")
+        )
+        try writeSessionFixture(wrongFolder, to: sidecar)
+        loaded = await persistence.read(for: folder)
+        try expect(
+            loaded.blockingMessage != nil,
+            "ratings from a different folder must never be applied"
+        )
+
+        try FileManager.default.removeItem(at: backup)
+        var invalidRating = session(rating: "maybe", folder: folder)
+        invalidRating.entries[0].filename = "../OUTSIDE.JPG"
+        try writeSessionFixture(invalidRating, to: sidecar)
+        loaded = await persistence.read(for: folder)
+        try expect(
+            loaded.session == nil && loaded.blockingMessage != nil,
+            "invalid ratings and unsafe relative paths must be rejected"
+        )
+    }
+
+    private static func persistenceReportsBackupAndTotalFailure() async throws {
+        let root = try disposableFolder(named: "PersistenceFailures")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourcePlaceholder = root.appendingPathComponent("NotAFolder")
+        try Data("file".utf8).write(to: sourcePlaceholder)
+
+        let workingBackup = root.appendingPathComponent("Backup", isDirectory: true)
+        let backupPersistence = SessionPersistence(backupDirectory: workingBackup)
+        let backupResult = await backupPersistence.save(
+            session(rating: Rating.yes.rawValue, folder: sourcePlaceholder),
+            for: sourcePlaceholder,
+            sequence: 1
+        )
+        guard case .savedToBackup = backupResult else {
+            throw CheckFailure("a failed sidecar with a writable backup should report backup-only safety")
+        }
+
+        let blockedBackup = root.appendingPathComponent("BackupBlocker")
+        try Data("file".utf8).write(to: blockedBackup)
+        let failingPersistence = SessionPersistence(backupDirectory: blockedBackup)
+        let failure = await failingPersistence.save(
+            session(rating: Rating.no.rawValue, folder: sourcePlaceholder),
+            for: sourcePlaceholder,
+            sequence: 1
+        )
+        guard case .failed = failure else {
+            throw CheckFailure("failure of both destinations must be reported explicitly")
+        }
     }
 
     private static func cleanUpPairRoundTripsThroughTrash() throws {
@@ -472,14 +753,25 @@ struct PerformanceChecks {
         try Data("raw".utf8).write(to: raw)
         try Data("jpeg".utf8).write(to: jpeg)
         let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg)
+        let journals = folder.appendingPathComponent("Journals", isDirectory: true)
 
-        let trashed = CleanUpWorker.moveToTrash([CleanUpPhotoSnapshot(index: 0, item: item)]) { _, _ in }
-        try expect(trashed.succeeded.count == 1, "paired photo should move to Trash")
+        let trashed = CleanUpWorker.moveToTrash(
+            [CleanUpPhotoSnapshot(index: 0, item: item)],
+            journalDirectory: journals
+        ) { _, _ in }
+        try expect(
+            trashed.succeeded.count == 1,
+            "paired photo should move to Trash "
+                + "(failed=\(trashed.failedPhotos), journal=\(trashed.journalFailure), recovery=\(trashed.requiresRecovery))"
+        )
         try expect(trashed.inconsistentPhotos == 0, "successful Trash move should be consistent")
         try expect(!FileManager.default.fileExists(atPath: raw.path), "RAW should leave its folder")
         try expect(!FileManager.default.fileExists(atPath: jpeg.path), "JPEG should leave its folder")
 
-        let restored = CleanUpWorker.restore(trashed.succeeded) { _, _ in }
+        let restored = CleanUpWorker.restore(
+            trashed.succeeded,
+            journalDirectory: journals
+        ) { _, _ in }
         try expect(restored.restored.count == 1, "paired photo should restore from Trash")
         try expect(restored.inconsistentPhotos == 0, "successful restore should be consistent")
         try expect(FileManager.default.fileExists(atPath: raw.path), "RAW should return")
@@ -493,8 +785,12 @@ struct PerformanceChecks {
         let missingJPEG = folder.appendingPathComponent("MISSING.JPG")
         try Data("raw".utf8).write(to: raw)
         let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: missingJPEG)
+        let journals = folder.appendingPathComponent("Journals", isDirectory: true)
 
-        let result = CleanUpWorker.moveToTrash([CleanUpPhotoSnapshot(index: 0, item: item)]) { _, _ in }
+        let result = CleanUpWorker.moveToTrash(
+            [CleanUpPhotoSnapshot(index: 0, item: item)],
+            journalDirectory: journals
+        ) { _, _ in }
         try expect(result.succeeded.isEmpty, "incomplete pair must not count as removed")
         try expect(result.failedPhotos == 1, "incomplete pair should report one failure")
         try expect(result.inconsistentPhotos == 0, "successful rollback should remain consistent")
@@ -533,8 +829,16 @@ struct PerformanceChecks {
             makeItem(id: "SINGLE.JPG", primaryURL: single),
         ]
 
-        let result = ExportWorker.copy(items, to: destination) { _, _ in }
-        try expect(result.copiedFiles == 3 && result.failedFiles == 0, "copy should duplicate every file")
+        let result = ExportWorker.copy(
+            items,
+            to: destination,
+            journalDirectory: source.appendingPathComponent("Journals", isDirectory: true)
+        ) { _, _ in }
+        try expect(
+            result.copiedFiles == 3 && result.failedPhotos == 0
+                && result.inconsistentPhotos == 0 && !result.cancelled,
+            "copy should duplicate every file"
+        )
         for name in ["PAIR.NEF", "PAIR.JPG", "SINGLE.JPG"] {
             try expect(
                 FileManager.default.fileExists(atPath: destination.appendingPathComponent(name).path),
@@ -545,6 +849,102 @@ struct PerformanceChecks {
                 "\(name) should stay in the source folder"
             )
         }
+    }
+
+    private static func exportPairCollisionUsesSharedSuffix() throws {
+        let source = try disposableFolder(named: "ExportPairCollisionSource")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let destination = try disposableFolder(named: "ExportPairCollisionDestination")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let raw = source.appendingPathComponent("PAIR.NEF")
+        let jpeg = source.appendingPathComponent("PAIR.JPG")
+        try Data("new raw".utf8).write(to: raw)
+        try Data("new jpeg".utf8).write(to: jpeg)
+        try Data("existing raw".utf8).write(to: destination.appendingPathComponent("PAIR.NEF"))
+
+        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg)
+        let result = ExportWorker.copy(
+            [item],
+            to: destination,
+            journalDirectory: source.appendingPathComponent("Journals", isDirectory: true)
+        ) { _, _ in }
+
+        try expect(result.copiedFiles == 2 && result.failedPhotos == 0,
+                   "a colliding pair should still copy completely")
+        try expect(
+            FileManager.default.fileExists(atPath: destination.appendingPathComponent("PAIR (1).NEF").path),
+            "the colliding RAW should receive suffix 1"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: destination.appendingPathComponent("PAIR (1).JPG").path),
+            "the JPEG should receive the RAW's same suffix even when its unsuffixed name was free"
+        )
+        try expect(
+            !FileManager.default.fileExists(atPath: destination.appendingPathComponent("PAIR.JPG").path),
+            "a pair member must not keep an unmatched unsuffixed basename"
+        )
+    }
+
+    private static func exportCopyPairRollsBackOnPartialFailure() throws {
+        let source = try disposableFolder(named: "ExportCopyRollbackSource")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let destination = try disposableFolder(named: "ExportCopyRollbackDestination")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let raw = source.appendingPathComponent("PAIR.NEF")
+        let missingJPEG = source.appendingPathComponent("PAIR.JPG")
+        try Data("raw".utf8).write(to: raw)
+        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: missingJPEG)
+
+        let result = ExportWorker.copy(
+            [item],
+            to: destination,
+            journalDirectory: source.appendingPathComponent("Journals", isDirectory: true)
+        ) { _, _ in }
+        try expect(result.copiedFiles == 0, "a failed pair must not count a partial copy")
+        try expect(result.failedPhotos == 1, "a failed pair should report one failed photo")
+        try expect(result.inconsistentPhotos == 0, "successful copy rollback should remain consistent")
+        try expect(
+            !FileManager.default.fileExists(atPath: destination.appendingPathComponent("PAIR.NEF").path),
+            "the first copied member must be removed when its partner fails"
+        )
+        try expect(FileManager.default.fileExists(atPath: raw.path), "copy rollback must never touch the original")
+    }
+
+    private static func exportCopyCanCancelWithoutPartialPair() throws {
+        let source = try disposableFolder(named: "ExportCopyCancelSource")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let destination = try disposableFolder(named: "ExportCopyCancelDestination")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let raw = source.appendingPathComponent("PAIR.NEF")
+        let jpeg = source.appendingPathComponent("PAIR.JPG")
+        try Data("raw".utf8).write(to: raw)
+        try Data("jpeg".utf8).write(to: jpeg)
+        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg)
+        let cancellation = CancellationAfterChecks(3)
+
+        let result = ExportWorker.copy(
+            [item],
+            to: destination,
+            journalDirectory: source.appendingPathComponent("Journals", isDirectory: true),
+            isCancelled: { cancellation.shouldCancel() }
+        ) { _, _ in }
+
+        try expect(result.cancelled, "copy should report photographer cancellation")
+        try expect(result.copiedFiles == 0, "the in-progress pair must not count as completed")
+        try expect(result.failedPhotos == 0, "cancellation is not a copy failure")
+        try expect(
+            !FileManager.default.fileExists(atPath: destination.appendingPathComponent("PAIR.NEF").path),
+            "cancelling between pair members must remove the first destination file"
+        )
+        try expect(
+            !FileManager.default.fileExists(atPath: destination.appendingPathComponent("PAIR.JPG").path),
+            "cancellation must not leave the second destination file either"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: raw.path)
+                && FileManager.default.fileExists(atPath: jpeg.path),
+            "cancelling Copy must leave both originals untouched"
+        )
     }
 
     private static func exportMoveReportsFullyMovedPhotos() throws {
@@ -563,7 +963,11 @@ struct PerformanceChecks {
             makeItem(id: "SINGLE.JPG", primaryURL: single),
         ]
 
-        let result = ExportWorker.move(items, to: destination) { _, _ in }
+        let result = ExportWorker.move(
+            items,
+            to: destination,
+            journalDirectory: source.appendingPathComponent("Journals", isDirectory: true)
+        ) { _, _ in }
         try expect(
             result.movedItemIDs == ["PAIR.NEF", "SINGLE.JPG"],
             "every fully transferred photo should be reported for session removal"
@@ -592,7 +996,11 @@ struct PerformanceChecks {
         try Data("raw".utf8).write(to: raw)
         let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: missingJPEG)
 
-        let result = ExportWorker.move([item], to: destination) { _, _ in }
+        let result = ExportWorker.move(
+            [item],
+            to: destination,
+            journalDirectory: source.appendingPathComponent("Journals", isDirectory: true)
+        ) { _, _ in }
         try expect(result.movedItemIDs.isEmpty, "an incomplete pair must not count as moved")
         try expect(result.failedPhotos == 1, "an incomplete pair should report one failed photo")
         try expect(result.inconsistentPhotos == 0, "a successful rollback should remain consistent")
@@ -610,7 +1018,11 @@ struct PerformanceChecks {
         try Data("single".utf8).write(to: single)
         let item = makeItem(id: "SINGLE.JPG", primaryURL: single)
 
-        let result = ExportWorker.move([item], to: folder) { _, _ in }
+        let result = ExportWorker.move(
+            [item],
+            to: folder,
+            journalDirectory: folder.appendingPathComponent("Journals", isDirectory: true)
+        ) { _, _ in }
         try expect(result.movedItemIDs.isEmpty && result.failedPhotos == 1,
                    "moving a photo into its own folder should be refused")
         try expect(FileManager.default.fileExists(atPath: single.path), "the original file must stay untouched")
@@ -618,6 +1030,701 @@ struct PerformanceChecks {
             !FileManager.default.fileExists(atPath: folder.appendingPathComponent("SINGLE (1).JPG").path),
             "an in-place move must not rename the original with a collision suffix"
         )
+    }
+
+    private static func exportDestinationRejectsSourceAndDescendant() throws {
+        let source = try disposableFolder(named: "ExportDestinationSource")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let child = source.appendingPathComponent("Exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let outside = try disposableFolder(named: "ExportDestinationOutside")
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let alias = outside.appendingPathComponent("AliasIntoSource", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: child)
+        // This check targets path safety only. Some restricted test runners
+        // report zero available capacity for their disposable volume.
+        let item = makeItem(id: "PHOTO.JPG", fileSize: 0)
+
+        try expectValidationError(
+            .sourceFolder,
+            source: source,
+            destination: source,
+            item: item
+        )
+        try expectValidationError(
+            .insideSourceFolder,
+            source: source,
+            destination: child,
+            item: item
+        )
+        try expectValidationError(
+            .insideSourceFolder,
+            source: source,
+            destination: alias,
+            item: item
+        )
+        try ExportDestinationValidator.validate(
+            sourceFolder: source,
+            destination: outside,
+            items: [item],
+            mode: .copy
+        )
+    }
+
+    private static func operationJournalRemovesInterruptedCopyIdempotently() throws {
+        let root = try disposableFolder(named: "JournalCopyRecovery")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let destination = root.appendingPathComponent("COPIED.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("source".utf8).write(to: source)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [.init(itemID: "SOURCE.JPG", source: source, destination: destination)],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("copy journal should reserve a temporary path")
+        }
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.copyItem(at: source, to: temporary)
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        try writer.mark(.completed, fileAt: 0, identityAt: destination)
+
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        try expect(report.restoredOperations == 1, "interrupted copy should recover as one operation")
+        try expect(report.removedPartialCopies == 1, "recovery should remove the partial destination copy")
+        try expect(FileManager.default.fileExists(atPath: source.path), "copy recovery must preserve the original")
+        try expect(!FileManager.default.fileExists(atPath: destination.path), "copy recovery should remove its own copy")
+        try expect(!FileOperationJournal.hasPendingOperations(directory: journals), "resolved copy journal should be removed")
+
+        let secondReport = FileOperationJournal.recoverPendingOperations(directory: journals)
+        try expect(secondReport.foundOperations == 0, "repeating recovery should be a no-op")
+    }
+
+    private static func operationJournalRestoresInterruptedMove() throws {
+        let root = try disposableFolder(named: "JournalMoveRecovery")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.NEF")
+        let destination = root.appendingPathComponent("MOVED.NEF")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("raw".utf8).write(to: source)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportMove,
+            seeds: [.init(itemID: "SOURCE.NEF", source: source, destination: destination)],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("move journal should reserve a temporary path")
+        }
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(at: source, to: temporary)
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        // Simulate termination after the final rename but before `.completed`.
+        try FileManager.default.moveItem(at: temporary, to: destination)
+
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        try expect(report.restoredFiles == 1, "interrupted move should restore one source file")
+        try expect(FileManager.default.fileExists(atPath: source.path), "move recovery should restore the original path")
+        try expect(!FileManager.default.fileExists(atPath: destination.path), "move recovery should empty its destination")
+    }
+
+    private static func operationJournalPreservesCommittedExport() throws {
+        let root = try disposableFolder(named: "JournalCommitted")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let destination = root.appendingPathComponent("COPIED.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("source".utf8).write(to: source)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [.init(itemID: "SOURCE.JPG", source: source, destination: destination)],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("copy journal should reserve a temporary path")
+        }
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.copyItem(at: source, to: temporary)
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        try writer.mark(.completed, fileAt: 0, identityAt: destination)
+        try writer.markCommitted()
+
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        try expect(report.committedOperations == 1, "committed operation should only clear its stale journal")
+        try expect(FileManager.default.fileExists(atPath: destination.path), "committed destination must be preserved")
+        try expect(FileManager.default.fileExists(atPath: source.path), "committed copy must preserve its source")
+    }
+
+    private static func operationJournalRefusesSameNamedReplacement() throws {
+        let root = try disposableFolder(named: "JournalIdentity")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let destination = root.appendingPathComponent("COPIED.JPG")
+        let replacement = root.appendingPathComponent("REPLACEMENT.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("source".utf8).write(to: source)
+        try Data("replacement".utf8).write(to: replacement)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [.init(itemID: "SOURCE.JPG", source: source, destination: destination)],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("copy journal should reserve a temporary path")
+        }
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.copyItem(at: source, to: temporary)
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        try writer.mark(.completed, fileAt: 0, identityAt: destination)
+        try FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: replacement, to: destination)
+
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        try expect(report.unresolvedFiles == 1, "replacement identity should keep recovery unresolved")
+        let replacementContents = String(
+            data: try Data(contentsOf: destination),
+            encoding: .utf8
+        )
+        try expect(
+            replacementContents == "replacement",
+            "recovery must leave a same-named replacement untouched"
+        )
+        try expect(FileOperationJournal.hasPendingOperations(directory: journals), "unresolved journal should remain retryable")
+    }
+
+    private static func operationJournalRestoresInterruptedTrash() throws {
+        let root = try disposableFolder(named: "JournalTrash")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let simulatedTrash = root.appendingPathComponent("TRASHED.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("source".utf8).write(to: source)
+
+        let writer = try FileOperationJournal.start(
+            kind: .moveToTrash,
+            seeds: [.init(itemID: "SOURCE.JPG", source: source, destination: nil)],
+            directory: journals
+        )
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(at: source, to: simulatedTrash)
+        try writer.mark(
+            .completed,
+            fileAt: 0,
+            resolvedDestination: simulatedTrash,
+            identityAt: simulatedTrash
+        )
+
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        try expect(report.restoredFiles == 1, "interrupted Trash should restore the source")
+        try expect(FileManager.default.fileExists(atPath: source.path), "Trash recovery should restore the original path")
+        try expect(!FileManager.default.fileExists(atPath: simulatedTrash.path), "recovered Trash location should be empty")
+    }
+
+    private static func operationJournalCompletesInterruptedTrashUndo() throws {
+        let root = try disposableFolder(named: "JournalTrashUndo")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let simulatedTrash = root.appendingPathComponent("TRASHED.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("trashed".utf8).write(to: simulatedTrash)
+
+        let writer = try FileOperationJournal.start(
+            kind: .restoreFromTrash,
+            seeds: [.init(
+                itemID: "SOURCE.JPG",
+                source: source,
+                destination: simulatedTrash,
+                identityURL: simulatedTrash
+            )],
+            directory: journals
+        )
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(at: simulatedTrash, to: source)
+
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        try expect(report.restoredOperations == 1, "interrupted Trash undo should finish cleanly")
+        try expect(FileManager.default.fileExists(atPath: source.path), "Trash undo recovery should keep the restored source")
+        try expect(!FileManager.default.fileExists(atPath: simulatedTrash.path), "Trash undo should not duplicate the file")
+    }
+
+    private static func completedWorkerRemovesItsJournal() throws {
+        let root = try disposableFolder(named: "WorkerJournalCleanup")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceFolder = root.appendingPathComponent("Source", isDirectory: true)
+        let destinationFolder = root.appendingPathComponent("Destination", isDirectory: true)
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let source = sourceFolder.appendingPathComponent("SOURCE.JPG")
+        try Data("source".utf8).write(to: source)
+
+        let result = ExportWorker.copy(
+            [makeItem(id: "SOURCE.JPG", primaryURL: source)],
+            to: destinationFolder,
+            journalDirectory: journals
+        ) { _, _ in }
+        try expect(result.copiedFiles == 1 && !result.requiresRecovery, "normal worker copy should complete")
+        try expect(!FileOperationJournal.hasPendingOperations(directory: journals), "completed worker should remove its journal")
+    }
+
+    private static func preparedSessionIndexKeepsStableGroupIdentity() throws {
+        let items = [
+            makeItem(id: "ALPHA_FIRST.JPG", camera: "Alpha"),
+            makeItem(id: "ALPHA_SECOND.PNG", camera: "Alpha"),
+            makeItem(id: "BETA.JPG", camera: "Beta"),
+        ]
+        let sort = PhotoSort(key: .camera, ascending: true)
+        var index = PreparedSessionIndex()
+        index.rebuildItems(items, sort: sort)
+        index.applyFilter(
+            PhotoFilter(),
+            to: items,
+            sort: sort,
+            isGroupingEnabled: true
+        )
+
+        try expect(index.visibleGroups.count == 2, "camera sort should create two stable groups")
+        let alphaID = index.visibleGroups[0].id
+        try expect(
+            index.itemIndex(forID: "ALPHA_SECOND.PNG") == 1,
+            "prepared index should expose stable id lookup"
+        )
+        try expect(
+            index.location(forItemIndex: 1)?.position == 1,
+            "prepared index should expose global navigation position"
+        )
+
+        var filter = PhotoFilter()
+        filter.excludedTypes = ["JPEG"]
+        index.applyFilter(
+            filter,
+            to: items,
+            sort: sort,
+            isGroupingEnabled: true
+        )
+        try expect(
+            index.visibleGroups.first?.id == alphaID,
+            "a group id should survive filtering out its former first member"
+        )
+        try expect(
+            index.visibleGroups.first?.indices == [1],
+            "filtered camera group should retain only its visible member"
+        )
+        try expect(
+            index.location(forItemIndex: 1)
+                == .init(position: 0, groupIndex: 0, positionInGroup: 0),
+            "group rebuild should refresh global and within-group positions"
+        )
+
+        index.rebuildGroups(
+            for: items,
+            sort: sort,
+            isGroupingEnabled: false
+        )
+        try expect(
+            index.visibleGroups.map(\.id) == [.ungrouped],
+            "disabled grouping should use one stable ungrouped section"
+        )
+
+        let unusualDurations = [
+            makeItem(id: "NAN.MOV", mediaKind: .video, duration: .nan),
+            makeItem(id: "INFINITE.MOV", mediaKind: .video, duration: .infinity),
+        ]
+        let durationSort = PhotoSort(key: .duration, ascending: true)
+        index.rebuildItems(unusualDurations, sort: durationSort)
+        index.applyFilter(
+            PhotoFilter(),
+            to: unusualDurations,
+            sort: durationSort,
+            isGroupingEnabled: true
+        )
+        try expect(
+            index.visibleGroups.count == 1,
+            "non-finite durations should share one safe unknown group"
+        )
+    }
+
+    private static func preparedSessionIndexScaleBaselines() throws {
+        let clock = ContinuousClock()
+        for itemCount in [1_000, 10_000, 100_000] {
+            let items = (0..<itemCount).map { index in
+                let ext = index.isMultiple(of: 2) ? "JPG" : "PNG"
+                return makeItem(
+                    id: String(format: "day-%02d/IMG_%06d.%@", index % 25, index, ext),
+                    camera: "Camera \(index % 25)"
+                )
+            }
+            let sort = PhotoSort(key: .camera, ascending: true)
+            var filter = PhotoFilter()
+            filter.excludedTypes = ["PNG"]
+            var index = PreparedSessionIndex()
+
+            let rebuildDuration = clock.measure {
+                index.rebuildItems(items, sort: sort)
+            }
+            let filterDuration = clock.measure {
+                index.applyFilter(
+                    filter,
+                    to: items,
+                    sort: sort,
+                    isGroupingEnabled: true
+                )
+            }
+
+            try expect(
+                index.visibleIndices.count == itemCount / 2,
+                "\(itemCount)-item baseline should retain every JPEG"
+            )
+            try expect(
+                index.visibleGroups.count == 25,
+                "\(itemCount)-item baseline should create each camera group"
+            )
+            try expect(
+                index.visibleLocations.count == itemCount / 2,
+                "\(itemCount)-item baseline should map every visible item"
+            )
+            print(
+                "Prepared index \(itemCount) items: "
+                    + "rebuild \(milliseconds(rebuildDuration)) ms, "
+                    + "filter/group \(milliseconds(filterDuration)) ms"
+            )
+        }
+    }
+
+    private static func milliseconds(_ duration: Duration) -> String {
+        let components = duration.components
+        let value = Double(components.seconds) * 1_000
+            + Double(components.attoseconds) / 1_000_000_000_000_000
+        return String(format: "%.1f", value)
+    }
+
+    private static func selectionStatePreservesImplicitCurrentAndToggleRules() throws {
+        let items = [
+            makeItem(id: "A.JPG"),
+            makeItem(id: "B.JPG"),
+            makeItem(id: "C.JPG"),
+            makeItem(id: "D.JPG"),
+        ]
+        let visible = Array(items.indices)
+        var selection = SelectionState()
+
+        try expect(
+            selection.effectiveSelection(
+                currentIndex: 1,
+                visibleIndices: visible,
+                itemCount: items.count
+            ) == [1],
+            "empty explicit selection should mean the visible current item"
+        )
+        let firstReplacement = selection.toggle(
+            3,
+            currentIndex: 1,
+            visibleIndices: visible,
+            items: items
+        )
+        try expect(
+            selection.indices == [1, 3] && firstReplacement == nil,
+            "command-toggle should add a second item while keeping current"
+        )
+        try expect(
+            selection.itemIDs == ["B.JPG", "D.JPG"],
+            "selection should retain stable IDs beside render indices"
+        )
+
+        let replacement = selection.toggle(
+            1,
+            currentIndex: 1,
+            visibleIndices: visible,
+            items: items
+        )
+        try expect(
+            selection.indices == [3] && replacement == 3,
+            "removing current should move the anchor to the surviving item"
+        )
+        _ = selection.clear(items: items)
+        try expect(
+            selection.indices.isEmpty && selection.itemIDs.isEmpty,
+            "clearing selection should clear both projections"
+        )
+        try expect(
+            selection.effectiveSelection(
+                currentIndex: 1,
+                visibleIndices: [],
+                itemCount: items.count
+            ).isEmpty,
+            "zero visible matches must not expose a hidden implicit selection"
+        )
+    }
+
+    private static func selectionStateRangesFiltersAndRemapsByID() throws {
+        let original = [
+            makeItem(id: "A.JPG"),
+            makeItem(id: "B.PNG"),
+            makeItem(id: "C.JPG"),
+            makeItem(id: "D.PNG"),
+        ]
+        let sort = PhotoSort(key: .name, ascending: true)
+        var prepared = PreparedSessionIndex()
+        prepared.rebuildItems(original, sort: sort)
+        prepared.applyFilter(
+            PhotoFilter(),
+            to: original,
+            sort: sort,
+            isGroupingEnabled: true
+        )
+        var selection = SelectionState()
+        _ = selection.selectRange(
+            from: 1,
+            to: 3,
+            visibleIndices: prepared.visibleIndices,
+            items: original,
+            preparedIndex: prepared
+        )
+        try expect(
+            selection.indices == [1, 2, 3],
+            "range selection should follow prepared visible order"
+        )
+
+        var jpegOnly = PhotoFilter()
+        jpegOnly.excludedTypes = ["PNG"]
+        prepared.applyFilter(
+            jpegOnly,
+            to: original,
+            sort: sort,
+            isGroupingEnabled: true
+        )
+        _ = selection.retainVisible(
+            items: original,
+            preparedIndex: prepared
+        )
+        try expect(
+            selection.indices == [2] && selection.itemIDs == ["C.JPG"],
+            "filtering should remove hidden members from both projections"
+        )
+
+        let reordered = [
+            makeItem(id: "D.PNG"),
+            makeItem(id: "C.JPG"),
+            makeItem(id: "B.PNG"),
+            makeItem(id: "E.JPG"),
+        ]
+        prepared.rebuildItems(reordered, sort: sort)
+        prepared.applyFilter(
+            PhotoFilter(),
+            to: reordered,
+            sort: sort,
+            isGroupingEnabled: true
+        )
+        let replacement = selection.restore(
+            itemIDs: ["B.PNG", "C.JPG", "MISSING.JPG"],
+            items: reordered,
+            preparedIndex: prepared,
+            visibleOnly: true,
+            currentIndex: 3
+        )
+        try expect(
+            selection.indices == [1, 2]
+                && selection.itemIDs == ["B.PNG", "C.JPG"],
+            "restore should remap surviving IDs into the new generation"
+        )
+        try expect(
+            replacement == 2,
+            "restore should choose the first selected item in visible order"
+        )
+
+        _ = selection.selectToEdge(
+            from: 1,
+            forward: true,
+            visibleIndices: prepared.visibleIndices,
+            items: reordered,
+            preparedIndex: prepared
+        )
+        try expect(
+            selection.itemIDs == ["C.JPG", "D.PNG", "E.JPG"],
+            "edge selection should follow visible sort order, not array order"
+        )
+        _ = selection.updateRubberBand([0, 99], items: reordered)
+        try expect(
+            selection.indices == [0] && selection.itemIDs == ["D.PNG"],
+            "rubber-band projection should discard stale item indices"
+        )
+        try expect(
+            selection.committedAnchor(currentIndex: 3) == 0,
+            "rubber-band completion should return a selected anchor"
+        )
+    }
+
+    @MainActor
+    private static func visibleLocationMapTracksDerivedState() throws {
+        let store = SessionStore()
+        store.items = (0..<5_000).map { index in
+            let ext = index.isMultiple(of: 2) ? "JPG" : "PNG"
+            return makeItem(id: String(format: "IMG_%05d.%@", index, ext))
+        }
+        store.sort = PhotoSort(key: .name, ascending: false)
+        try expect(store.visibleIndices.count == 5_000, "navigation fixture should expose every item")
+
+        let anchor = store.visibleIndices[3_210]
+        store.setIndex(anchor)
+        try expect(
+            store.currentVisiblePosition == 3_210,
+            "cached visible position should match reverse name order"
+        )
+        store.selectRange(to: store.visibleIndices[3_220])
+        try expect(store.selectedIndices.count == 11, "range selection should use the cached endpoints")
+        store.clearSelection()
+
+        store.filter.excludedTypes = ["PNG"]
+        let filteredPosition = store.visibleIndices.firstIndex(of: store.currentIndex)
+        try expect(
+            store.currentVisiblePosition == filteredPosition,
+            "filter rebuild should refresh the cached position"
+        )
+
+        store.sort = PhotoSort(key: .fileType, ascending: true)
+        let sortedPosition = store.visibleIndices.firstIndex(of: store.currentIndex)
+        try expect(
+            store.currentVisiblePosition == sortedPosition,
+            "sort/group rebuild should refresh the cached position"
+        )
+        store.isGroupingEnabled = false
+        try expect(
+            store.currentVisiblePosition == sortedPosition,
+            "turning group division off should preserve the global position"
+        )
+    }
+
+    @MainActor
+    private static func ratingUndoFollowsStableIdentityAfterReorder() throws {
+        let store = SessionStore()
+        store.items = [
+            makeItem(id: "A.JPG"),
+            makeItem(id: "B.JPG"),
+            makeItem(id: "C.JPG"),
+        ]
+        store.sort = PhotoSort(key: .name, ascending: true)
+        store.toggleRating(at: 1)
+        try expect(
+            store.items.first(where: { $0.id == "B.JPG" })?.rating == .yes,
+            "fixture should rate B before reordering"
+        )
+
+        store.items = [store.items[2], store.items[0], store.items[1]]
+        store.sort.ascending.toggle()
+        store.undo()
+
+        try expect(
+            store.items.first(where: { $0.id == "B.JPG" })?.rating == .undecided,
+            "rating undo should follow B's stable id after its array index changes"
+        )
+        try expect(
+            store.items[store.currentIndex].id == "B.JPG",
+            "rating undo should restore the former current photo by id"
+        )
+    }
+
+    @MainActor
+    private static func rescanPreservesCurrentPhotoAndSelectionByID() async throws {
+        let folder = try disposableFolder(named: "StableRescanIdentity")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fixtureURL = URL(fileURLWithPath: "AppIcon/AppIcon.iconset/icon_16x16.png")
+        let fixture = try Data(contentsOf: fixtureURL)
+        let fm = FileManager.default
+        let names = ["A.png", "B.png", "C.png"]
+        for (offset, name) in names.enumerated() {
+            let url = folder.appendingPathComponent(name)
+            try fixture.write(to: url)
+            try fm.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: TimeInterval(100 + offset))],
+                ofItemAtPath: url.path
+            )
+        }
+
+        let store = SessionStore()
+        store.openFolder(folder)
+        try await waitForReadySession(store, expectedItems: 3)
+        guard let a = store.items.firstIndex(where: { $0.id == "A.png" }),
+              let b = store.items.firstIndex(where: { $0.id == "B.png" }) else {
+            throw CheckFailure("initial scan should contain A and B")
+        }
+        store.setIndex(b)
+        store.toggleSelection(of: a)
+        let currentID = store.items[store.currentIndex].id
+        let selectedIDs = Set(store.selectedIndices.map { store.items[$0].id })
+        let previousIndex = store.currentIndex
+
+        let newURL = folder.appendingPathComponent("D.png")
+        try fixture.write(to: newURL)
+        try fm.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 50)],
+            ofItemAtPath: newURL.path
+        )
+        try fm.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 500)],
+            ofItemAtPath: folder.appendingPathComponent("B.png").path
+        )
+
+        store.rescan()
+        try await waitForReadySession(store, expectedItems: 4)
+        let rescannedSelection = Set(
+            store.selectedIndices.map { store.items[$0].id }
+        )
+        try expect(
+            store.items[store.currentIndex].id == currentID,
+            "rescan should preserve the current photo by stable id"
+        )
+        try expect(
+            rescannedSelection == selectedIDs,
+            "rescan should preserve the same selected photos by stable id"
+        )
+        try expect(
+            store.currentIndex != previousIndex,
+            "fixture should actually move the current photo to a new array index"
+        )
+        _ = await store.saveSessionForTermination()
+    }
+
+    @MainActor
+    private static func waitForReadySession(
+        _ store: SessionStore,
+        expectedItems: Int
+    ) async throws {
+        for _ in 0..<200 {
+            if case .ready = store.phase, store.items.count == expectedItems {
+                return
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        throw CheckFailure(
+            "session did not finish scanning \(expectedItems) items"
+        )
+    }
+
+    private static func expectValidationError(
+        _ expected: ExportDestinationValidator.ValidationError,
+        source: URL,
+        destination: URL,
+        item: PhotoItem
+    ) throws {
+        do {
+            try ExportDestinationValidator.validate(
+                sourceFolder: source,
+                destination: destination,
+                items: [item],
+                mode: .copy
+            )
+            throw CheckFailure("unsafe export destination should have been rejected")
+        } catch let error as ExportDestinationValidator.ValidationError {
+            try expect(error == expected, "destination should fail with \(expected), got \(error)")
+        }
     }
 
     /// Each element written through `@Published items` copies the whole array
@@ -694,9 +1801,25 @@ struct PerformanceChecks {
         try expect(store.canUndo, "a rating step should be undoable before the move")
 
         let movedIDs = (0..<4).map { String(format: "IMG_%04d.JPG", $0) }
-        store.exportMoveWillStart()
+        try expect(store.exportWillStart(mode: .copy), "copy should raise the shared operation state")
+        try expect(
+            store.isCopyingExport && store.isFileOperationRunning,
+            "copy should block Quit, updater installation, and session mutations"
+        )
+        try expect(
+            !store.exportWillStart(mode: .move),
+            "a second export must not overlap an active copy"
+        )
+        store.finishExport(mode: .copy, movedIDs: [], requiresRecovery: false)
+        try expect(!store.isFileOperationRunning, "finishing copy should clear the shared operation state")
+
+        try expect(store.exportWillStart(mode: .move), "move should raise the shared operation state")
         try expect(store.isMovingExport, "the in-flight flag should be up during the move")
-        store.finishExportMove(movedIDs: movedIDs)
+        store.finishExport(
+            mode: .move,
+            movedIDs: movedIDs,
+            requiresRecovery: false
+        )
 
         try expect(!store.isMovingExport, "the in-flight flag should clear when the move finishes")
         try expect(
@@ -710,6 +1833,23 @@ struct PerformanceChecks {
             "the current photo must stay in bounds after the removal"
         )
         try expect(!store.canUndo, "a move export is not undoable — the stale undo stack must be cleared")
+    }
+
+    private final class CancellationAfterChecks: @unchecked Sendable {
+        private let lock = NSLock()
+        private let threshold: Int
+        private var checks = 0
+
+        init(_ threshold: Int) {
+            self.threshold = threshold
+        }
+
+        func shouldCancel() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            checks += 1
+            return checks >= threshold
+        }
     }
 
     private static func makeItem(
@@ -748,13 +1888,23 @@ struct PerformanceChecks {
         )
     }
 
-    private static func session(rating: String) -> SessionFile {
+    private static func session(
+        rating: String,
+        folder: URL,
+        scannedAt: Date = Date(timeIntervalSince1970: 0)
+    ) -> SessionFile {
         SessionFile(
             version: 1,
-            sourcePath: "/tmp/photos",
-            scannedAt: Date(timeIntervalSince1970: 0),
+            sourcePath: folder.path,
+            scannedAt: scannedAt,
             entries: [SessionEntry(filename: "IMG.JPG", pairedFilename: nil, rating: rating, ratedAt: nil)]
         )
+    }
+
+    private static func writeSessionFixture(_ session: SessionFile, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(session).write(to: url, options: .atomic)
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {

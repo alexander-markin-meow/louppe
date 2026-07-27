@@ -169,7 +169,7 @@ struct MetadataPanel: View {
 
     @ViewBuilder
     private func multiSelectionContent(_ summary: PhotoSelectionSummary) -> some View {
-        Text("\(summary.count) files selected")
+        Text(selectionTitle(for: summary))
             .font(.title3.weight(.semibold))
 
         Divider()
@@ -182,6 +182,11 @@ struct MetadataPanel: View {
             value: ByteCountFormatter.string(fromByteCount: summary.totalBytes, countStyle: .file)
         )
         selectionSummaryField("Types", value: summary.fileTypes.joined(separator: ", "))
+    }
+
+    private func selectionTitle(for summary: PhotoSelectionSummary) -> String {
+        let itemLabel = summary.videoCount == 0 ? "photos" : "media items"
+        return "\(summary.count) \(itemLabel) selected · \(summary.fileCount) files"
     }
 
     private func selectionSummaryField(_ label: String, value: String) -> some View {
@@ -211,9 +216,10 @@ struct MetadataPanel: View {
             }
         }
         if summary.unknownDateCount > 0 {
+            let itemLabel = summary.videoCount == 0 ? "photo" : "media item"
             let label = summary.unknownDateCount == 1
-                ? "1 file without a capture date"
-                : "\(summary.unknownDateCount) files without a capture date"
+                ? "1 \(itemLabel) without a capture date"
+                : "\(summary.unknownDateCount) \(itemLabel)s without a capture date"
             lines.append(label)
         }
         return lines.isEmpty ? "Unknown" : lines.joined(separator: "\n")
@@ -257,7 +263,8 @@ struct MetadataPanel: View {
 
         switch field.label {
         case "Aperture" where value.hasPrefix("f/"):
-            return (Text("f/").font(smallFont) + Text(String(value.dropFirst(2))).font(largeFont))
+            return Text("f/\(Text(String(value.dropFirst(2))).font(largeFont))")
+                .font(smallFont)
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .textSelection(.enabled)
@@ -265,12 +272,14 @@ struct MetadataPanel: View {
             let remainder = String(value.dropFirst(2))
             let suffix = remainder.hasSuffix("s") ? "s" : ""
             let number = suffix.isEmpty ? remainder : String(remainder.dropLast())
-            return (Text("1/").font(smallFont) + Text(number).font(largeFont) + Text(suffix).font(smallFont))
+            return Text("1/\(Text(number).font(largeFont))\(suffix)")
+                .font(smallFont)
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .textSelection(.enabled)
         case "ISO":
-            return (Text("ISO").font(smallFont) + Text(value).font(largeFont))
+            return Text("ISO\(Text(value).font(largeFont))")
+                .font(smallFont)
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .textSelection(.enabled)

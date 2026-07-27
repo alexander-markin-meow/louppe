@@ -21,12 +21,16 @@ struct TrashBatchResult: Sendable {
     let succeeded: [TrashedPhotoSnapshot]
     let failedPhotos: Int
     let inconsistentPhotos: Int
+    let journalFailure: Bool
+    let requiresRecovery: Bool
 }
 
 struct RestoreBatchResult: Sendable {
     let restored: [CleanUpPhotoSnapshot]
     let lostPhotos: Int
     let inconsistentPhotos: Int
+    let journalFailure: Bool
+    let requiresRecovery: Bool
 }
 
 /// Filesystem-only Clean Up implementation. It owns no UI state and creates a
@@ -35,27 +39,68 @@ struct RestoreBatchResult: Sendable {
 enum CleanUpWorker {
     typealias Progress = @Sendable (_ done: Int, _ total: Int) -> Void
 
-    static func moveToTrash(_ photos: [CleanUpPhotoSnapshot], progress: @escaping Progress) -> TrashBatchResult {
+    static func moveToTrash(
+        _ photos: [CleanUpPhotoSnapshot],
+        journalDirectory: URL? = nil,
+        progress: @escaping Progress
+    ) -> TrashBatchResult {
         let fm = FileManager()
         let total = photos.reduce(0) { $0 + $1.item.allURLs.count }
+        let writer: FileOperationJournal.Writer
+        do {
+            writer = try FileOperationJournal.start(
+                kind: .moveToTrash,
+                seeds: photos.flatMap { photo in
+                    photo.item.allURLs.map {
+                        FileOperationJournal.Seed(
+                            itemID: photo.item.id,
+                            source: $0,
+                            destination: nil
+                        )
+                    }
+                },
+                directory: journalDirectory
+            )
+        } catch {
+            return TrashBatchResult(
+                succeeded: [],
+                failedPhotos: photos.count,
+                inconsistentPhotos: 0,
+                journalFailure: true,
+                requiresRecovery: false
+            )
+        }
         var reporter = ThrottledProgress(total: total, callback: progress)
         var succeeded: [TrashedPhotoSnapshot] = []
         var failedPhotos = 0
         var inconsistentPhotos = 0
+        var journalFailure = false
+        var globalFileIndex = 0
 
-        for photo in photos {
+        photoLoop: for (photoOffset, photo) in photos.enumerated() {
             let urls = photo.item.allURLs
-            var trashed: [TrashedFile] = []
+            let photoFileIndex = globalFileIndex
+            globalFileIndex += urls.count
+            var trashed: [JournaledTrashedFile] = []
             var failed = false
             var destinationUnknown = false
             var attempted = 0
-            for url in urls {
+            for (localFileIndex, url) in urls.enumerated() {
+                let fileIndex = photoFileIndex + localFileIndex
                 attempted += 1
-                var trashURL: NSURL?
                 do {
-                    try fm.trashItem(at: url, resultingItemURL: &trashURL)
+                    try writer.mark(.started, fileAt: fileIndex)
                 } catch {
+                    journalFailure = true
                     failed = true
+                }
+                var trashURL: NSURL?
+                if !failed {
+                    do {
+                        try fm.trashItem(at: url, resultingItemURL: &trashURL)
+                    } catch {
+                        failed = true
+                    }
                 }
                 reporter.advance()
                 guard !failed else { break }
@@ -67,52 +112,155 @@ enum CleanUpWorker {
                     failed = true
                     break
                 }
-                trashed.append(TrashedFile(original: url, trash: landed))
+                let trashedFile = TrashedFile(original: url, trash: landed)
+                trashed.append(JournaledTrashedFile(
+                    file: trashedFile,
+                    index: fileIndex
+                ))
+                do {
+                    try writer.mark(
+                        .completed,
+                        fileAt: fileIndex,
+                        resolvedDestination: landed,
+                        identityAt: landed
+                    )
+                } catch {
+                    journalFailure = true
+                    failed = true
+                    break
+                }
             }
             if attempted < urls.count { reporter.advance(by: urls.count - attempted) }
 
             if failed {
                 var rollbackFailed = false
-                for file in trashed.reversed() {
+                for entry in trashed.reversed() {
                     do {
-                        try fm.moveItem(at: file.trash, to: file.original)
+                        guard !fm.fileExists(atPath: entry.file.original.path) else {
+                            throw CleanUpJournalError.refusesOverwrite
+                        }
+                        try fm.moveItem(
+                            at: entry.file.trash,
+                            to: entry.file.original
+                        )
                     } catch {
                         rollbackFailed = true
+                        continue
+                    }
+                    do {
+                        try writer.mark(.rolledBack, fileAt: entry.index)
+                    } catch {
+                        journalFailure = true
                     }
                 }
                 failedPhotos += 1
                 if destinationUnknown || rollbackFailed { inconsistentPhotos += 1 }
+                if journalFailure {
+                    failedPhotos += photos.count - photoOffset - 1
+                    break photoLoop
+                }
             } else {
-                succeeded.append(TrashedPhotoSnapshot(index: photo.index, item: photo.item, files: trashed))
+                succeeded.append(TrashedPhotoSnapshot(
+                    index: photo.index,
+                    item: photo.item,
+                    files: trashed.map(\.file)
+                ))
             }
         }
         reporter.finish()
+        let journalFinalized = FileOperationJournal.finalize(
+            writer,
+            operationIsConsistent: inconsistentPhotos == 0
+        )
+        if !journalFinalized {
+            journalFailure = true
+        }
         return TrashBatchResult(
             succeeded: succeeded,
             failedPhotos: failedPhotos,
-            inconsistentPhotos: inconsistentPhotos
+            inconsistentPhotos: inconsistentPhotos,
+            journalFailure: journalFailure,
+            requiresRecovery: inconsistentPhotos > 0 || !journalFinalized
         )
     }
 
-    static func restore(_ photos: [TrashedPhotoSnapshot], progress: @escaping Progress) -> RestoreBatchResult {
+    static func restore(
+        _ photos: [TrashedPhotoSnapshot],
+        journalDirectory: URL? = nil,
+        progress: @escaping Progress
+    ) -> RestoreBatchResult {
         let fm = FileManager()
-        let total = photos.reduce(0) { $0 + $1.files.count }
+        let orderedPhotos = photos.sorted(by: { $0.index < $1.index })
+        let total = orderedPhotos.reduce(0) { $0 + $1.files.count }
+        let writer: FileOperationJournal.Writer
+        do {
+            writer = try FileOperationJournal.start(
+                kind: .restoreFromTrash,
+                seeds: orderedPhotos.flatMap { photo in
+                    photo.files.map {
+                        FileOperationJournal.Seed(
+                            itemID: photo.item.id,
+                            source: $0.original,
+                            destination: $0.trash,
+                            identityURL: $0.trash
+                        )
+                    }
+                },
+                directory: journalDirectory
+            )
+        } catch {
+            return RestoreBatchResult(
+                restored: [],
+                lostPhotos: photos.count,
+                inconsistentPhotos: 0,
+                journalFailure: true,
+                requiresRecovery: false
+            )
+        }
         var reporter = ThrottledProgress(total: total, callback: progress)
         var restoredPhotos: [CleanUpPhotoSnapshot] = []
         var lostPhotos = 0
         var inconsistentPhotos = 0
+        var journalFailure = false
+        var globalFileIndex = 0
 
-        for photo in photos.sorted(by: { $0.index < $1.index }) {
-            var restoredFiles: [TrashedFile] = []
+        photoLoop: for (photoOffset, photo) in orderedPhotos.enumerated() {
+            let photoFileIndex = globalFileIndex
+            globalFileIndex += photo.files.count
+            var restoredFiles: [JournaledTrashedFile] = []
             var failed = false
             var attempted = 0
-            for file in photo.files {
+            for (localFileIndex, file) in photo.files.enumerated() {
+                let fileIndex = photoFileIndex + localFileIndex
                 attempted += 1
                 do {
-                    try fm.moveItem(at: file.trash, to: file.original)
-                    restoredFiles.append(file)
+                    try writer.mark(.started, fileAt: fileIndex)
                 } catch {
+                    journalFailure = true
                     failed = true
+                }
+                if !failed {
+                    do {
+                        try fm.moveItem(at: file.trash, to: file.original)
+                        restoredFiles.append(JournaledTrashedFile(
+                            file: file,
+                            index: fileIndex
+                        ))
+                    } catch {
+                        failed = true
+                    }
+                }
+                if !failed {
+                    do {
+                        try writer.mark(
+                            .completed,
+                            fileAt: fileIndex,
+                            identityAt: file.original
+                        )
+                    } catch {
+                        journalFailure = true
+                        failed = true
+                    }
                 }
                 reporter.advance()
                 if failed { break }
@@ -122,25 +270,59 @@ enum CleanUpWorker {
             if failed {
                 // Put a partially restored pair back exactly where it came from.
                 var rollbackFailed = false
-                for file in restoredFiles.reversed() {
+                for entry in restoredFiles.reversed() {
                     do {
-                        try fm.moveItem(at: file.original, to: file.trash)
+                        guard !fm.fileExists(atPath: entry.file.trash.path) else {
+                            throw CleanUpJournalError.refusesOverwrite
+                        }
+                        try fm.moveItem(
+                            at: entry.file.original,
+                            to: entry.file.trash
+                        )
                     } catch {
                         rollbackFailed = true
+                        continue
+                    }
+                    do {
+                        try writer.mark(.rolledBack, fileAt: entry.index)
+                    } catch {
+                        journalFailure = true
                     }
                 }
                 lostPhotos += 1
                 if rollbackFailed { inconsistentPhotos += 1 }
+                if journalFailure {
+                    lostPhotos += orderedPhotos.count - photoOffset - 1
+                    break photoLoop
+                }
             } else {
                 restoredPhotos.append(CleanUpPhotoSnapshot(index: photo.index, item: photo.item))
             }
         }
         reporter.finish()
+        let journalFinalized = FileOperationJournal.finalize(
+            writer,
+            operationIsConsistent: inconsistentPhotos == 0
+        )
+        if !journalFinalized {
+            journalFailure = true
+        }
         return RestoreBatchResult(
             restored: restoredPhotos,
             lostPhotos: lostPhotos,
-            inconsistentPhotos: inconsistentPhotos
+            inconsistentPhotos: inconsistentPhotos,
+            journalFailure: journalFailure,
+            requiresRecovery: inconsistentPhotos > 0 || !journalFinalized
         )
+    }
+
+    private struct JournaledTrashedFile {
+        let file: TrashedFile
+        let index: Int
+    }
+
+    private enum CleanUpJournalError: Error {
+        case refusesOverwrite
     }
 
     /// Reconstruct the original ordering in one pass. Positions belonging to a

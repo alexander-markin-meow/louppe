@@ -72,11 +72,18 @@ struct ExportView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Choose Destination…") {
                     exporter.promptDestinationAndExport(
+                        sourceFolder: store.sourceFolder,
                         items: store.items,
                         ratings: selectedRatings,
                         mode: mode,
-                        onMoveWillStart: { store.exportMoveWillStart() },
-                        onMoveDidFinish: { store.finishExportMove(movedIDs: $0) }
+                        onOperationWillStart: { store.exportWillStart(mode: $0) },
+                        onOperationDidFinish: {
+                            store.finishExport(
+                                mode: $0,
+                                movedIDs: $1,
+                                requiresRecovery: $2
+                            )
+                        }
                     )
                 }
                 .keyboardShortcut(.defaultAction)
@@ -153,6 +160,12 @@ struct ExportView: View {
             Text("\(done) of \(total) files")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if mode == .copy {
+                Button(exporter.isCancellingCopy ? "Stopping…" : "Stop Copying") {
+                    exporter.cancelCopy()
+                }
+                .disabled(exporter.isCancellingCopy)
+            }
         }
     }
 
@@ -161,7 +174,7 @@ struct ExportView: View {
             Image(systemName: outcome.isClean ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .font(.system(size: 40))
                 .foregroundStyle(outcome.isClean ? .green : .orange)
-            Text(outcome.isClean ? "Export complete" : "Export finished with problems")
+            Text(finishedTitle(for: outcome))
                 .font(.title3.bold())
             Text(finishedMessage(for: outcome))
                 .font(.callout)
@@ -180,12 +193,31 @@ struct ExportView: View {
         }
     }
 
+    private func finishedTitle(for outcome: ExportManager.Outcome) -> String {
+        if outcome.recoveryRequired { return "Restoring files for safety" }
+        if outcome.cancelled { return "Copy stopped" }
+        return outcome.isClean ? "Export complete" : "Export finished with problems"
+    }
+
     private func finishedMessage(for outcome: ExportManager.Outcome) -> String {
+        if outcome.recoveryRequired {
+            return "Louppe kept a durable record of the interrupted operation and is returning every affected file to its safe source state. Wait for the recovery notice before starting another file operation."
+        }
         let verb = outcome.mode == .copy ? "copied" : "moved"
         var text = "\(outcome.files) file\(outcome.files == 1 ? "" : "s") \(verb) to \(outcome.destination.lastPathComponent)"
         switch outcome.mode {
         case .copy:
-            text += outcome.failedFiles > 0 ? " — \(outcome.failedFiles) failed to copy." : "."
+            if outcome.cancelled {
+                text += ". Completed photos remain at the destination; the photo in progress was rolled back."
+            } else if outcome.failedPhotos > 0 {
+                let agreement = outcome.failedPhotos == 1 ? "was" : "were"
+                text += " — \(outcome.failedPhotos) item\(outcome.failedPhotos == 1 ? "" : "s") couldn't be copied and \(agreement) rolled back."
+            } else {
+                text += "."
+            }
+            if outcome.inconsistentPhotos > 0 {
+                text += " For \(outcome.inconsistentPhotos), rollback also failed; check the destination for a partial pair."
+            }
         case .move:
             if outcome.failedPhotos > 0 {
                 text += " — \(outcome.failedPhotos) item\(outcome.failedPhotos == 1 ? "" : "s") couldn't be moved and stayed in the session."
@@ -195,6 +227,9 @@ struct ExportView: View {
             if outcome.inconsistentPhotos > 0 {
                 text += " For \(outcome.inconsistentPhotos), rollback also failed; check both the source folder and the destination."
             }
+        }
+        if outcome.journalFailure {
+            text += " Louppe couldn't finish its recovery checkpoint, so the affected photo was rolled back and no further file was started."
         }
         return text
     }

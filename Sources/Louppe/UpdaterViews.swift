@@ -16,7 +16,9 @@ final class CheckForUpdatesViewModel: ObservableObject {
 }
 
 /// Sparkle owns the update window and download/install flow. Louppe only
-/// supplies a native menu command and keeps it out of the way of file moves.
+/// supplies a native menu command and keeps it out of the way of active file
+/// operations. Automatic installation is also stopped by the app delegate's
+/// termination guard while an operation is running.
 struct CheckForUpdatesView: View {
     @ObservedObject private var viewModel: CheckForUpdatesViewModel
     private let updater: SPUUpdater

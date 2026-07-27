@@ -67,7 +67,7 @@ struct GridView: View {
                     // estimates were corrected while scrolling upward or
                     // after a thumbnail resize, visibly moving the viewport.
                     LazyVGrid(columns: columns, spacing: 10) {
-                        ForEach(Array(store.visibleGroups.enumerated()), id: \.offset) { _, group in
+                        ForEach(store.visibleGroups) { group in
                             Section {
                                 ForEach(group.indices, id: \.self) { index in
                                     if store.items.indices.contains(index) {

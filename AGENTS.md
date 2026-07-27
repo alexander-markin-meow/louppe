@@ -21,7 +21,8 @@ swift build --disable-keychain          # quick debug check; public dependencies
 
 `build_app.sh` bundles the binary + icon + Info.plist in `/private/tmp`, strips
 extended attributes, ad-hoc signs, verifies there, then copies the result to
-`dist/`. Staging outside the File Provider-managed workspace is required:
+`dist/`, where `Scripts/verify_release.sh` verifies the exact app and archive.
+Staging outside the File Provider-managed workspace is required:
 Finder metadata may otherwise reappear between signing and verification. Still
 run `xattr -cr` after copying into `/Applications`.
 
@@ -77,15 +78,19 @@ truth, created in `LouppeApp` and passed to every view.
 |---|---|
 | `Sources/Louppe/LouppeApp.swift` | `@main`, window scene, menu-bar commands |
 | `Sources/Louppe/SessionStore.swift` | Main-actor session state: ratings/cached counts, undo, navigation, selection, prepared filtering + cached sort/day groups, clean-up orchestration, persistence snapshots, recents |
-| `Sources/Louppe/SessionPersistence.swift` | Actor that serializes sidecar JSON encoding, reading, and atomic/fallback writes off-main |
+| `Sources/Louppe/PreparedSessionIndex.swift` | Pure item-ID/sort/filter/group/header/location maps projected by `SessionStore`; owns stable Grid group identity and performance signposts |
+| `Sources/Louppe/SelectionState.swift` | Pure stable-ID/index selection authority: range, edge, toggle, rubber-band, filter intersection, and generation remapping; projected by `SessionStore` |
+| `Sources/Louppe/SessionPersistence.swift` | Actor that serializes typed sidecar/backup outcomes, newest-valid reads, schema validation, and atomic writes off-main |
+| `Sources/Louppe/FileOperationJournal.swift` | Per-file durable Copy/Move/Trash/undo checkpoints, stable file identity, and launch recovery |
 | `Sources/Louppe/CleanUpWorker.swift` | Background Trash/restore file loops, progress throttling, pair rollback, O(n+k) restoration merge |
-| `Sources/Louppe/FolderScanner.swift` | Recursive folder scan, RAW+JPEG pairing, chronological sort |
+| `Sources/Louppe/FolderScanner.swift` | Recursive scan, deterministic volume-aware RAW+JPEG pairing, chronological sort |
 | `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding + AVFoundation first-frame generation, thumbnail memory+disk caches, prefetching |
 | `Sources/Louppe/VideoSupport.swift` | Native movie metadata loading, duration formatting |
 | `Sources/Louppe/VideoPlaybackController.swift` | One shared AVPlayer for Gallery/Grid playback |
 | `Sources/Louppe/MetadataExtractor.swift` | EXIF reading for capture dates + info panel |
 | `Sources/Louppe/ExportManager.swift` | Export dialog state machine: destination prompt, copy/move orchestration |
-| `Sources/Louppe/ExportWorker.swift` | Background export copy/move loops, collision suffixing, pair rollback for Move |
+| `Sources/Louppe/ExportWorker.swift` | Background copy/move loops, pair-wide collision planning and rollback |
+| `Sources/Louppe/ExportDestinationValidator.swift` | Export preflight: source-tree exclusion, destination permission and capacity |
 | `Sources/Louppe/Models.swift` | `PhotoItem`, `Rating`, `PhotoFilter`, sidecar codables |
 | `Sources/Louppe/Views/RootView.swift` | Phase switch (welcome/scanning/session), `Color.appBackground` |
 | `Sources/Louppe/Views/WelcomeView.swift` | Start screen + cancellable scanning progress |
@@ -124,6 +129,10 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   warning; moved photos leave the session, the move is not undoable, and the
   files stay intact at the destination. No other code path may move
   originals; nothing ever hard-deletes.
+- Copy, Move, Trash, and Trash undo must activate a
+  `FileOperationJournal` before their first filesystem change. Recovery must
+  verify stable file identity, never overwrite an existing path, never infer
+  ownership from a filename alone, and keep unresolved journals retryable.
 - The hotkey map lives in `SessionView.handleKey` and is documented in
   README's shortcut table — keep the two in sync when changing keys.
 - One background gray everywhere: `Color.appBackground`. Don't introduce
@@ -159,13 +168,20 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   filter facets and sorted indices rebuild after structural `items` changes.
   Any new code that inserts/removes/replaces photos must call
   `rebuildDerivedData()` before `applyFilter()`.
+- **Persistence failures are visible**: a folder sidecar save may fall back to
+  the current Application Support snapshot, but failure of both destinations
+  must keep the session open and show Retry Saving. Folder/session transitions
+  and Quit await a safe result asynchronously. Never restore silent `try?`
+  persistence or a main-thread semaphore.
 - **Clean Up has a three-phase boundary**: snapshot on `SessionStore`, file I/O
   in `CleanUpWorker`, apply on `SessionStore`. Do not put `trashItem`/`moveItem`
   loops back on the main actor. While `isCleaningUp`, keep item-index mutations
   blocked, folder switching disabled, and Quit refused so pair rollback and ⌘Z
-  remain exact. Export follows the same boundary (`ExportWorker`), and a Move
-  export raises `isMovingExport`, which blocks folder switching, rescan, undo,
-  and Clean Up and refuses Quit the same way.
+  remain exact. Export follows the same boundary (`ExportWorker`). The shared
+  `activeFileOperation` covers Clean Up, Copy, and Move; it blocks folder
+  switching, rescan, undo, update checks/installation, and Quit until the
+  worker completes or Copy cancels after rolling back its in-progress pair.
+  Do not add a second independent in-flight flag.
 - `RootView` owns the persistent window's phase-aware content layout through
   `WindowContentLayout`: Welcome/Scanning use `.fullSizeContentView`, while
   Ready removes it so photos cannot scroll behind the liquid-glass toolbar.
@@ -176,9 +192,11 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   cropping both hid parts of the photo and let portrait images overflow
   their tiles.
 - **Multi-selection model**: `selectedIndices` empty = "just the current
-  photo" (`effectiveSelection` handles both cases). Anything that mutates or
-  reorders `items` (open/re-scan, clean-up, undo) must clear the selection;
-  `applyFilter` intersects it with `visibleIndices`. The Grid-view rubber
+  photo" (`effectiveSelection` handles both cases). `SelectionState.itemIDs`
+  is the stable authority; `selectedIndices` is its published
+  current-generation UI projection. Structural changes must clear both through
+  `setSelectionIndices`, or explicitly snapshot/remap stable IDs as same-folder
+  rescan does. `applyFilter` removes hidden IDs from both. The Grid-view rubber
   band hit-tests tile frames collected via a `PreferenceKey`, so only
   *rendered* (on-screen) lazy-grid tiles can be caught by the rectangle —
   fine in practice, but don't "fix" it by de-lazifying the grid.
