@@ -172,10 +172,30 @@ struct GridView: View {
                     videoPlayback: store.videoPlayback
                 )
                 .allowsHitTesting(false)
+                .accessibilityHidden(true)
 
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(cellTapGesture(index: index))
+                    .mediaTileAccessibility(
+                        item: item,
+                        isCurrent: index == store.currentIndex,
+                        isSelected: store.selectedIndices.contains(index),
+                        showActionTitle: "Make Current",
+                        show: {
+                            store.setIndex(index)
+                        },
+                        open: {
+                            store.setIndex(index)
+                            store.viewMode = .gallery
+                        },
+                        rate: { rating in
+                            store.rate(rating, at: index)
+                        },
+                        toggleSelection: {
+                            store.toggleSelection(of: index)
+                        }
+                    )
 
                 if item.isVideo, item.videoIsPlayable {
                     Button {
@@ -208,6 +228,7 @@ struct GridView: View {
                 .truncationMode(.middle)
                 .contentShape(Rectangle())
                 .gesture(cellTapGesture(index: index))
+                .accessibilityHidden(true)
         }
         .id(item.id)
         .contentShape(Rectangle())

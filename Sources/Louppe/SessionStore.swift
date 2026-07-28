@@ -41,6 +41,7 @@ final class SessionStore: ObservableObject {
     @Published var showMetadataPanel = true
     @Published var showBrowser = true
     @Published var zoomMode: ZoomMode = .fit
+    let actualSizeViewport = ActualSizeViewport()
     @Published var gridThumbSize: CGFloat = 170
     /// Number of adaptive columns currently visible in the Grid view.
     /// GridView updates this from the actual available window width.
@@ -53,6 +54,9 @@ final class SessionStore: ObservableObject {
     /// Whether same-named RAW and JPEG files are reviewed and acted on as one
     /// photo item. The safe default keeps the existing RAW+JPEG behavior.
     @Published private(set) var rawJPEGPairingMode: RawJPEGPairingMode = .together
+    /// The first transition to separate review may read metadata from hidden
+    /// JPEG partners. The current session remains visible while this is true.
+    @Published private(set) var isChangingRawJPEGPairingMode = false
     /// The "Divide into groups" switch at the end of the sort popover. One
     /// global setting: off hides every divider whatever the sort key is.
     @Published var isGroupingEnabled = true {
@@ -141,7 +145,7 @@ final class SessionStore: ObservableObject {
     /// One undo step can hold several photo changes (e.g. "clear all"),
     /// so a single ⌘Z restores the whole batch.
     private struct RatingChange {
-        let itemID: String
+        let fileID: String
         let previousRating: Rating
         let previousRatedAt: Date?
     }
@@ -153,7 +157,7 @@ final class SessionStore: ObservableObject {
         let trashedFiles: [TrashedFile]
     }
     private enum UndoStep {
-        case ratings([RatingChange], previousItemID: String?)
+        case ratings([RatingChange], previousFileID: String?)
         case cleanUp(
             [RemovedPhoto],
             previousItemID: String?,
@@ -184,6 +188,10 @@ final class SessionStore: ObservableObject {
     }
     private var scanResumeIdentity: ScanResumeIdentity?
     private var ratingTally = (yes: 0, no: 0, undecided: 0)
+    private var mixedRatingCount = 0
+    /// Physical ids include hidden JPEG partners, so rating undo remains
+    /// stable across an in-memory pairing projection.
+    private var itemIndexByFileID: [String: Int] = [:]
 
     @Published private(set) var availableTypes: [String] = []
     @Published private(set) var availableMediaKinds: [MediaKind] = []
@@ -267,7 +275,8 @@ final class SessionStore: ObservableObject {
     var yesCount: Int { ratingTally.yes }
     var noCount: Int { ratingTally.no }
     var undecidedCount: Int { ratingTally.undecided }
-    var ratedCount: Int { ratingTally.yes + ratingTally.no }
+    var mixedCount: Int { mixedRatingCount }
+    var ratedCount: Int { ratingTally.yes + ratingTally.no + mixedRatingCount }
 
     /// Reset remains available when the date UI is in its non-default mode or
     /// retains hidden day exclusions, even if those choices currently show all
@@ -337,6 +346,21 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    private func restoreCurrentFile(
+        fileID: String?,
+        fallbackIndex: Int
+    ) {
+        guard !items.isEmpty else {
+            currentIndex = 0
+            return
+        }
+        if let fileID, let index = itemIndexByFileID[fileID] {
+            currentIndex = index
+        } else {
+            currentIndex = min(max(fallbackIndex, 0), items.count - 1)
+        }
+    }
+
     // MARK: - Filtering
 
     private func applyFilter() {
@@ -388,7 +412,21 @@ final class SessionStore: ObservableObject {
     }
 
     private func rebuildSortedIndices() {
+        rebuildFileItemIndex()
         preparedIndex.rebuildItems(items, sort: sort)
+    }
+
+    private func rebuildFileItemIndex() {
+        var indexByFileID: [String: Int] = [:]
+        indexByFileID.reserveCapacity(
+            items.reduce(0) { $0 + $1.individualFiles.count }
+        )
+        for (index, item) in items.enumerated() {
+            for file in item.individualFiles {
+                indexByFileID[file.id] = index
+            }
+        }
+        itemIndexByFileID = indexByFileID
     }
 
     private func rebuildVisibleGroups() {
@@ -411,6 +449,7 @@ final class SessionStore: ObservableObject {
     /// rare enough that a single complete rebuild is clearer and safer.
     private func rebuildDerivedData() {
         var tally = (yes: 0, no: 0, undecided: 0)
+        var mixed = 0
         var types: [String: Int] = [:]
         var mediaKinds: [MediaKind: Int] = [:]
         var cameras: [String: Int] = [:]
@@ -427,10 +466,18 @@ final class SessionStore: ObservableObject {
         var minimumDuration: Double?
         var maximumDuration: Double?
         for item in items {
-            switch item.rating {
-            case .yes: tally.yes += 1
-            case .no: tally.no += 1
-            case .undecided: tally.undecided += 1
+            // Keep the three public counts exhaustive: mixed pairs are
+            // unresolved and therefore included in `undecidedCount`.
+            switch item.ratingState {
+            case .yes:
+                tally.yes += 1
+            case .no:
+                tally.no += 1
+            case .undecided:
+                tally.undecided += 1
+            case .mixed:
+                tally.undecided += 1
+                mixed += 1
             }
             types[item.fileTypeLabel, default: 0] += 1
             mediaKinds[item.mediaKind, default: 0] += 1
@@ -460,6 +507,7 @@ final class SessionStore: ObservableObject {
             }
         }
         ratingTally = tally
+        mixedRatingCount = mixed
         typeCounts = types
         mediaKindCounts = mediaKinds
         cameraCounts = cameras
@@ -632,6 +680,8 @@ final class SessionStore: ObservableObject {
         preparedIndex.reset()
         publishPreparedVisibility()
         ratingTally = (0, 0, 0)
+        mixedRatingCount = 0
+        itemIndexByFileID = [:]
         availableTypes = []
         availableMediaKinds = []
         availableCameras = []
@@ -705,6 +755,9 @@ final class SessionStore: ObservableObject {
         videoPlayback.stop()
         let isSameFolder =
             sourceFolder?.standardizedFileURL == url.standardizedFileURL
+        if !isSameFolder {
+            actualSizeViewport.reset()
+        }
         let preservesCurrentFilter = isSameFolder && !items.isEmpty
         if preservesCurrentFilter {
             scanResumeIdentity = ScanResumeIdentity(
@@ -798,7 +851,7 @@ final class SessionStore: ObservableObject {
     }
 
     func setRawJPEGPairingMode(_ mode: RawJPEGPairingMode) {
-        guard mode != rawJPEGPairingMode else { return }
+        guard mode != rawJPEGPairingMode, !isFileOperationRunning else { return }
         let previousMode = rawJPEGPairingMode
         rawJPEGPairingMode = mode
         guard let folder = sourceFolder, case .ready = phase, !items.isEmpty else { return }
@@ -810,24 +863,80 @@ final class SessionStore: ObservableObject {
         updatedFilter.excludedTypes = []
         filter = updatedFilter
         flushPendingFilter()
-        isSessionTransitioning = true
-        saveSession()
-        let requestedMode = mode
-        let saveTask = pendingPersistenceTask
-        Task { @MainActor [weak self] in
-            let result = await saveTask?.value
-            guard let self else { return }
-            self.isSessionTransitioning = false
-            if result?.canDiscardInMemoryState == false {
-                self.rawJPEGPairingMode = previousMode
-                return
+
+        let sourceItems = items
+        let currentFileID = items.indices.contains(currentIndex)
+            ? items[currentIndex].primaryFile.id
+            : nil
+        let selectedFileIDs = Set(
+            selectedIndices.flatMap { index in
+                items.indices.contains(index)
+                    ? items[index].individualFiles.map(\.id)
+                    : []
             }
-            guard
-                  self.rawJPEGPairingMode == requestedMode,
-                  self.sourceFolder?.standardizedFileURL == folder.standardizedFileURL,
-                  case .ready = self.phase else { return }
-            self.beginOpeningFolder(folder)
+        )
+        isSessionTransitioning = true
+        isChangingRawJPEGPairingMode = true
+        let requestedMode = mode
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let projection = try FolderScanner.projectPairingMode(
+                    requestedMode,
+                    from: sourceItems,
+                    root: folder
+                )
+                await self?.finishPairingModeChange(
+                    projection,
+                    requestedMode: requestedMode,
+                    folder: folder,
+                    currentFileID: currentFileID,
+                    selectedFileIDs: selectedFileIDs
+                )
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.rawJPEGPairingMode = previousMode
+                    self.isChangingRawJPEGPairingMode = false
+                    self.isSessionTransitioning = false
+                }
+            }
         }
+    }
+
+    private func finishPairingModeChange(
+        _ projection: FolderScanner.PairingProjection,
+        requestedMode: RawJPEGPairingMode,
+        folder: URL,
+        currentFileID: String?,
+        selectedFileIDs: Set<String>
+    ) {
+        guard rawJPEGPairingMode == requestedMode,
+              sourceFolder?.standardizedFileURL == folder.standardizedFileURL,
+              case .ready = phase else {
+            isChangingRawJPEGPairingMode = false
+            isSessionTransitioning = false
+            return
+        }
+
+        setSelectionIndices([])
+        items = projection.items
+        rebuildDerivedData()
+        let currentItemID = currentFileID.flatMap {
+            projection.itemIDByFileID[$0]
+        }
+        restoreCurrentItem(itemID: currentItemID, fallbackIndex: currentIndex)
+        if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
+        let selectedItemIDs = Set(
+            selectedFileIDs.compactMap { projection.itemIDByFileID[$0] }
+        )
+        restoreSelection(
+            itemIDs: selectedItemIDs,
+            visibleOnly: true
+        )
+        prefetchAroundCurrent()
+        isChangingRawJPEGPairingMode = false
+        isSessionTransitioning = false
+        saveSession()
     }
 
     /// Stops the active folder walk and returns immediately to the welcome
@@ -875,9 +984,16 @@ final class SessionStore: ObservableObject {
                 }
             }
             for i in loaded.indices {
-                if let (rating, ratedAt) = ratingByFilename[loaded[i].id] {
-                    loaded[i].rating = rating
-                    loaded[i].ratedAt = ratedAt
+                for file in loaded[i].individualFiles {
+                    if let (rating, ratedAt) = ratingByFilename[file.id] {
+                        loaded[i].restoreRating(
+                            PhotoFileRatingSnapshot(
+                                fileID: file.id,
+                                rating: rating,
+                                ratedAt: ratedAt
+                            )
+                        )
+                    }
                 }
             }
         }
@@ -1082,6 +1198,22 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// An explicit rating action for VoiceOver media tiles. Unlike the F/D
+    /// review flow this does not advance afterward, because the accessible
+    /// action menu belongs to one stable tile. If that tile is part of a
+    /// multi-selection, the action follows Grid click behavior and rates the
+    /// whole selection in one undoable step.
+    func rate(_ rating: Rating, at index: Int) {
+        guard !isFileOperationRunning else { return }
+        guard items.indices.contains(index) else { return }
+        if selectedIndices.count > 1, selectedIndices.contains(index) {
+            applyRating(rating, to: selectedIndices.sorted())
+        } else {
+            setIndex(index)
+            setRating(rating, atIndex: index, recordUndo: true)
+        }
+    }
+
     /// Every element written through the `items` property wrapper copies the
     /// whole published array (Combine's `@Published` has no in-place accessor)
     /// and fires one objectWillChange. Looping `items[i].rating = …` directly
@@ -1098,20 +1230,26 @@ final class SessionStore: ObservableObject {
     private func applyRating(_ rating: Rating, to targets: [Int]) {
         let valid = targets.filter { items.indices.contains($0) }
         guard !valid.isEmpty else { return }
-        let changes = valid.map {
-            RatingChange(
-                itemID: items[$0].id,
-                previousRating: items[$0].rating,
-                previousRatedAt: items[$0].ratedAt
-            )
+        let changes = valid.flatMap { index in
+            items[index].ratingSnapshots.map {
+                RatingChange(
+                    fileID: $0.fileID,
+                    previousRating: $0.rating,
+                    previousRatedAt: $0.ratedAt
+                )
+            }
         }
-        pushUndo(.ratings(changes, previousItemID: currentItemID))
+        pushUndo(.ratings(changes, previousFileID: currentItemID))
         let now = Date()
         updateItems { updated in
             for index in valid {
-                transitionRatingCount(from: updated[index].rating, to: rating)
+                let previousState = updated[index].ratingState
                 updated[index].rating = rating
                 updated[index].ratedAt = now
+                transitionRatingCount(
+                    from: previousState,
+                    to: updated[index].ratingState
+                )
             }
         }
         scheduleSave()
@@ -1120,17 +1258,23 @@ final class SessionStore: ObservableObject {
     private func setRating(_ rating: Rating, atIndex index: Int, recordUndo: Bool) {
         guard items.indices.contains(index) else { return }
         if recordUndo {
-            let change = RatingChange(
-                itemID: items[index].id,
-                previousRating: items[index].rating,
-                previousRatedAt: items[index].ratedAt
-            )
-            pushUndo(.ratings([change], previousItemID: currentItemID))
+            let changes = items[index].ratingSnapshots.map {
+                RatingChange(
+                    fileID: $0.fileID,
+                    previousRating: $0.rating,
+                    previousRatedAt: $0.ratedAt
+                )
+            }
+            pushUndo(.ratings(changes, previousFileID: currentItemID))
         }
         updateItems { updated in
-            transitionRatingCount(from: updated[index].rating, to: rating)
+            let previousState = updated[index].ratingState
             updated[index].rating = rating
             updated[index].ratedAt = Date()
+            transitionRatingCount(
+                from: previousState,
+                to: updated[index].ratingState
+            )
         }
         scheduleSave()
     }
@@ -1154,16 +1298,19 @@ final class SessionStore: ObservableObject {
     func clearAllRatings() {
         guard !isFileOperationRunning else { return }
         isClearAllRatingsConfirmationPresented = false
-        let changes = items.indices.compactMap { i -> RatingChange? in
-            guard items[i].rating != .undecided else { return nil }
-            return RatingChange(
-                itemID: items[i].id,
-                previousRating: items[i].rating,
-                previousRatedAt: items[i].ratedAt
-            )
+        let changes = items.flatMap { item -> [RatingChange] in
+            guard item.hasAnyRating else { return [] }
+            return item.ratingSnapshots.compactMap {
+                guard $0.rating != .undecided else { return nil }
+                return RatingChange(
+                    fileID: $0.fileID,
+                    previousRating: $0.rating,
+                    previousRatedAt: $0.ratedAt
+                )
+            }
         }
         guard !changes.isEmpty else { return }
-        pushUndo(.ratings(changes, previousItemID: currentItemID))
+        pushUndo(.ratings(changes, previousFileID: currentItemID))
         updateItems { updated in
             for i in updated.indices {
                 updated[i].rating = .undecided
@@ -1171,20 +1318,30 @@ final class SessionStore: ObservableObject {
             }
         }
         ratingTally = (0, 0, items.count)
+        mixedRatingCount = 0
         scheduleSave()
     }
 
-    private func transitionRatingCount(from old: Rating, to new: Rating) {
+    private func transitionRatingCount(
+        from old: PhotoItemRatingState,
+        to new: PhotoItemRatingState
+    ) {
         guard old != new else { return }
         switch old {
         case .yes: ratingTally.yes -= 1
         case .no: ratingTally.no -= 1
         case .undecided: ratingTally.undecided -= 1
+        case .mixed:
+            ratingTally.undecided -= 1
+            mixedRatingCount -= 1
         }
         switch new {
         case .yes: ratingTally.yes += 1
         case .no: ratingTally.no += 1
         case .undecided: ratingTally.undecided += 1
+        case .mixed:
+            ratingTally.undecided += 1
+            mixedRatingCount += 1
         }
     }
 
@@ -1204,21 +1361,31 @@ final class SessionStore: ObservableObject {
         // longer mean what the user built it for.
         setSelectionIndices([])
         switch step {
-        case .ratings(let changes, let previousItemID):
+        case .ratings(let changes, let previousFileID):
             updateItems { updated in
+                var previousStates: [Int: PhotoItemRatingState] = [:]
                 for change in changes {
-                    guard let index = preparedIndex.itemIndex(forID: change.itemID),
+                    guard let index = itemIndexByFileID[change.fileID],
                           updated.indices.contains(index) else { continue }
-                    transitionRatingCount(
-                        from: updated[index].rating,
-                        to: change.previousRating
+                    previousStates[index] = previousStates[index]
+                        ?? updated[index].ratingState
+                    updated[index].restoreRating(
+                        PhotoFileRatingSnapshot(
+                            fileID: change.fileID,
+                            rating: change.previousRating,
+                            ratedAt: change.previousRatedAt
+                        )
                     )
-                    updated[index].rating = change.previousRating
-                    updated[index].ratedAt = change.previousRatedAt
+                }
+                for (index, previousState) in previousStates {
+                    transitionRatingCount(
+                        from: previousState,
+                        to: updated[index].ratingState
+                    )
                 }
             }
-            restoreCurrentItem(
-                itemID: previousItemID,
+            restoreCurrentFile(
+                fileID: previousFileID,
                 fallbackIndex: currentIndex
             )
             scheduleSave()
@@ -1290,7 +1457,9 @@ final class SessionStore: ObservableObject {
         case .trashNo:
             return cleanUpCandidates.filter { items[$0].rating == .no }
         case .keepOnlyYes:
-            return cleanUpCandidates.filter { items[$0].rating != .yes }
+            return cleanUpCandidates.filter {
+                !items[$0].hasMixedRatings && items[$0].rating != .yes
+            }
         }
     }
 
@@ -1304,7 +1473,9 @@ final class SessionStore: ObservableObject {
         case .trashNo:
             return cleanUpCandidatesContain { items[$0].rating == .no }
         case .keepOnlyYes:
-            return cleanUpCandidatesContain { items[$0].rating != .yes }
+            return cleanUpCandidatesContain {
+                !items[$0].hasMixedRatings && items[$0].rating != .yes
+            }
         }
     }
 
@@ -1681,6 +1852,11 @@ final class SessionStore: ObservableObject {
     }
 
     func toggleZoom(_ mode: ZoomMode) {
+        if mode == .actual {
+            // S defines one inspection run. Enter centered; pressing S again
+            // returns to Fit and clears the position carried across photos.
+            actualSizeViewport.reset()
+        }
         zoomMode = (zoomMode == mode) ? .fit : mode
     }
 
@@ -1707,6 +1883,7 @@ final class SessionStore: ObservableObject {
         // warm-up. The visible image itself still starts immediately.
         let work = DispatchWorkItem {
             ImagePipeline.shared.prefetchFullImages(items: photos)
+            HighResolutionImagePipeline.shared.prefetchSources(items: photos)
         }
         prefetchDebounce = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
@@ -1870,16 +2047,18 @@ final class SessionStore: ObservableObject {
     private func makeSaveRequest() -> SaveRequest? {
         guard let folder = sourceFolder, case .ready = phase else { return nil }
         let session = SessionFile(
-            version: 1,
+            version: SessionConstants.currentSchemaVersion,
             sourcePath: folder.path,
             scannedAt: Date(),
-            entries: items.map { item in
-                SessionEntry(
-                    filename: item.id,
-                    pairedFilename: item.pairedURL?.lastPathComponent,
-                    rating: item.rating.rawValue,
-                    ratedAt: item.ratedAt
-                )
+            entries: items.flatMap { item in
+                item.individualFiles.map { file in
+                    SessionEntry(
+                        filename: file.id,
+                        pairedFilename: nil,
+                        rating: file.rating.rawValue,
+                        ratedAt: file.ratedAt
+                    )
+                }
             }
         )
         saveSequence &+= 1
@@ -1926,6 +2105,8 @@ final class SessionStore: ObservableObject {
 
     private func finishClosingSession() {
         videoPlayback.stop()
+        zoomMode = .fit
+        actualSizeViewport.reset()
         scanTask?.cancel()
         scanTask = nil
         scanGeneration &+= 1

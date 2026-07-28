@@ -18,6 +18,8 @@ swiftc \
     Sources/Louppe/MetadataExtractor.swift \
     Sources/Louppe/VideoSupport.swift \
     Sources/Louppe/ImagePipeline.swift \
+    Sources/Louppe/HighResolutionImagePipeline.swift \
+    Sources/Louppe/ZoomViewport.swift \
     Sources/Louppe/VideoPlaybackController.swift \
     Sources/Louppe/FileOperationJournal.swift \
     Sources/Louppe/CleanUpWorker.swift \

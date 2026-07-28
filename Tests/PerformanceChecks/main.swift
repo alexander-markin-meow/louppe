@@ -24,6 +24,7 @@ struct PerformanceChecks {
         try videoNeverBecomesThePairForSameNamedRaw()
         try rawAndTiffStayIndependent()
         try rawJPEGPairingCanBeDisabled()
+        try rawJPEGProjectionCachesMetadataAndPreservesRatings()
         try imageCacheKeyDoesNotTouchFilesystemAfterScan()
         try cleanUpScopeResolvesExpectedCandidates()
         try linearRestoreMergePreservesOrderAndOmitsLostPhoto()
@@ -56,15 +57,16 @@ struct PerformanceChecks {
         try visibleLocationMapTracksDerivedState()
         try ratingUndoFollowsStableIdentityAfterReorder()
         try await rescanPreservesCurrentPhotoAndSelectionByID()
+        try await pairingToggleStaysReadyAndPersistsIndividualRatings()
         try clearAllRatingsPublishesOnceForLargeSessions()
         try batchRatingUndoRestoresEveryRating()
         try exportMoveRemovalUpdatesSessionState()
         if ProcessInfo.processInfo.environment["LOUPPE_SKIP_REAL_TRASH"] == "1" {
-            print("Performance checks passed (55/57; 2 real Trash checks explicitly skipped)")
+            print("Performance checks passed (57/59; 2 real Trash checks explicitly skipped)")
         } else {
             try cleanUpPairRoundTripsThroughTrash()
             try cleanUpPairFailureRollsBackFirstFile()
-            print("Performance checks passed (57/57)")
+            print("Performance checks passed (59/59)")
         }
     }
 
@@ -543,6 +545,83 @@ struct PerformanceChecks {
         try expect(
             Set(separate.map(\.fileTypeLabel)) == ["RAW", "JPEG"],
             "separate pairing mode should expose independent file types"
+        )
+    }
+
+    private static func rawJPEGProjectionCachesMetadataAndPreservesRatings() throws {
+        let root = URL(fileURLWithPath: "/tmp/LouppePairingProjection", isDirectory: true)
+        let rawURL = root.appendingPathComponent("SHOT.NEF")
+        let jpegURL = root.appendingPathComponent("SHOT.JPG")
+
+        var raw = makeItem(id: "SHOT.NEF", primaryURL: rawURL)
+        raw.rating = .yes
+        var jpeg = makeItem(id: "SHOT.JPG", primaryURL: jpegURL)
+        jpeg.rating = .no
+        let grouped = try FolderScanner.projectPairingMode(
+            .together,
+            from: [raw, jpeg],
+            root: root
+        )
+        try expect(grouped.items.count == 1, "in-memory projection should form one RAW+JPEG item")
+        try expect(
+            grouped.items[0].hasMixedRatings && grouped.items[0].rating == .undecided,
+            "conflicting file ratings should become Mixed rather than choosing one"
+        )
+        let groupedRatings = Dictionary(
+            uniqueKeysWithValues: grouped.items[0].ratingSnapshots.map {
+                ($0.fileID, $0.rating)
+            }
+        )
+        try expect(
+            groupedRatings == ["SHOT.NEF": .yes, "SHOT.JPG": .no],
+            "grouping must retain both physical-file ratings"
+        )
+
+        let separated = try FolderScanner.projectPairingMode(
+            .separate,
+            from: grouped.items,
+            root: root
+        )
+        let separatedRatings = Dictionary(
+            uniqueKeysWithValues: separated.items.map { ($0.id, $0.rating) }
+        )
+        try expect(
+            separatedRatings == ["SHOT.NEF": .yes, "SHOT.JPG": .no],
+            "separating a Mixed pair should restore its exact individual ratings"
+        )
+
+        let lightweightPair = PhotoItem(
+            id: "SHOT.NEF",
+            primaryURL: rawURL,
+            pairedURL: jpegURL,
+            captureDate: nil,
+            cameraModel: nil,
+            lensModel: nil,
+            fileSize: 10,
+            pairedFileSize: 5
+        )
+        let firstSplit = try FolderScanner.projectPairingMode(
+            .separate,
+            from: [lightweightPair],
+            root: root
+        )
+        try expect(
+            firstSplit.enrichedFileCount == 1,
+            "the first split should enrich only the lightweight JPEG partner"
+        )
+        let regrouped = try FolderScanner.projectPairingMode(
+            .together,
+            from: firstSplit.items,
+            root: root
+        )
+        let secondSplit = try FolderScanner.projectPairingMode(
+            .separate,
+            from: regrouped.items,
+            root: root
+        )
+        try expect(
+            secondSplit.enrichedFileCount == 0,
+            "later toggles should reuse cached JPEG metadata"
         )
     }
 
@@ -1693,6 +1772,124 @@ struct PerformanceChecks {
     }
 
     @MainActor
+    private static func pairingToggleStaysReadyAndPersistsIndividualRatings() async throws {
+        let folder = try disposableFolder(named: "PairingRatings")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fixtureURL = URL(fileURLWithPath: "AppIcon/AppIcon.iconset/icon_16x16.png")
+        let fixture = try Data(contentsOf: fixtureURL)
+        try fixture.write(to: folder.appendingPathComponent("SHOT.NEF"))
+        try fixture.write(to: folder.appendingPathComponent("SHOT.JPG"))
+        let legacySession = SessionFile(
+            version: 1,
+            sourcePath: folder.path,
+            scannedAt: Date(timeIntervalSince1970: 1),
+            entries: [
+                SessionEntry(
+                    filename: "SHOT.NEF",
+                    pairedFilename: "SHOT.JPG",
+                    rating: Rating.yes.rawValue,
+                    ratedAt: Date(timeIntervalSince1970: 1)
+                )
+            ]
+        )
+        try writeSessionFixture(
+            legacySession,
+            to: folder.appendingPathComponent(SessionConstants.sidecarName)
+        )
+
+        let store = SessionStore()
+        store.openFolder(folder)
+        try await waitForReadySession(store, expectedItems: 1)
+        try expect(
+            store.items[0].ratingSnapshots.allSatisfy { $0.rating == .yes },
+            "schema 1 paired ratings should migrate onto both physical files"
+        )
+
+        store.setRawJPEGPairingMode(.separate)
+        if case .ready = store.phase {
+            // Expected: the existing session stays visible during enrichment.
+        } else {
+            throw CheckFailure("pairing toggle must not return to the scanning screen")
+        }
+        try expect(
+            store.isChangingRawJPEGPairingMode,
+            "first split should expose a non-blocking preparation state"
+        )
+        try await waitForPairingModeChange(store, expectedItems: 2)
+        try expect(
+            store.items.allSatisfy { $0.rating == .yes },
+            "splitting a consistently rated pair should copy the decision to both files"
+        )
+
+        guard let jpegIndex = store.items.firstIndex(where: { $0.id == "SHOT.JPG" }) else {
+            throw CheckFailure("separate projection should contain the JPEG")
+        }
+        store.toggleRating(at: jpegIndex)
+        try expect(
+            store.items[jpegIndex].rating == .no,
+            "fixture should create a conflicting JPEG rating"
+        )
+
+        store.setRawJPEGPairingMode(.together)
+        try await waitForPairingModeChange(store, expectedItems: 1)
+        try expect(
+            store.items[0].hasMixedRatings,
+            "different RAW/JPEG decisions should display as Mixed"
+        )
+        store.cleanUpScope = .all
+        try expect(
+            !store.hasCleanUpTargets(for: .trashNo)
+                && !store.hasCleanUpTargets(for: .keepOnlyYes),
+            "rating-based Clean Up should protect an unresolved Mixed pair"
+        )
+
+        store.toggleRating(at: 0)
+        try expect(
+            store.items[0].ratingSnapshots.allSatisfy { $0.rating == .yes },
+            "rating a Mixed pair should apply the new decision to both files"
+        )
+        store.undo()
+        try expect(
+            store.items[0].hasMixedRatings,
+            "undo should restore both sides of the previous Mixed rating"
+        )
+
+        _ = await store.saveSessionForTermination()
+        let loaded = await SessionPersistence().read(for: folder)
+        let savedRatings = Dictionary(
+            uniqueKeysWithValues: (loaded.session?.entries ?? []).map {
+                ($0.filename, Rating(rawValue: $0.rating) ?? .undecided)
+            }
+        )
+        try expect(
+            loaded.session?.version == SessionConstants.currentSchemaVersion,
+            "file-level ratings should be saved with sidecar schema 2"
+        )
+        try expect(
+            savedRatings["SHOT.NEF"] == .yes && savedRatings["SHOT.JPG"] == .no,
+            "schema 2 should persist both conflicting ratings independently"
+        )
+
+        let reopened = SessionStore()
+        reopened.openFolder(folder)
+        try await waitForReadySession(reopened, expectedItems: 1)
+        try expect(
+            reopened.items[0].hasMixedRatings,
+            "reopening schema 2 should restore a Mixed pair without losing either rating"
+        )
+        reopened.setRawJPEGPairingMode(.separate)
+        try await waitForPairingModeChange(reopened, expectedItems: 2)
+        let restoredRatings = Dictionary(
+            uniqueKeysWithValues: reopened.items.map { ($0.id, $0.rating) }
+        )
+        try expect(
+            restoredRatings == ["SHOT.NEF": .yes, "SHOT.JPG": .no],
+            "unpairing should restore the exact pre-grouping ratings"
+        )
+        _ = await reopened.saveSessionForTermination()
+    }
+
+    @MainActor
     private static func waitForReadySession(
         _ store: SessionStore,
         expectedItems: Int
@@ -1705,6 +1902,24 @@ struct PerformanceChecks {
         }
         throw CheckFailure(
             "session did not finish scanning \(expectedItems) items"
+        )
+    }
+
+    @MainActor
+    private static func waitForPairingModeChange(
+        _ store: SessionStore,
+        expectedItems: Int
+    ) async throws {
+        for _ in 0..<200 {
+            if !store.isChangingRawJPEGPairingMode,
+               case .ready = store.phase,
+               store.items.count == expectedItems {
+                return
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        throw CheckFailure(
+            "pairing mode did not finish projecting \(expectedItems) items"
         )
     }
 

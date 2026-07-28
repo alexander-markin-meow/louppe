@@ -140,6 +140,9 @@ struct SessionView: View {
             text += " (of \(store.items.count) total)"
         }
         text += "  ·  ✓ \(store.yesCount)  ✗ \(store.noCount)  · \(store.undecidedCount) left"
+        if store.mixedCount > 0 {
+            text += "  ·  \(store.mixedCount) mixed"
+        }
         if store.selectedIndices.count > 1 {
             text += "  ·  \(store.selectedIndices.count) selected"
         }
@@ -152,11 +155,23 @@ struct SessionView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-            // Photo-decode spinner. Always present (just invisible when idle)
-            // so the status text doesn't shift when it appears.
+            // Background-work spinner. Always present (just invisible when
+            // idle) so the status text doesn't shift when it appears.
             ProgressView()
                 .controlSize(.small)
-                .opacity(store.fullImageLoads > 0 ? 1 : 0)
+                .opacity(
+                    store.fullImageLoads > 0
+                        || store.isChangingRawJPEGPairingMode ? 1 : 0
+                )
+                .accessibilityLabel(
+                    store.isChangingRawJPEGPairingMode
+                        ? "Preparing separate JPEG metadata"
+                        : "Loading photo preview"
+                )
+                .accessibilityHidden(
+                    store.fullImageLoads == 0
+                        && !store.isChangingRawJPEGPairingMode
+                )
         }
         .help("Review progress and rating totals")
     }
@@ -236,6 +251,8 @@ struct SessionView: View {
             .popover(isPresented: $store.isFilterPresented, arrowEdge: .bottom) {
                 FilterView(store: store)
             }
+            .accessibilityLabel("Filter Media")
+            .accessibilityValue(store.filter.isActive ? "Active" : "Not active")
             .help("Filter media by date, type, duration, subfolder, camera, or lens")
 
             Button {
@@ -246,11 +263,16 @@ struct SessionView: View {
             .popover(isPresented: $store.isSortPresented, arrowEdge: .bottom) {
                 SortView(store: store)
             }
+            .accessibilityLabel("Sort Media")
             .help("Sort media by date, name, type, duration, or metadata")
 
             Picker("View", selection: $store.viewMode) {
-                Image(systemName: "photo").tag(ViewMode.gallery)
-                Image(systemName: "square.grid.3x3").tag(ViewMode.grid)
+                Image(systemName: "photo")
+                    .accessibilityLabel("Gallery")
+                    .tag(ViewMode.gallery)
+                Image(systemName: "square.grid.3x3")
+                    .accessibilityLabel("Grid")
+                    .tag(ViewMode.grid)
             }
             .pickerStyle(.segmented)
             .help("Switch between Gallery and Grid views (Tab or G)")
@@ -275,6 +297,7 @@ struct SessionView: View {
                 Image(systemName: "arrow.uturn.backward")
             }
             .disabled(store.isFileOperationRunning || !store.canUndo)
+            .accessibilityLabel("Undo")
             .help("Undo the last rating or clean-up (Z or ⌘Z)")
             Button {
                 store.requestClearAllRatings()
@@ -282,6 +305,7 @@ struct SessionView: View {
                 Image(systemName: "eraser")
             }
             .disabled(store.isFileOperationRunning || store.ratedCount == 0)
+            .accessibilityLabel("Clear All Ratings")
             .help("Clear all ratings (R)")
         }
 
@@ -298,6 +322,7 @@ struct SessionView: View {
                 } label: {
                     Image(systemName: store.showBrowser ? "sidebar.squares.left" : "sidebar.left")
                 }
+                .accessibilityLabel(store.showBrowser ? "Hide Browser" : "Show Browser")
                 .help("Show or hide the Browser in the Gallery view (Q)")
             }
 
@@ -306,6 +331,9 @@ struct SessionView: View {
             } label: {
                 Image(systemName: "info.circle")
             }
+            .accessibilityLabel(
+                store.showMetadataPanel ? "Hide Media Information" : "Show Media Information"
+            )
             .help("Show or hide media information (W)")
         }
 
@@ -332,6 +360,7 @@ struct SessionView: View {
             .disabled(store.isFileOperationRunning)
             .menuIndicator(.hidden)
             .tint(Color.primary)
+            .accessibilityLabel("Clean Up")
             .help("Choose items to move to the Trash")
         }
 
@@ -354,6 +383,7 @@ struct SessionView: View {
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .tint(Color.louppeAccent)
+            .accessibilityLabel("Export Media")
             .help("Export media by rating — copy or move it to a folder (E or ⌘E)")
         }
     }

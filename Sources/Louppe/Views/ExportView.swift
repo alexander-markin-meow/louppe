@@ -61,6 +61,13 @@ struct ExportView: View {
                     .multilineTextAlignment(.center)
             }
 
+            if store.mixedCount > 0 {
+                Text("\(store.mixedCount) RAW+JPEG pair\(store.mixedCount == 1 ? " has" : "s have") different file ratings and \(store.mixedCount == 1 ? "is" : "are") treated as undecided until rated together.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
             if store.undecidedCount > 0 && !selectedRatings.contains(.undecided) {
                 Text("\(store.undecidedCount) item\(store.undecidedCount == 1 ? "" : "s") still undecided — they won't be exported.")
                     .font(.caption)

@@ -140,6 +140,20 @@ private struct BrowserRow: View {
                     // ⇧-click: range · ⌘-click: add/remove · click: jump.
                     store.handleThumbnailClick(at: index, plainClick: onPlainClick)
                 }
+                .mediaTileAccessibility(
+                    item: item,
+                    isCurrent: item.id == store.currentItem?.id,
+                    isSelected: store.selectedIndices.contains(index),
+                    showActionTitle: "Show in Gallery",
+                    show: onPlainClick,
+                    open: onPlainClick,
+                    rate: { rating in
+                        store.rate(rating, at: index)
+                    },
+                    toggleSelection: {
+                        store.toggleSelection(of: index)
+                    }
+                )
             }
             // Keep the String identity as the follow-scroll target.
             .id(item.id)

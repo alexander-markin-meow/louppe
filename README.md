@@ -46,7 +46,7 @@ missing or a file no longer matches, it leaves everything untouched and offers
 | Space | Play/pause the current video; on a photo, move to the next item without rating |
 | F | Mark Yes (all selected photos), jump to next undecided |
 | D | Mark No (all selected photos), jump to next undecided |
-| S | Toggle 100% zoom / fit |
+| S | Toggle true 100% zoom / fit; the panned position follows navigation until S resets it |
 | A | Toggle phone-sized preview / fit |
 | Tab / G | Switch Gallery ↔ Grid view |
 | E or ⌘E | Export |
@@ -87,8 +87,14 @@ checkbox lists; the subfolder list includes a **None** entry for files lying
 directly in the source folder. The **Keep RAW + JPEG together** switch in the
 File types section is enabled by default; turn it off when you want same-named
 RAW and JPEG files to be reviewed, rated, filtered, exported, or cleaned up as
-separate items. RAW+TIFF files are always separate. Different sections combine,
-so a date, camera, and ISO range can all be active at once.
+separate items. The first split reads metadata only from the JPEG partners that
+were hidden by pairing; it does not rescan the source folder, and later toggles
+reuse that metadata instantly. Ratings belong to the individual files. If a
+separately rated RAW and JPEG disagree when paired again, Louppe shows the pair
+as **Mixed** and treats it as undecided until you rate the pair together;
+splitting it again restores both original ratings. Rating-based Clean Up leaves
+Mixed pairs untouched. RAW+TIFF files are always separate. Different sections
+combine, so a date, camera, and ISO range can all be active at once.
 
 Mixed folders add a **Media** section for Photos/Videos and a **Video duration**
 range accepting `m:ss` or `h:mm:ss`. Activating a duration range shows matching
@@ -214,6 +220,8 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `CleanUpWorker.swift` — background Trash/restore operations and linear merge
 - `FolderScanner.swift` — recursive folder scan, RAW+JPEG pairing, sorting
 - `ImagePipeline.swift` — image decoding and video first frames, thumbnail caches, prefetching
+- `HighResolutionImagePipeline.swift` — bounded source-pixel tiles for true 100% viewing
+- `ZoomViewport.swift` — backing-scale and persistent pan-position geometry
 - `VideoSupport.swift` — native video metadata and duration formatting
 - `VideoPlaybackController.swift` — shared native player lifecycle
 - `MetadataExtractor.swift` — EXIF extraction (dates, exposure settings, info panel fields)
@@ -222,7 +230,8 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `ExportDestinationValidator.swift` — source-tree, permission, and free-space export preflight
 - `Models.swift` — the photo item and session file formats
 - `Views/` — welcome screen, session toolbar + hotkeys, Gallery view, Browser,
-  Grid view, info panel, thumbnails, export dialog
+  Grid view, persistent actual-size viewport, info panel, thumbnails,
+  reusable media-tile accessibility, export dialog
 
 See `AGENTS.md` for a full architecture map, build/verify instructions, and
 project invariants (useful for both humans and AI assistants).

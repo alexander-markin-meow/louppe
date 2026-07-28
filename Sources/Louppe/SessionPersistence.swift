@@ -224,7 +224,7 @@ actor SessionPersistence {
             return .problem(.corrupt(location))
         }
 
-        guard session.version == 1 else {
+        guard SessionConstants.supportedSchemaVersions.contains(session.version) else {
             return .problem(.unsupportedVersion(location, session.version))
         }
         let recordedFolder = URL(fileURLWithPath: session.sourcePath)

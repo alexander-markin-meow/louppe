@@ -83,15 +83,17 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/SessionPersistence.swift` | Actor that serializes typed sidecar/backup outcomes, newest-valid reads, schema validation, and atomic writes off-main |
 | `Sources/Louppe/FileOperationJournal.swift` | Per-file durable Copy/Move/Trash/undo checkpoints, stable file identity, and launch recovery |
 | `Sources/Louppe/CleanUpWorker.swift` | Background Trash/restore file loops, progress throttling, pair rollback, O(n+k) restoration merge |
-| `Sources/Louppe/FolderScanner.swift` | Recursive scan, deterministic volume-aware RAW+JPEG pairing, chronological sort |
+| `Sources/Louppe/FolderScanner.swift` | Recursive scan, deterministic volume-aware RAW+JPEG pairing, lazy partner-JPEG metadata enrichment, in-memory pairing projection, chronological sort |
 | `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding + AVFoundation first-frame generation, thumbnail memory+disk caches, prefetching |
+| `Sources/Louppe/HighResolutionImagePipeline.swift` | Lazy Core Image source-region rendering plus the bounded 100% tile cache |
+| `Sources/Louppe/ZoomViewport.swift` | Pure backing-scale/normalized-position geometry and persistent non-published 100% viewport state |
 | `Sources/Louppe/VideoSupport.swift` | Native movie metadata loading, duration formatting |
 | `Sources/Louppe/VideoPlaybackController.swift` | One shared AVPlayer for Gallery/Grid playback |
 | `Sources/Louppe/MetadataExtractor.swift` | EXIF reading for capture dates + info panel |
 | `Sources/Louppe/ExportManager.swift` | Export dialog state machine: destination prompt, copy/move orchestration |
 | `Sources/Louppe/ExportWorker.swift` | Background copy/move loops, pair-wide collision planning and rollback |
 | `Sources/Louppe/ExportDestinationValidator.swift` | Export preflight: source-tree exclusion, destination permission and capacity |
-| `Sources/Louppe/Models.swift` | `PhotoItem`, `Rating`, `PhotoFilter`, sidecar codables |
+| `Sources/Louppe/Models.swift` | Physical `PhotoFile` records, projected `PhotoItem` groups, ratings/filter models, sidecar codables |
 | `Sources/Louppe/Views/RootView.swift` | Phase switch (welcome/scanning/session), `Color.appBackground` |
 | `Sources/Louppe/Views/WelcomeView.swift` | Start screen + cancellable scanning progress |
 | `Sources/Louppe/Views/SessionView.swift` | Toolbar (incl. sort menu), export sheet, **all single-key hotkeys** (`handleKey`) |
@@ -101,7 +103,9 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Views/GridView.swift` | Grid view, day-grouped rows, click-to-rate, rubber-band selection |
 | `Sources/Louppe/Views/MetadataPanel.swift` | Info panel (filename header, camera, exposure row, fields) |
 | `Sources/Louppe/Views/ThumbnailView.swift` | Async thumbnail tile + rating badge |
+| `Sources/Louppe/Views/MediaTileAccessibility.swift` | Shared VoiceOver descriptions and open/rate/select actions for Browser/Grid tiles |
 | `Sources/Louppe/Views/FullImageView.swift` | Large photo with fit / 100% / phone-size zoom |
+| `Sources/Louppe/Views/ActualSizeImageView.swift` | Persistent AppKit scroll view that displays source-pixel tiles and carries pan position across photos |
 | `Sources/Louppe/Views/VideoPlayerView.swift` | Native AVPlayerView bridge for Gallery/Grid playback |
 | `Sources/Louppe/Views/ExportView.swift` | Export dialog (mode + rating tiles → progress → done) |
 | `Tests/PerformanceChecks/main.swift` | Dependency-free search, ordered persistence, restoration-merge, and export copy/move regression checks |
@@ -164,10 +168,26 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   `ImagePipeline.decode` asks for the fast embedded path first and falls back
   to a full decode when the result is undersized — removing that fallback
   brings back blurry/pixelated previews.
+- **100% view identity is persistent**: `GalleryView` must not add
+  `.id(item.id)` back to `FullImageView`. The AppKit actual-size viewport stays
+  alive across current-item changes so its normalized inspection position can
+  be restored. `FullImageView.loadedItemID` prevents stale preview state from
+  appearing while that persistent view changes files.
+- **100% rendering stays tiled**: one source pixel maps to one backing-store
+  pixel. Keep high-resolution work on the two-operation tile queue, retain
+  only the visible tile ring, and preserve the 128 MiB decoded-tile ceiling.
+  Never replace it with a whole-file 45–100 MP bitmap.
 - **Derived session data is explicit**: rating counts update incrementally;
   filter facets and sorted indices rebuild after structural `items` changes.
   Any new code that inserts/removes/replaces photos must call
   `rebuildDerivedData()` before `applyFilter()`.
+- **Pairing is a projection, ratings are per physical file**: a paired scan
+  keeps the JPEG as a lightweight hidden `PhotoFile`. The first split enriches
+  only missing JPEG metadata off-main; later toggles must reuse it without a
+  folder rescan. Different RAW/JPEG ratings form a Mixed item (conservatively
+  treated as undecided and protected from rating-based Clean Up) until rating
+  the pair writes one decision to both files. Schema 2 persists one entry per
+  physical file; schema 1 combined entries remain readable.
 - **Persistence failures are visible**: a folder sidecar save may fall back to
   the current Application Support snapshot, but failure of both destinations
   must keep the session open and show Retry Saving. Folder/session transitions

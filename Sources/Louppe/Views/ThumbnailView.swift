@@ -68,7 +68,10 @@ struct ThumbnailView: View {
                 .strokeBorder(borderColor, lineWidth: 3)
         }
         .overlay(alignment: .topTrailing) {
-            RatingBadge(rating: item.rating)
+            RatingBadge(
+                rating: item.rating,
+                isMixed: item.hasMixedRatings
+            )
                 .padding(4)
         }
         .overlay(alignment: .bottomTrailing) {
@@ -144,27 +147,46 @@ struct UnsupportedThumbnail: View {
     }
 }
 
-/// The ✓ / ✗ / undecided dot shown on thumbnails and in the info panel.
+/// The ✓ / ✗ / undecided / Mixed mark shown on thumbnails and in the info panel.
 struct RatingBadge: View {
     let rating: Rating
+    var isMixed = false
     var size: CGFloat = 14
 
     var body: some View {
         Group {
-            switch rating {
-            case .yes:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.white, .green)
-            case .no:
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.white, .red)
-            case .undecided:
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
-                    .opacity(0.85)
+            if isMixed {
+                Image(systemName: "circle.lefthalf.filled")
+                    .foregroundStyle(Color.louppeAccent)
+            } else {
+                switch rating {
+                case .yes:
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.white, .green)
+                case .no:
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.white, .red)
+                case .undecided:
+                    Image(systemName: "circle.fill")
+                        .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                        .opacity(0.85)
+                }
             }
         }
         .font(.system(size: size, weight: .bold))
         .shadow(radius: 1.5)
+        .accessibilityLabel(
+            MediaTileAccessibility.ratingDescription(
+                for: isMixed ? .mixed : ratingState
+            )
+        )
+    }
+
+    private var ratingState: PhotoItemRatingState {
+        switch rating {
+        case .yes: return .yes
+        case .no: return .no
+        case .undecided: return .undecided
+        }
     }
 }

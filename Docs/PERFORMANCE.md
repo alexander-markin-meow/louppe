@@ -13,9 +13,10 @@ operations belong elsewhere:
 - `SessionPersistence` is an actor. It serializes JSON encoding, typed
   sidecar/backup outcomes, schema validation, newest-valid reads, and atomic
   writes. Save sequence numbers prevent a late older task from replacing a
-  newer snapshot. Folder switching, rescan, pairing-mode rebuild, and Close
-  Session await a safe result before discarding the live item array. App
-  termination uses AppKit's asynchronous terminate-later reply, so it can
+  newer snapshot. Folder switching, rescan, and Close Session await a safe
+  result before discarding the live item array. Pairing-mode changes never
+  discard it: they reproject the discovered physical-file records in memory.
+  App termination uses AppKit's asynchronous terminate-later reply, so it can
   retry/refuse an unsafe Quit without blocking the main actor.
 - `CleanUpWorker` receives immutable snapshots and uses a fresh `FileManager`
   inside its detached task. Trash and restore roll back RAW+JPEG pairs after a
@@ -28,6 +29,12 @@ operations belong elsewhere:
   coalesced; foreground and prefetch calls share the same in-flight operation,
   and a foreground join promotes utility prefetch work. With separate queues
   the current full image never waits behind tile backlog at all.
+- `HighResolutionImagePipeline` is the separate 100% lane. It keeps lazy,
+  oriented Core Image source recipes for at most four recent photos, renders
+  at most two 1,024-source-pixel tiles concurrently, coalesces identical tile
+  requests, and discards stale generations before the AppKit viewport can
+  display them. The viewport requests only its visible tiles plus one tile of
+  margin.
 - Video first frames share the bounded thumbnail lane, memory/disk cache, and
   in-flight request coalescing. `AVAssetImageGenerator` is called
   asynchronously from that background operation with exact zero-time
@@ -79,6 +86,8 @@ coalesce into a single update transaction.
 
 - Thumbnails: at most 1,200 objects and 256 MiB decoded cost.
 - Full previews: at most 8 objects and 384 MiB decoded cost.
+- Actual-size tiles: 128 MiB decoded cost across 1,024 × 1,024 source-pixel
+  tiles. The lazy source recipe is not a whole decoded bitmap.
 - Disk thumbnails: 512 MiB maximum and 90-day maximum age, pruned on the utility
   queue at startup.
 
@@ -89,6 +98,15 @@ Neighbour prefetch is debounced by 60 ms, and a new full-image view waits 40 ms
 before enqueuing a decode so key repeat does not flood the bounded queue with
 views that have already disappeared.
 
+At 100%, document points are source pixels divided by the window's backing
+scale: one image pixel therefore maps to one physical display pixel on both
+standard and Retina screens. `ActualSizeViewport` stores the point under the
+viewport center as normalized image coordinates and is deliberately not
+published; scroll-wheel traffic must not invalidate the rest of the session
+UI. The AppKit scroll view survives item changes, clamps the position for each
+new aspect ratio, and preserves an unscrollable axis for the next larger
+photo. Pressing S or closing/changing folders resets it to center.
+
 Thumbnail cache keys use each file's modification date captured by
 `FolderScanner`. Do not put a filesystem metadata lookup back in
 `ImagePipeline.cacheKey`: lazy grid cells can be recreated during scrolling,
@@ -97,6 +115,14 @@ cells also seed directly from the memory cache to avoid placeholder churn.
 Movie duration, playability, dimensions, codec, and frame rate are likewise
 captured once by FolderScanner's bounded metadata workers. Filter, sort, and
 Info views must use those values rather than reopening every `AVAsset`.
+
+In paired mode, `FolderScanner` keeps a lightweight record for the hidden JPEG
+using filesystem facts already returned by enumeration; it deliberately does
+not open that JPEG's EXIF during the common initial scan. The first switch to
+separate review enriches only those missing JPEG records on the same bounded
+metadata workers while the ready session remains visible. Pairing projections
+then reuse the enriched physical-file records, so later toggles neither walk
+the folder nor reopen metadata.
 
 ## Grid scrolling
 
@@ -166,6 +192,10 @@ the session after the user has left the scanning view.
   same-folder rescan snapshots current/selected IDs before clearing the old
   arrays, then remaps surviving visible IDs after the new filter/group
   generation is ready.
+- one physical-file ID → displayed item-index map. It includes a grouped
+  JPEG's hidden ID, allowing file-level ratings and rating undo to survive
+  pairing projections without choosing the RAW rating or losing the JPEG
+  rating.
 
 `FolderScanner.pairFiles` sorts file paths and group keys before choosing a
 RAW/JPEG pair, so filesystem enumeration and Dictionary order cannot change

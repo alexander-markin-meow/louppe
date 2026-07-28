@@ -122,11 +122,16 @@ struct MetadataPanel: View {
             Button {
                 store.toggleRating(at: store.currentIndex)
             } label: {
-                RatingBadge(rating: item.rating, size: 27)
+                RatingBadge(
+                    rating: item.rating,
+                    isMixed: item.hasMixedRatings,
+                    size: 27
+                )
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Rating: \(ratingDescription)")
+            .accessibilityLabel("Change Rating")
+            .accessibilityValue(ratingDescription)
             .help("Change rating")
         }
 
@@ -316,6 +321,7 @@ struct MetadataPanel: View {
     }
 
     private var ratingDescription: String {
+        if item.hasMixedRatings { return "Mixed" }
         switch item.rating {
         case .yes: return "Yes"
         case .no: return "No"

@@ -86,5 +86,7 @@ struct SortView: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .opacity(disabled ? 0.4 : 1)
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

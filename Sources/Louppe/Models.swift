@@ -2,6 +2,8 @@ import Foundation
 
 enum SessionConstants {
     static let sidecarName = ".louppe_session.json"
+    static let currentSchemaVersion = 2
+    static let supportedSchemaVersions = 1...currentSchemaVersion
 }
 
 enum Rating: String, Codable, Sendable {
@@ -27,52 +29,226 @@ enum RawJPEGPairingMode: String, Hashable, Sendable {
     case separate
 }
 
-struct PhotoItem: Identifiable, Sendable {
-    /// Relative path of the primary file within the source folder — stable session key.
+/// One physical media file and everything Louppe learned about it.
+///
+/// RAW+JPEG pairing is a presentation choice, so the individual files retain
+/// their own metadata and ratings even while `PhotoItem` exposes them as one
+/// review item. A JPEG partner discovered during a paired scan starts as a
+/// lightweight record and is enriched only if separate review is requested.
+struct PhotoFile: Identifiable, Sendable {
     let id: String
-    let primaryURL: URL
-    let pairedURL: URL?
-    /// Stable display/filter facets cached once rather than rebuilt during
-    /// every filter pass and sort comparison.
+    let url: URL
     let displayName: String
     let fileTypeLabel: String
     let mediaKind: MediaKind
-    /// Movie properties are read once during scanning. Images keep these nil;
-    /// views and filters never reopen every movie while scrolling or typing.
     let duration: TimeInterval?
     let videoDimensions: CGSize?
     let videoCodec: String?
     let videoFrameRate: Double?
     let videoIsPlayable: Bool
     let captureDate: Date?
-    /// Calendar-day bucket used by the specific-date filter. Capture dates are
-    /// immutable, so normalizing once avoids rebuilding date components for
-    /// every photo whenever a checkbox changes.
     let captureDay: Date?
-    /// Camera + lens read once during the scan, so the filter search can
-    /// match them without re-opening every file.
     let cameraModel: String?
     let lensModel: String?
-    /// Directory part of `id` — the subfolder path relative to the source
-    /// folder. Nil for files lying directly in the source folder.
     let subfolder: String?
-    /// Exposure metadata is cached during the folder scan. Shutter speed is
-    /// stored as exposure duration in seconds; aperture and ISO are numeric.
     let aperture: Double?
     let shutterSpeed: Double?
     let iso: Double?
-    /// Captured during the folder scan and reused by the image cache. Keeping
-    /// it on the item avoids a synchronous filesystem lookup whenever a lazy
-    /// thumbnail cell is recreated while scrolling.
-    let primaryModificationDate: Date?
+    let modificationDate: Date?
     let fileSize: Int64
-    let pairedFileSize: Int64
-    /// Locale-folded metadata assembled once during scanning. Search filtering
-    /// reads this string directly instead of rebuilding and date-formatting it
-    /// for every photo on every keystroke.
     let searchableText: String
-    var rating: Rating = .undecided
+    /// False only for a hidden JPEG partner whose filesystem facts are known
+    /// but whose EXIF has deliberately not been opened yet.
+    let metadataIsLoaded: Bool
+    var rating: Rating
     var ratedAt: Date?
+
+    init(
+        id: String,
+        url: URL,
+        captureDate: Date?,
+        cameraModel: String?,
+        lensModel: String?,
+        aperture: Double? = nil,
+        shutterSpeed: Double? = nil,
+        iso: Double? = nil,
+        mediaKind: MediaKind = .photo,
+        duration: TimeInterval? = nil,
+        videoDimensions: CGSize? = nil,
+        videoCodec: String? = nil,
+        videoFrameRate: Double? = nil,
+        videoIsPlayable: Bool = false,
+        modificationDate: Date? = nil,
+        fileSize: Int64,
+        metadataIsLoaded: Bool = true,
+        rating: Rating = .undecided,
+        ratedAt: Date? = nil
+    ) {
+        let displayName = url.lastPathComponent
+        let fileTypeLabel = Self.makeFileTypeLabel(url: url, mediaKind: mediaKind)
+        let subfolderPath = (id as NSString).deletingLastPathComponent
+        let subfolder = subfolderPath.isEmpty ? nil : subfolderPath
+
+        self.id = id
+        self.url = url
+        self.displayName = displayName
+        self.fileTypeLabel = fileTypeLabel
+        self.mediaKind = mediaKind
+        self.duration = duration
+        self.videoDimensions = videoDimensions
+        self.videoCodec = videoCodec
+        self.videoFrameRate = videoFrameRate
+        self.videoIsPlayable = videoIsPlayable
+        self.captureDate = captureDate
+        self.captureDay = captureDate.map { Calendar.current.startOfDay(for: $0) }
+        self.cameraModel = cameraModel
+        self.lensModel = lensModel
+        self.subfolder = subfolder
+        self.aperture = aperture
+        self.shutterSpeed = shutterSpeed
+        self.iso = iso
+        self.modificationDate = modificationDate
+        self.fileSize = fileSize
+        self.metadataIsLoaded = metadataIsLoaded
+        self.rating = rating
+        self.ratedAt = ratedAt
+
+        var parts = [displayName, fileTypeLabel, mediaKind.label]
+        if let subfolder { parts.append(subfolder) }
+        if let cameraModel { parts.append(cameraModel) }
+        if let lensModel { parts.append(lensModel) }
+        if let captureDate { parts.append(AppDateFormat.day(captureDate)) }
+        searchableText = PhotoItem.normalizeForSearch(parts.joined(separator: " "))
+    }
+
+    private static func makeFileTypeLabel(url: URL, mediaKind: MediaKind) -> String {
+        let ext = url.pathExtension.lowercased()
+        if mediaKind == .video { return ext.isEmpty ? "VIDEO" : ext.uppercased() }
+        if FolderScanner.rawExtensions.contains(ext) { return "RAW" }
+        switch ext {
+        case "jpg", "jpeg": return "JPEG"
+        case "tif", "tiff": return "TIFF"
+        default: return ext.uppercased()
+        }
+    }
+}
+
+struct PhotoFileRatingSnapshot: Equatable, Sendable {
+    let fileID: String
+    let rating: Rating
+    let ratedAt: Date?
+}
+
+enum PhotoItemRatingState: Equatable, Sendable {
+    case yes
+    case no
+    case undecided
+    case mixed
+
+    var effectiveRating: Rating {
+        switch self {
+        case .yes: return .yes
+        case .no: return .no
+        case .undecided, .mixed: return .undecided
+        }
+    }
+}
+
+struct PhotoItem: Identifiable, Sendable {
+    /// The primary file is the visible authority while a RAW+JPEG pair is
+    /// grouped. `pairedFile` still retains the JPEG's independent rating and
+    /// metadata so regrouping never loses information.
+    private(set) var primaryFile: PhotoFile
+    private(set) var pairedFile: PhotoFile?
+
+    var id: String { primaryFile.id }
+    var primaryURL: URL { primaryFile.url }
+    var pairedURL: URL? { pairedFile?.url }
+    var displayName: String { primaryFile.displayName }
+    var fileTypeLabel: String {
+        pairedFile == nil ? primaryFile.fileTypeLabel : "RAW + JPEG"
+    }
+    var mediaKind: MediaKind { primaryFile.mediaKind }
+    var duration: TimeInterval? { primaryFile.duration }
+    var videoDimensions: CGSize? { primaryFile.videoDimensions }
+    var videoCodec: String? { primaryFile.videoCodec }
+    var videoFrameRate: Double? { primaryFile.videoFrameRate }
+    var videoIsPlayable: Bool { primaryFile.videoIsPlayable }
+    var captureDate: Date? { primaryFile.captureDate }
+    var captureDay: Date? { primaryFile.captureDay }
+    var cameraModel: String? { primaryFile.cameraModel }
+    var lensModel: String? { primaryFile.lensModel }
+    var subfolder: String? { primaryFile.subfolder }
+    var aperture: Double? { primaryFile.aperture }
+    var shutterSpeed: Double? { primaryFile.shutterSpeed }
+    var iso: Double? { primaryFile.iso }
+    var primaryModificationDate: Date? { primaryFile.modificationDate }
+    var fileSize: Int64 { primaryFile.fileSize }
+    var pairedFileSize: Int64 { pairedFile?.fileSize ?? 0 }
+    let searchableText: String
+
+    var ratingState: PhotoItemRatingState {
+        guard let pairedFile else {
+            switch primaryFile.rating {
+            case .yes: return .yes
+            case .no: return .no
+            case .undecided: return .undecided
+            }
+        }
+        guard pairedFile.rating == primaryFile.rating else { return .mixed }
+        switch primaryFile.rating {
+        case .yes: return .yes
+        case .no: return .no
+        case .undecided: return .undecided
+        }
+    }
+
+    /// Existing filtering/export code consumes the three-state rating. A
+    /// mixed pair behaves conservatively as unresolved until the user rates
+    /// it together, while `ratingState` keeps the UI honest.
+    var rating: Rating {
+        get { ratingState.effectiveRating }
+        set {
+            primaryFile.rating = newValue
+            pairedFile?.rating = newValue
+        }
+    }
+
+    var ratedAt: Date? {
+        get { primaryFile.ratedAt }
+        set {
+            primaryFile.ratedAt = newValue
+            pairedFile?.ratedAt = newValue
+        }
+    }
+
+    var hasMixedRatings: Bool { ratingState == .mixed }
+    var hasAnyRating: Bool {
+        individualFiles.contains { $0.rating != .undecided }
+    }
+    var individualFiles: [PhotoFile] {
+        var files = [primaryFile]
+        if let pairedFile { files.append(pairedFile) }
+        return files
+    }
+    var ratingSnapshots: [PhotoFileRatingSnapshot] {
+        individualFiles.map {
+            PhotoFileRatingSnapshot(
+                fileID: $0.id,
+                rating: $0.rating,
+                ratedAt: $0.ratedAt
+            )
+        }
+    }
+
+    init(primaryFile: PhotoFile, pairedFile: PhotoFile? = nil) {
+        self.primaryFile = primaryFile
+        self.pairedFile = pairedFile
+        searchableText = Self.makeSearchableText(
+            primaryFile: primaryFile,
+            pairedFile: pairedFile
+        )
+    }
 
     init(
         id: String,
@@ -96,46 +272,50 @@ struct PhotoItem: Identifiable, Sendable {
         rating: Rating = .undecided,
         ratedAt: Date? = nil
     ) {
-        let displayName = primaryURL.lastPathComponent
-        let fileTypeLabel = Self.makeFileTypeLabel(
-            primaryURL: primaryURL,
-            pairedURL: pairedURL,
-            mediaKind: mediaKind
+        primaryFile = PhotoFile(
+            id: id,
+            url: primaryURL,
+            captureDate: captureDate,
+            cameraModel: cameraModel,
+            lensModel: lensModel,
+            aperture: aperture,
+            shutterSpeed: shutterSpeed,
+            iso: iso,
+            mediaKind: mediaKind,
+            duration: duration,
+            videoDimensions: videoDimensions,
+            videoCodec: videoCodec,
+            videoFrameRate: videoFrameRate,
+            videoIsPlayable: videoIsPlayable,
+            modificationDate: primaryModificationDate,
+            fileSize: fileSize,
+            rating: rating,
+            ratedAt: ratedAt
         )
-        let subfolderPath = (id as NSString).deletingLastPathComponent
-        let subfolder = subfolderPath.isEmpty ? nil : subfolderPath
-        self.id = id
-        self.primaryURL = primaryURL
-        self.pairedURL = pairedURL
-        self.displayName = displayName
-        self.fileTypeLabel = fileTypeLabel
-        self.mediaKind = mediaKind
-        self.duration = duration
-        self.videoDimensions = videoDimensions
-        self.videoCodec = videoCodec
-        self.videoFrameRate = videoFrameRate
-        self.videoIsPlayable = videoIsPlayable
-        self.captureDate = captureDate
-        self.captureDay = captureDate.map { Calendar.current.startOfDay(for: $0) }
-        self.cameraModel = cameraModel
-        self.lensModel = lensModel
-        self.subfolder = subfolder
-        self.aperture = aperture
-        self.shutterSpeed = shutterSpeed
-        self.iso = iso
-        self.primaryModificationDate = primaryModificationDate
-        self.fileSize = fileSize
-        self.pairedFileSize = pairedFileSize
-        self.rating = rating
-        self.ratedAt = ratedAt
-
-        var parts = [displayName, fileTypeLabel, mediaKind.label]
-        if let paired = pairedURL?.lastPathComponent { parts.append(paired) }
-        if let subfolder { parts.append(subfolder) }
-        if let cameraModel { parts.append(cameraModel) }
-        if let lensModel { parts.append(lensModel) }
-        if let captureDate { parts.append(AppDateFormat.day(captureDate)) }
-        searchableText = Self.normalizeForSearch(parts.joined(separator: " "))
+        if let pairedURL {
+            let parent = (id as NSString).deletingLastPathComponent
+            let pairedID = parent.isEmpty
+                ? pairedURL.lastPathComponent
+                : "\(parent)/\(pairedURL.lastPathComponent)"
+            pairedFile = PhotoFile(
+                id: pairedID,
+                url: pairedURL,
+                captureDate: captureDate,
+                cameraModel: nil,
+                lensModel: nil,
+                modificationDate: nil,
+                fileSize: pairedFileSize,
+                metadataIsLoaded: false,
+                rating: rating,
+                ratedAt: ratedAt
+            )
+        } else {
+            pairedFile = nil
+        }
+        searchableText = Self.makeSearchableText(
+            primaryFile: primaryFile,
+            pairedFile: pairedFile
+        )
     }
 
     var isRaw: Bool {
@@ -151,22 +331,6 @@ struct PhotoItem: Identifiable, Sendable {
         return FolderScanner.supportedExtensions.contains(primaryURL.pathExtension.lowercased())
     }
 
-    private static func makeFileTypeLabel(
-        primaryURL: URL,
-        pairedURL: URL?,
-        mediaKind: MediaKind
-    ) -> String {
-        if pairedURL != nil { return "RAW + JPEG" }
-        let ext = primaryURL.pathExtension.lowercased()
-        if mediaKind == .video { return ext.isEmpty ? "VIDEO" : ext.uppercased() }
-        if FolderScanner.rawExtensions.contains(ext) { return "RAW" }
-        switch ext {
-        case "jpg", "jpeg": return "JPEG"
-        case "tif", "tiff": return "TIFF"
-        default: return ext.uppercased()
-        }
-    }
-
     /// Labels the camera/lens filter toggles group by. Files without EXIF
     /// (screenshots, videos…) collect under "Unknown" so they stay filterable.
     var cameraLabel: String { cameraModel ?? "Unknown" }
@@ -175,15 +339,31 @@ struct PhotoItem: Identifiable, Sendable {
     /// for photos lying directly in the source folder.
     var subfolderLabel: String { subfolder ?? "None" }
 
-    var allURLs: [URL] {
-        var urls = [primaryURL]
-        if let paired = pairedURL { urls.append(paired) }
-        return urls
-    }
+    var allURLs: [URL] { individualFiles.map(\.url) }
 
     var totalFileSize: Int64 {
         let (total, overflowed) = fileSize.addingReportingOverflow(pairedFileSize)
         return overflowed ? Int64.max : total
+    }
+
+    mutating func restoreRating(_ snapshot: PhotoFileRatingSnapshot) {
+        if primaryFile.id == snapshot.fileID {
+            primaryFile.rating = snapshot.rating
+            primaryFile.ratedAt = snapshot.ratedAt
+        } else if pairedFile?.id == snapshot.fileID {
+            pairedFile?.rating = snapshot.rating
+            pairedFile?.ratedAt = snapshot.ratedAt
+        }
+    }
+
+    private static func makeSearchableText(
+        primaryFile: PhotoFile,
+        pairedFile: PhotoFile?
+    ) -> String {
+        guard let pairedFile else { return primaryFile.searchableText }
+        return normalizeForSearch(
+            "\(primaryFile.searchableText) \(pairedFile.searchableText) RAW + JPEG"
+        )
     }
 
     static func normalizeForSearch(_ text: String) -> String {

@@ -110,6 +110,7 @@ struct FilterView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear Search")
             }
         }
         .padding(6)
@@ -327,13 +328,17 @@ struct FilterView: View {
         FilterDisclosureSection(title: "File types", isExpanded: $fileTypesExpanded) {
             VStack(alignment: .leading, spacing: 7) {
                 Toggle(isOn: rawJPEGPairingBinding) {
-                    VStack(alignment: .leading, spacing: 2) {
+                    HStack {
                         Text("Keep RAW + JPEG together")
-                        Text("Turn off to review and act on them separately")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if store.isChangingRawJPEGPairingMode {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityLabel("Preparing JPEG metadata")
+                        }
                     }
                 }
+                .disabled(store.isChangingRawJPEGPairingMode)
                 Divider()
                 ForEach(store.availableTypes, id: \.self) { type in
                     Toggle(isOn: exclusionBinding(type, \.excludedTypes)) {

@@ -34,10 +34,13 @@ struct GalleryView: View {
                     if item.isVideo {
                         GalleryVideoPlayerView(item: item, playback: store.videoPlayback)
                     } else {
-                        FullImageView(item: item, zoomMode: $store.zoomMode) { loading in
+                        FullImageView(
+                            item: item,
+                            zoomMode: $store.zoomMode,
+                            actualSizeViewport: store.actualSizeViewport
+                        ) { loading in
                             store.fullImageLoads += loading ? 1 : -1
                         }
-                        .id(item.id)
                     }
                 }
             }

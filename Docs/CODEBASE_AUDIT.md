@@ -333,19 +333,21 @@ Passing acceptance checks:
 
 ### P2-4 — Completed: explicit session-schema validation
 
-The only supported schema is version 1. Reads now validate that version, the
-canonical source folder, unique safe relative filenames, paired basenames, and
-rating values. A future-version or different-folder sidecar blocks the session
-with a visible explanation even if an older fallback exists, so the current
-app never overwrites data it may not understand. Corrupt/invalid data uses a
-valid current-folder backup when available; otherwise it is preserved and the
-folder is not opened.
+The current schema is version 2, which persists ratings per physical file so a
+split RAW/JPEG pair can retain different decisions. Version 1 remains readable
+and migrates a paired entry's decision onto both files. Reads validate the
+schema version, canonical source folder, unique safe relative filenames,
+paired basenames, and rating values. A future-version or different-folder
+sidecar blocks the session with a visible explanation even if an older
+fallback exists, so the current app never overwrites data it may not
+understand. Corrupt/invalid data uses a valid current-folder backup when
+available; otherwise it is preserved and the folder is not opened.
 
 Passing acceptance checks:
 
 - Future-version, wrong-folder, malformed-rating, and traversal fixtures are
   rejected without replacement.
-- A valid backup can recover a corrupt version-1 sidecar.
+- A valid backup can recover a corrupt supported-version sidecar.
 - The current policy is conservative: copying/moving a folder requires the
   embedded `sourcePath` to be updated deliberately before ratings are applied.
 
@@ -403,29 +405,34 @@ Passing acceptance checks:
 - Scan cancellation, video metadata, and file operations retain their current
   regression coverage and responsiveness.
 
-### P2-7 — “100%” zoom is not guaranteed to mean one image pixel
+### P2-7 — Completed: accurate, memory-bounded 100% zoom
 
-Full-image decoding is capped at 4,096 pixels, and `FullImageView` uses
-representation pixel dimensions as SwiftUI point dimensions. On a Retina
-display, points and physical pixels differ. Large camera files are therefore
-downsampled and the result may not be a true one-source-pixel-to-one-screen-
-pixel view.
+Implemented:
 
-Recommended change:
+- Actual-size document geometry divides oriented source-pixel dimensions by
+  the window backing scale, so one source pixel maps to one physical display
+  pixel on standard and Retina screens.
+- A persistent AppKit scroll view keeps the normalized point under the
+  viewport center across arrows, rating advancement, Space, and Browser
+  selection. Different dimensions/aspect ratios clamp safely; an
+  unscrollable axis retains its preference for the next large photo. S and
+  session/folder transitions reset to center.
+- The existing 4,096-pixel decode stays visible as an immediate preview.
+  Lazy Core Image recipes render only visible 1,024-pixel tiles plus one
+  margin on a two-operation queue. Stale requests are cancelled or discarded,
+  and decoded tiles use a strict 128 MiB LRU ceiling.
+- A CPU renderer takes over if Core Image's normal graphics service is
+  temporarily unavailable.
 
-- Define 100% as one source pixel per backing-store pixel.
-- Include window backing scale when calculating display size.
-- Decode only the visible full-resolution region with ImageIO thumbnail/tile
-  requests instead of allocating an entire 45–100 MP image.
-- Keep the current fast 4,096-pixel image as the immediate preview while the
-  visible high-resolution region arrives.
+Passing acceptance checks:
 
-Acceptance checks:
-
-- A resolution target renders a known pixel grid at exactly 1:1 on standard
-  and Retina displays.
-- Peak memory stays bounded on a representative 100 MP file.
-- Pan/zoom does not block keyboard rating or video playback.
+- Focused tests cover 1×/2× geometry, normalized position round trips,
+  unscrollable axes, S reset, a real AppKit two-file handoff, EXIF rotation,
+  top-to-bottom tile mapping, and edge-tile pixel dimensions.
+- A synthetic 10,000 × 10,000 (100 MP) source renders more than the cache can
+  retain while staying at or below the 128 MiB decoded-tile budget.
+- High-resolution source and tile work remains on bounded background
+  operations; rating/navigation stay on the main actor.
 
 ### P2-8 — Correct file-count and size wording — completed
 
@@ -441,13 +448,14 @@ Acceptance checks:
 
 ### P2-9 — CI gate and selection coverage completed; broader UI coverage remains
 
-The focused suites exercise important algorithms, and nine XCTest cases
+The focused suites exercise important algorithms, and nineteen XCTest cases
 currently cover app-level behavior.
 Important untested seams include updater configuration, more view-level
-session failure states, accessibility labels, and the recovery presentation
-itself. Pair collision planning, persistence recovery/schema failures, export
-preflight, selection across a real rescan, journal crash states, and local
-update release packaging now have focused checks.
+session failure states, deeper filter/progress accessibility, and the recovery
+presentation itself. Pair collision planning, persistence recovery/schema
+failures, export preflight, selection across a real rescan, journal crash
+states, media-tile accessibility state/actions, and local update release
+packaging now have focused checks.
 
 Implemented:
 
@@ -588,12 +596,24 @@ gesture-driven Grid cells need explicit VoiceOver semantics. Rating state must
 not rely on green/red color alone, and drag/range selection needs accessible
 alternatives.
 
+Implemented so far:
+
+- Browser and Grid media tiles expose the filename, media/file type, rating,
+  current-item state, and selection state as text rather than relying on
+  borders, badge shapes, or color.
+- Every tile offers VoiceOver actions to show/open it, rate Yes/No/Undecided,
+  and add or remove it from the selection. Explicit tile ratings preserve
+  RAW+JPEG pair-wide behavior and remain one undoable action.
+- Icon-only toolbar controls, the filter-search clear button, and the Info
+  panel rating control have explicit action labels and state values. Idle
+  loading indicators are removed from the accessibility tree.
+- Focused tests cover the nonvisual Mixed-pair description plus pair-wide
+  accessible rating and exact undo restoration.
+
 Recommended change:
 
-- Audit every toolbar button, thumbnail, rating badge, filter disclosure, and
-  progress overlay with Accessibility Inspector and VoiceOver.
-- Give each media tile a label, rating value, selection value, and actions for
-  open/rate/select.
+- Finish auditing every filter control and progress overlay with Accessibility
+  Inspector and VoiceOver.
 - Confirm full keyboard traversal and visible focus.
 - Verify contrast in increased-contrast mode and motion in Reduce Motion.
 - Add targeted accessibility-identifier/value assertions where UI automation
@@ -653,8 +673,8 @@ silently split a pair or overwrite an existing file.
    (`P1-4`).
 2. **Completed:** make sidecar/fallback precedence explicit and keep the
    backup current.
-3. **Completed for schema v1:** validate the schema and preserve unsupported
-   or corrupt data (`P2-4`).
+3. **Completed for schemas v1–v2:** validate the schema and preserve
+   unsupported or corrupt data (`P2-4`).
 4. **Completed:** replace termination blocking with asynchronous termination
    coordination.
 
@@ -684,7 +704,7 @@ with zero concurrency warnings.
 3. **Completed:** optimize navigation maps and stable Grid group identity
    without changing the lazy layouts (`P3-2`).
 4. Replace semaphore-based media probing with structured async work (`P3-3`).
-5. Implement accurate, memory-bounded 100% zoom (`P2-7`).
+5. **Completed:** implement accurate, memory-bounded 100% zoom (`P2-7`).
 
 Exit condition: the measured large-folder targets are documented and met
 without increasing UI-thread work or cache budgets unexpectedly.

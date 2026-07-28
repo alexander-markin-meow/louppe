@@ -5,6 +5,7 @@ import AppKit
 struct FullImageView: View {
     let item: PhotoItem
     @Binding var zoomMode: ZoomMode
+    let actualSizeViewport: ActualSizeViewport
     /// Reports decode start/finish upward — the toolbar shows a small spinner
     /// there instead of flashing one in the middle of the photo area.
     var onLoading: (Bool) -> Void
@@ -14,11 +15,19 @@ struct FullImageView: View {
     /// decode runs, so switching photos never flashes an empty pane.
     @State private var preview: NSImage?
     @State private var failedToLoad = false
+    @State private var loadedItemID: String
 
-    init(item: PhotoItem, zoomMode: Binding<ZoomMode>, onLoading: @escaping (Bool) -> Void = { _ in }) {
+    init(
+        item: PhotoItem,
+        zoomMode: Binding<ZoomMode>,
+        actualSizeViewport: ActualSizeViewport,
+        onLoading: @escaping (Bool) -> Void = { _ in }
+    ) {
         self.item = item
         self._zoomMode = zoomMode
+        self.actualSizeViewport = actualSizeViewport
         self.onLoading = onLoading
+        self._loadedItemID = State(initialValue: item.id)
         // Seed from the in-memory caches — synchronous dictionary lookups,
         // nothing is decoded here. Prefetched neighbours appear instantly at
         // full quality; anything else starts from its thumbnail.
@@ -31,6 +40,12 @@ struct FullImageView: View {
     }
 
     var body: some View {
+        let displayedImage = loadedItemID == item.id
+            ? image
+            : ImagePipeline.shared.cachedFullImage(for: item)
+        let displayedPreview = loadedItemID == item.id
+            ? preview
+            : ImagePipeline.shared.cachedThumbnail(for: item)
         Group {
             if !item.isSupported {
                 ContentUnavailableView(
@@ -38,76 +53,88 @@ struct FullImageView: View {
                     systemImage: "doc.questionmark",
                     description: Text("Louppe can't preview \(item.fileTypeLabel) files yet. You can still rate it — \(item.displayName)")
                 )
-            } else if let image {
+            } else {
                 switch zoomMode {
                 case .actual:
-                    ScrollView([.horizontal, .vertical]) {
-                        Image(nsImage: image)
+                    ActualSizeImageView(
+                        item: item,
+                        preview: displayedImage ?? displayedPreview,
+                        viewport: actualSizeViewport,
+                        onLoading: onLoading
+                    )
+                case .fit where displayedImage != nil:
+                    if let displayedImage {
+                        Image(nsImage: displayedImage)
                             .resizable()
-                            .frame(width: pixelSize(of: image).width, height: pixelSize(of: image).height)
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .defaultScrollAnchor(.center)
-                case .fit:
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .small:
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: 400, maxHeight: 600)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .small where displayedImage != nil:
+                    if let displayedImage {
+                        Image(nsImage: displayedImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: 400, maxHeight: 600)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                case .fit, .small:
+                    if loadedItemID == item.id, failedToLoad {
+                        ContentUnavailableView(
+                            "Can't preview this photo",
+                            systemImage: "exclamationmark.triangle",
+                            description: Text("The file may be corrupt or unreadable. You can still rate it — \(item.displayName)")
+                        )
+                    } else if let displayedPreview {
+                        // Blurry-but-instant stand-in; the full decode replaces it.
+                        Image(nsImage: displayedPreview)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        // Loading with nothing cached yet: keep the photo area
+                        // quiet; the toolbar spinner is the indication.
+                        Color.clear
+                    }
                 }
-            } else if failedToLoad {
-                ContentUnavailableView(
-                    "Can't preview this photo",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text("The file may be corrupt or unreadable. You can still rate it — \(item.displayName)")
-                )
-            } else if let preview {
-                // Blurry-but-instant stand-in; the full decode replaces it.
-                Image(nsImage: preview)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                // Loading with nothing cached yet: keep the photo area quiet —
-                // the toolbar spinner (via onLoading) is the only indication.
-                Color.clear
             }
         }
         .task(id: item.id) {
-            guard item.isSupported, image == nil else { return }
-            // Key repeat can create and cancel several view tasks in a few
-            // milliseconds. Let those stale tasks disappear before they add
-            // expensive full-image work to the bounded decode queue.
-            try? await Task.sleep(nanoseconds: 40_000_000)
-            guard !Task.isCancelled else { return }
+            let requestedItem = item
+            let cachedFull = ImagePipeline.shared.cachedFullImage(
+                for: requestedItem
+            )
+            image = cachedFull
+            preview = cachedFull == nil
+                ? ImagePipeline.shared.cachedThumbnail(for: requestedItem)
+                : nil
             failedToLoad = false
+            loadedItemID = requestedItem.id
+            guard requestedItem.isSupported, cachedFull == nil else { return }
+
+            // Key repeat can create and cancel several view tasks in a few
+            // milliseconds. Let stale tasks disappear before they add work.
+            try? await Task.sleep(nanoseconds: 40_000_000)
+            guard !Task.isCancelled, loadedItemID == requestedItem.id
+            else { return }
             onLoading(true)
             defer { onLoading(false) }
-            // Full decode in the background; meanwhile grab the thumbnail as a
-            // quick preview if the memory cache didn't have it at init (its
-            // disk-cache load or 320px decode finishes far sooner).
-            async let full = ImagePipeline.shared.fullImage(for: item)
-            if preview == nil, let thumb = await ImagePipeline.shared.thumbnail(for: item) {
-                if image == nil { preview = thumb }
+            async let full = ImagePipeline.shared.fullImage(
+                for: requestedItem
+            )
+            if preview == nil,
+               let thumb = await ImagePipeline.shared.thumbnail(
+                   for: requestedItem
+               ),
+               !Task.isCancelled,
+               loadedItemID == requestedItem.id,
+               image == nil {
+                preview = thumb
             }
             let loaded = await full
-            // The photo may have changed while decoding; .task(id:) cancels stale runs,
-            // but guard against clearing a fresh image with a stale nil.
-            if !Task.isCancelled {
-                image = loaded
-                failedToLoad = (loaded == nil)
-            }
+            guard !Task.isCancelled, loadedItemID == requestedItem.id
+            else { return }
+            image = loaded
+            failedToLoad = (loaded == nil)
         }
-    }
-
-    private func pixelSize(of image: NSImage) -> CGSize {
-        if let rep = image.representations.first {
-            return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
-        }
-        return image.size
     }
 }

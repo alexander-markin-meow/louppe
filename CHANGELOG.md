@@ -5,7 +5,30 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-07-27
+## 1.7.0 (9) — 2026-07-28
+
+- Made the RAW+JPEG switch reproject the current session instead of rescanning
+  the source folder. The first split reads metadata only from hidden JPEG
+  partners, and subsequent toggles reuse it instantly. Ratings now persist per
+  physical file; conflicting RAW/JPEG decisions appear as Mixed, can be
+  restored by splitting again, and are protected from rating-based Clean Up
+  until the pair is resolved.
+
+- Simplified the File types filter by removing the explanatory line beneath
+  **Keep RAW + JPEG together**.
+
+- Made the main review workflow usable without color or pointer-only
+  gestures. Browser and Grid items now announce their filename, media type,
+  rating, current/selected state, and offer VoiceOver actions to open, rate,
+  or select them. Icon-only toolbar controls also announce their purpose and
+  changing state explicitly.
+
+- Made **100%** a true source-pixel view on both standard and Retina displays.
+  Louppe now keeps its fast preview visible while rendering only the visible
+  full-resolution tiles, with a strict 128 MiB tile-cache limit instead of
+  decoding an entire very large photo. Panning also follows the same relative
+  image position while arrows, rating, Space, or the Browser move between
+  files; pressing S again resets the next 100% view to the center.
 
 - Added secure automatic updates. Louppe checks daily, downloads verified
   releases in the background, installs them safely on quit, and offers a

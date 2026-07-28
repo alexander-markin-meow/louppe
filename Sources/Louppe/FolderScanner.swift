@@ -92,6 +92,17 @@ enum FolderScanner {
         }
     }
 
+    struct PairingProjection: Sendable {
+        let items: [PhotoItem]
+        /// Every physical file id resolves to the displayed item that owns it.
+        /// This keeps the current photo and selection stable when a JPEG item
+        /// is folded into its RAW partner.
+        let itemIDByFileID: [String: String]
+        /// Number of hidden partner files whose metadata had to be opened.
+        /// Exposed for deterministic regression checks and progress decisions.
+        let enrichedFileCount: Int
+    }
+
     /// `progress` is called periodically with the running file count. The
     /// cancellation hook lets a superseded scan stop before it walks or opens
     /// the rest of a large card; it is polled from concurrent metadata
@@ -154,9 +165,7 @@ enum FolderScanner {
             if files.count % 25 == 0 { progress(files.count) }
         }
 
-        let volumeIsCaseSensitive = (try? root.resourceValues(
-            forKeys: [.volumeSupportsCaseSensitiveNamesKey]
-        ).volumeSupportsCaseSensitiveNames) ?? false
+        let volumeIsCaseSensitive = caseSensitiveNames(at: root)
 
         // Pair building is cheap; collect every (primary, paired) pair first
         // so the expensive per-file metadata reads can run in parallel below.
@@ -167,22 +176,13 @@ enum FolderScanner {
         )
         if isCancelled() { throw CancellationError() }
 
-        var result = try makeItems(
+        let result = try makeItems(
             for: pairs,
             factsByURL: factsByURL,
             rootPath: root.standardizedFileURL.path,
             isCancelled: isCancelled
         )
-
-        result.sort { a, b in
-            switch (a.captureDate, b.captureDate) {
-            case let (da?, db?) where da != db: return da < db
-            case (nil, .some): return false
-            case (.some, nil): return true
-            default: return a.id.localizedStandardCompare(b.id) == .orderedAscending
-            }
-        }
-        return result
+        return sortItems(result)
     }
 
     /// Deterministic RAW+JPEG pairing independent of filesystem enumerator and
@@ -240,8 +240,83 @@ enum FolderScanner {
         return pairs
     }
 
+    /// Reprojects the already-discovered physical files without walking the
+    /// source folder again. Separating a paired session opens metadata only
+    /// for lightweight JPEG partners; every later toggle reuses those records.
+    static func projectPairingMode(
+        _ pairingMode: RawJPEGPairingMode,
+        from items: [PhotoItem],
+        root: URL,
+        isCancelled: @Sendable () -> Bool = { false }
+    ) throws -> PairingProjection {
+        var fileByPath: [String: PhotoFile] = [:]
+        for item in items {
+            for file in item.individualFiles {
+                fileByPath[file.url.standardizedFileURL.path] = file
+            }
+        }
+        var files = fileByPath.values.sorted { stableURLOrder($0.url, $1.url) }
+        let missingMetadataCount: Int
+        if pairingMode == .separate {
+            missingMetadataCount = files.count { !$0.metadataIsLoaded }
+            files = try prepareMissingMetadata(in: files, isCancelled: isCancelled)
+        } else {
+            missingMetadataCount = 0
+        }
+        if isCancelled() { throw CancellationError() }
+
+        let filesByPath = Dictionary(
+            uniqueKeysWithValues: files.map {
+                ($0.url.standardizedFileURL.path, $0)
+            }
+        )
+        let pairs = pairFiles(
+            files.map(\.url),
+            pairingMode: pairingMode,
+            caseSensitiveNames: caseSensitiveNames(at: root)
+        )
+        var projected: [PhotoItem] = []
+        projected.reserveCapacity(pairs.count)
+        var itemIDByFileID: [String: String] = [:]
+        for pair in pairs {
+            guard let primary = filesByPath[pair.primary.standardizedFileURL.path] else {
+                continue
+            }
+            let paired = pair.paired.flatMap {
+                filesByPath[$0.standardizedFileURL.path]
+            }
+            let item = PhotoItem(primaryFile: primary, pairedFile: paired)
+            projected.append(item)
+            for file in item.individualFiles {
+                itemIDByFileID[file.id] = item.id
+            }
+        }
+        return PairingProjection(
+            items: sortItems(projected),
+            itemIDByFileID: itemIDByFileID,
+            enrichedFileCount: missingMetadataCount
+        )
+    }
+
     private static func stableURLOrder(_ lhs: URL, _ rhs: URL) -> Bool {
         lhs.standardizedFileURL.path < rhs.standardizedFileURL.path
+    }
+
+    private static func caseSensitiveNames(at root: URL) -> Bool {
+        (try? root.resourceValues(
+            forKeys: [.volumeSupportsCaseSensitiveNamesKey]
+        ).volumeSupportsCaseSensitiveNames) ?? false
+    }
+
+    private static func sortItems(_ items: [PhotoItem]) -> [PhotoItem] {
+        items.sorted { a, b in
+            switch (a.captureDate, b.captureDate) {
+            case let (da?, db?) where da != db: return da < db
+            case (nil, .some): return false
+            case (.some, nil): return true
+            default: return a.id.localizedStandardCompare(b.id) == .orderedAscending
+            }
+        }
     }
 
     /// How many EXIF readers run at once during a scan. Header parsing mixes
@@ -274,36 +349,137 @@ enum FolderScanner {
                 // A cancelled scan's partial chunk is discarded by the
                 // throw below, so stopping mid-chunk is safe.
                 if isCancelled() { return }
-                let facts = factsByURL[primary]
-                let isVideo = isVideoExtension(primary.pathExtension)
-                let info = isVideo ? MetadataExtractor.ScanInfo() : MetadataExtractor.scanInfo(for: primary)
-                let videoInfo = isVideo ? VideoMetadataExtractor.scanInfo(for: primary) : nil
-                let captureDate = info.captureDate ?? facts?.creationDate
-                items.append(PhotoItem(
-                    id: relativePath(of: primary, under: rootPath),
-                    primaryURL: primary,
-                    pairedURL: paired,
-                    captureDate: captureDate,
-                    cameraModel: info.cameraModel,
-                    lensModel: info.lensModel,
-                    aperture: info.aperture,
-                    shutterSpeed: info.shutterSpeed,
-                    iso: info.iso,
-                    mediaKind: isVideo ? .video : .photo,
-                    duration: videoInfo?.duration,
-                    videoDimensions: videoInfo?.dimensions,
-                    videoCodec: videoInfo?.codec,
-                    videoFrameRate: videoInfo?.frameRate,
-                    videoIsPlayable: videoInfo?.isPlayable ?? false,
-                    primaryModificationDate: facts?.modificationDate,
-                    fileSize: facts?.size ?? 0,
-                    pairedFileSize: paired.flatMap { factsByURL[$0]?.size } ?? 0
-                ))
+                let primaryFile = scannedFile(
+                    at: primary,
+                    facts: factsByURL[primary],
+                    rootPath: rootPath
+                )
+                let pairedFile = paired.map {
+                    lightweightFile(
+                        at: $0,
+                        facts: factsByURL[$0],
+                        rootPath: rootPath
+                    )
+                }
+                items.append(
+                    PhotoItem(primaryFile: primaryFile, pairedFile: pairedFile)
+                )
             }
             chunkResults.store(items, at: chunkIndex)
         }
         if isCancelled() { throw CancellationError() }
         return chunkResults.flattened()
+    }
+
+    private static func scannedFile(
+        at url: URL,
+        facts: FileFacts?,
+        rootPath: String
+    ) -> PhotoFile {
+        let isVideo = isVideoExtension(url.pathExtension)
+        let info = isVideo
+            ? MetadataExtractor.ScanInfo()
+            : MetadataExtractor.scanInfo(for: url)
+        let videoInfo = isVideo ? VideoMetadataExtractor.scanInfo(for: url) : nil
+        return PhotoFile(
+            id: relativePath(of: url, under: rootPath),
+            url: url,
+            captureDate: info.captureDate ?? facts?.creationDate,
+            cameraModel: info.cameraModel,
+            lensModel: info.lensModel,
+            aperture: info.aperture,
+            shutterSpeed: info.shutterSpeed,
+            iso: info.iso,
+            mediaKind: isVideo ? .video : .photo,
+            duration: videoInfo?.duration,
+            videoDimensions: videoInfo?.dimensions,
+            videoCodec: videoInfo?.codec,
+            videoFrameRate: videoInfo?.frameRate,
+            videoIsPlayable: videoInfo?.isPlayable ?? false,
+            modificationDate: facts?.modificationDate,
+            fileSize: facts?.size ?? 0
+        )
+    }
+
+    /// A hidden JPEG needs only facts already returned by folder enumeration.
+    /// Its EXIF remains unopened until the user asks to review the files
+    /// separately, keeping the common paired scan as fast as before.
+    private static func lightweightFile(
+        at url: URL,
+        facts: FileFacts?,
+        rootPath: String
+    ) -> PhotoFile {
+        PhotoFile(
+            id: relativePath(of: url, under: rootPath),
+            url: url,
+            captureDate: facts?.creationDate,
+            cameraModel: nil,
+            lensModel: nil,
+            modificationDate: facts?.modificationDate,
+            fileSize: facts?.size ?? 0,
+            metadataIsLoaded: false
+        )
+    }
+
+    private static func prepareMissingMetadata(
+        in files: [PhotoFile],
+        isCancelled: @Sendable () -> Bool
+    ) throws -> [PhotoFile] {
+        guard files.contains(where: { !$0.metadataIsLoaded }) else {
+            return files
+        }
+        let chunkSize = max(
+            1,
+            (files.count + maxMetadataConcurrency - 1) / maxMetadataConcurrency
+        )
+        let chunkStarts = Array(stride(from: 0, to: files.count, by: chunkSize))
+        let results = FileChunkResults(count: chunkStarts.count)
+        DispatchQueue.concurrentPerform(iterations: chunkStarts.count) { chunkIndex in
+            let start = chunkStarts[chunkIndex]
+            let end = min(start + chunkSize, files.count)
+            var prepared: [PhotoFile] = []
+            prepared.reserveCapacity(end - start)
+            for file in files[start..<end] {
+                if isCancelled() { return }
+                prepared.append(
+                    file.metadataIsLoaded ? file : enrichMetadata(for: file)
+                )
+            }
+            results.store(prepared, at: chunkIndex)
+        }
+        if isCancelled() { throw CancellationError() }
+        return results.flattened()
+    }
+
+    private static func enrichMetadata(for file: PhotoFile) -> PhotoFile {
+        let isVideo = isVideoExtension(file.url.pathExtension)
+        let info = isVideo
+            ? MetadataExtractor.ScanInfo()
+            : MetadataExtractor.scanInfo(for: file.url)
+        let videoInfo = isVideo
+            ? VideoMetadataExtractor.scanInfo(for: file.url)
+            : nil
+        return PhotoFile(
+            id: file.id,
+            url: file.url,
+            captureDate: info.captureDate ?? file.captureDate,
+            cameraModel: info.cameraModel,
+            lensModel: info.lensModel,
+            aperture: info.aperture,
+            shutterSpeed: info.shutterSpeed,
+            iso: info.iso,
+            mediaKind: isVideo ? .video : .photo,
+            duration: videoInfo?.duration,
+            videoDimensions: videoInfo?.dimensions,
+            videoCodec: videoInfo?.codec,
+            videoFrameRate: videoInfo?.frameRate,
+            videoIsPlayable: videoInfo?.isPlayable ?? false,
+            modificationDate: file.modificationDate,
+            fileSize: file.fileSize,
+            metadataIsLoaded: true,
+            rating: file.rating,
+            ratedAt: file.ratedAt
+        )
     }
 
     /// `DispatchQueue.concurrentPerform` requires a Sendable capture. The
@@ -326,6 +502,27 @@ enum FolderScanner {
         }
 
         func flattened() -> [PhotoItem] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values.flatMap { $0 }
+        }
+    }
+
+    private final class FileChunkResults: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [[PhotoFile]]
+
+        init(count: Int) {
+            values = [[PhotoFile]](repeating: [], count: count)
+        }
+
+        func store(_ files: [PhotoFile], at index: Int) {
+            lock.lock()
+            values[index] = files
+            lock.unlock()
+        }
+
+        func flattened() -> [PhotoFile] {
             lock.lock()
             defer { lock.unlock() }
             return values.flatMap { $0 }
