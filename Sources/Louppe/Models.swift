@@ -29,6 +29,59 @@ enum RawJPEGPairingMode: String, Hashable, Sendable {
     case separate
 }
 
+struct PhotoFileRatingSnapshot: Equatable, Sendable {
+    let fileID: String
+    let rating: Rating
+    let ratedAt: Date?
+}
+
+/// The only frequently changing part of a physical file. `PhotoItem` values
+/// contain substantially more immutable scan metadata, so keeping this tiny
+/// pair behind shared storage lets culling update one file without copying the
+/// entire `@Published [PhotoItem]` session. A lock makes snapshots safe when a
+/// detached persistence/pairing worker reads a value-semantic item copy.
+private final class PhotoFileRatingStorage: @unchecked Sendable {
+    private struct Value {
+        var rating: Rating
+        var ratedAt: Date?
+    }
+
+    private let lock = NSLock()
+    private var value: Value
+
+    init(rating: Rating, ratedAt: Date?) {
+        value = Value(rating: rating, ratedAt: ratedAt)
+    }
+
+    func snapshot(fileID: String) -> PhotoFileRatingSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return PhotoFileRatingSnapshot(
+            fileID: fileID,
+            rating: value.rating,
+            ratedAt: value.ratedAt
+        )
+    }
+
+    func set(rating: Rating, ratedAt: Date?) {
+        lock.lock()
+        value = Value(rating: rating, ratedAt: ratedAt)
+        lock.unlock()
+    }
+
+    func setRating(_ rating: Rating) {
+        lock.lock()
+        value.rating = rating
+        lock.unlock()
+    }
+
+    func setRatedAt(_ ratedAt: Date?) {
+        lock.lock()
+        value.ratedAt = ratedAt
+        lock.unlock()
+    }
+}
+
 /// One physical media file and everything Louppe learned about it.
 ///
 /// RAW+JPEG pairing is a presentation choice, so the individual files retain
@@ -60,8 +113,21 @@ struct PhotoFile: Identifiable, Sendable {
     /// False only for a hidden JPEG partner whose filesystem facts are known
     /// but whose EXIF has deliberately not been opened yet.
     let metadataIsLoaded: Bool
-    var rating: Rating
-    var ratedAt: Date?
+    private let ratingStorage: PhotoFileRatingStorage
+
+    var rating: Rating {
+        get { ratingSnapshot.rating }
+        nonmutating set { ratingStorage.setRating(newValue) }
+    }
+
+    var ratedAt: Date? {
+        get { ratingSnapshot.ratedAt }
+        nonmutating set { ratingStorage.setRatedAt(newValue) }
+    }
+
+    var ratingSnapshot: PhotoFileRatingSnapshot {
+        ratingStorage.snapshot(fileID: id)
+    }
 
     init(
         id: String,
@@ -110,8 +176,10 @@ struct PhotoFile: Identifiable, Sendable {
         self.modificationDate = modificationDate
         self.fileSize = fileSize
         self.metadataIsLoaded = metadataIsLoaded
-        self.rating = rating
-        self.ratedAt = ratedAt
+        self.ratingStorage = PhotoFileRatingStorage(
+            rating: rating,
+            ratedAt: ratedAt
+        )
 
         var parts = [displayName, fileTypeLabel, mediaKind.label]
         if let subfolder { parts.append(subfolder) }
@@ -119,6 +187,10 @@ struct PhotoFile: Identifiable, Sendable {
         if let lensModel { parts.append(lensModel) }
         if let captureDate { parts.append(AppDateFormat.day(captureDate)) }
         searchableText = PhotoItem.normalizeForSearch(parts.joined(separator: " "))
+    }
+
+    func setRating(_ rating: Rating, ratedAt: Date?) {
+        ratingStorage.set(rating: rating, ratedAt: ratedAt)
     }
 
     private static func makeFileTypeLabel(url: URL, mediaKind: MediaKind) -> String {
@@ -131,12 +203,6 @@ struct PhotoFile: Identifiable, Sendable {
         default: return ext.uppercased()
         }
     }
-}
-
-struct PhotoFileRatingSnapshot: Equatable, Sendable {
-    let fileID: String
-    let rating: Rating
-    let ratedAt: Date?
 }
 
 enum PhotoItemRatingState: Equatable, Sendable {
@@ -188,15 +254,16 @@ struct PhotoItem: Identifiable, Sendable {
     let searchableText: String
 
     var ratingState: PhotoItemRatingState {
+        let primaryRating = primaryFile.rating
         guard let pairedFile else {
-            switch primaryFile.rating {
+            switch primaryRating {
             case .yes: return .yes
             case .no: return .no
             case .undecided: return .undecided
             }
         }
-        guard pairedFile.rating == primaryFile.rating else { return .mixed }
-        switch primaryFile.rating {
+        guard pairedFile.rating == primaryRating else { return .mixed }
+        switch primaryRating {
         case .yes: return .yes
         case .no: return .no
         case .undecided: return .undecided
@@ -208,7 +275,7 @@ struct PhotoItem: Identifiable, Sendable {
     /// it together, while `ratingState` keeps the UI honest.
     var rating: Rating {
         get { ratingState.effectiveRating }
-        set {
+        nonmutating set {
             primaryFile.rating = newValue
             pairedFile?.rating = newValue
         }
@@ -216,7 +283,7 @@ struct PhotoItem: Identifiable, Sendable {
 
     var ratedAt: Date? {
         get { primaryFile.ratedAt }
-        set {
+        nonmutating set {
             primaryFile.ratedAt = newValue
             pairedFile?.ratedAt = newValue
         }
@@ -232,13 +299,14 @@ struct PhotoItem: Identifiable, Sendable {
         return files
     }
     var ratingSnapshots: [PhotoFileRatingSnapshot] {
-        individualFiles.map {
-            PhotoFileRatingSnapshot(
-                fileID: $0.id,
-                rating: $0.rating,
-                ratedAt: $0.ratedAt
-            )
-        }
+        individualFiles.map(\.ratingSnapshot)
+    }
+
+    /// Update the pair atomically per physical file while keeping PhotoItem's
+    /// much larger immutable metadata value untouched.
+    func setRating(_ rating: Rating, ratedAt: Date?) {
+        primaryFile.setRating(rating, ratedAt: ratedAt)
+        pairedFile?.setRating(rating, ratedAt: ratedAt)
     }
 
     init(primaryFile: PhotoFile, pairedFile: PhotoFile? = nil) {
@@ -346,13 +414,17 @@ struct PhotoItem: Identifiable, Sendable {
         return overflowed ? Int64.max : total
     }
 
-    mutating func restoreRating(_ snapshot: PhotoFileRatingSnapshot) {
+    func restoreRating(_ snapshot: PhotoFileRatingSnapshot) {
         if primaryFile.id == snapshot.fileID {
-            primaryFile.rating = snapshot.rating
-            primaryFile.ratedAt = snapshot.ratedAt
+            primaryFile.setRating(
+                snapshot.rating,
+                ratedAt: snapshot.ratedAt
+            )
         } else if pairedFile?.id == snapshot.fileID {
-            pairedFile?.rating = snapshot.rating
-            pairedFile?.ratedAt = snapshot.ratedAt
+            pairedFile?.setRating(
+                snapshot.rating,
+                ratedAt: snapshot.ratedAt
+            )
         }
     }
 

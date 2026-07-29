@@ -56,6 +56,7 @@ final class HighResolutionImagePipeline: @unchecked Sendable {
     private struct TileKey: Hashable {
         let sourceKey: String
         let coordinate: ZoomTileCoordinate
+        let showsClippingWarnings: Bool
     }
 
     private final class PendingSource {
@@ -183,14 +184,16 @@ final class HighResolutionImagePipeline: @unchecked Sendable {
 
     func tile(
         for source: ZoomImageSource,
-        coordinate: ZoomTileCoordinate
+        coordinate: ZoomTileCoordinate,
+        showsClippingWarnings: Bool = false
     ) async -> ZoomImageTile? {
         guard coordinate.pixelRect(sourceSize: source.pixelSize) != nil else {
             return nil
         }
         let key = TileKey(
             sourceKey: source.key,
-            coordinate: coordinate
+            coordinate: coordinate,
+            showsClippingWarnings: showsClippingWarnings
         )
         return await withCheckedContinuation { continuation in
             lock.lock()
@@ -214,7 +217,8 @@ final class HighResolutionImagePipeline: @unchecked Sendable {
                 let tile = autoreleasepool {
                     self.renderTile(
                         source: source,
-                        coordinate: coordinate
+                        coordinate: coordinate,
+                        showsClippingWarnings: showsClippingWarnings
                     )
                 }
                 self.finishTile(key: key, tile: tile)
@@ -235,10 +239,12 @@ final class HighResolutionImagePipeline: @unchecked Sendable {
     /// waiter and cannot be displayed over a newer photo.
     func retainTileRequests(
         sourceKey: String,
-        coordinates: Set<ZoomTileCoordinate>
+        coordinates: Set<ZoomTileCoordinate>,
+        showsClippingWarnings: Bool = false
     ) {
         cancelTileRequests { key in
             key.sourceKey != sourceKey
+                || key.showsClippingWarnings != showsClippingWarnings
                 || !coordinates.contains(key.coordinate)
         }
     }
@@ -299,7 +305,8 @@ final class HighResolutionImagePipeline: @unchecked Sendable {
 
     private func renderTile(
         source: ZoomImageSource,
-        coordinate: ZoomTileCoordinate
+        coordinate: ZoomTileCoordinate,
+        showsClippingWarnings: Bool
     ) -> ZoomImageTile? {
         guard let topLeftRect = coordinate.pixelRect(
             sourceSize: source.pixelSize
@@ -312,7 +319,7 @@ final class HighResolutionImagePipeline: @unchecked Sendable {
             width: topLeftRect.width,
             height: topLeftRect.height
         )
-        guard let image =
+        guard let rendered =
                 context.createCGImage(
                     source.image,
                     from: coreImageRect,
@@ -326,6 +333,15 @@ final class HighResolutionImagePipeline: @unchecked Sendable {
                     colorSpace: outputColorSpace
                 )
         else { return nil }
+        let image: CGImage
+        if showsClippingWarnings {
+            guard let warned =
+                    ClippingWarningProcessor.overlay(on: rendered)
+            else { return nil }
+            image = warned
+        } else {
+            image = rendered
+        }
         return ZoomImageTile(
             coordinate: coordinate,
             pixelRect: topLeftRect,

@@ -6,7 +6,8 @@ import AppKit
 ///
 /// Hotkey map (README's table must stay in sync with `handleKey`):
 ///   F yes · D no · S 100% zoom · A phone-size zoom · R clear all
-///   Q browser · W info panel · E export · Space video play/pause (photo: next)
+///   Q browser · W info panel · X clipping warnings · E export
+///   Space video play/pause (photo: next)
 ///   ←/→ prev/next
 ///   ↑/↓ prev/next in the Gallery view · same-column photo in the Grid view
 ///   Tab/G switch view · Z/⌘Z undo · ⌘+/⌘− grid size
@@ -419,6 +420,7 @@ struct SessionView: View {
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "q": withAnimation { store.toggleBrowser() }; return true
             case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
+            case "x": return store.toggleClippingWarnings()
             case "g": store.toggleViewMode(); return true
             default: return true
             }
@@ -513,6 +515,7 @@ struct SessionView: View {
         case "d": store.rate(.no); return true
         case "q": withAnimation { store.toggleBrowser() }; return true
         case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
+        case "x": return store.toggleClippingWarnings()
         case "g": store.toggleViewMode(); return true
         case "e": store.isExportPresented = true; return true
         case "r": store.requestClearAllRatings(); return true

@@ -41,6 +41,7 @@ final class SessionStore: ObservableObject {
     @Published var showMetadataPanel = true
     @Published var showBrowser = true
     @Published var zoomMode: ZoomMode = .fit
+    @Published var showClippingWarnings = false
     let actualSizeViewport = ActualSizeViewport()
     @Published var gridThumbSize: CGFloat = 170
     /// Number of adaptive columns currently visible in the Grid view.
@@ -296,12 +297,26 @@ final class SessionStore: ObservableObject {
         return items[currentIndex]
     }
 
+    var canToggleClippingWarnings: Bool {
+        guard viewMode == .gallery,
+              selectedIndices.count <= 1,
+              let currentItem
+        else { return false }
+        return currentItem.mediaKind == .photo && currentItem.isSupported
+    }
+
     private var currentItemID: String? {
         items.indices.contains(currentIndex) ? items[currentIndex].id : nil
     }
 
     var currentVisiblePosition: Int? {
         preparedIndex.location(forItemIndex: currentIndex)?.position
+    }
+
+    /// Stable Browser row identities are rebuilt with the prepared visibility
+    /// generation, not on every unrelated `SessionStore` publication.
+    var browserEntries: [PreparedSessionIndex.VisibleEntry] {
+        preparedIndex.visibleEntries
     }
 
     private func setSelectionIndices(_ indices: Set<Int>) {
@@ -757,6 +772,7 @@ final class SessionStore: ObservableObject {
             sourceFolder?.standardizedFileURL == url.standardizedFileURL
         if !isSameFolder {
             actualSizeViewport.reset()
+            showClippingWarnings = false
         }
         let preservesCurrentFilter = isSameFolder && !items.isEmpty
         if preservesCurrentFilter {
@@ -968,7 +984,7 @@ final class SessionStore: ObservableObject {
         }
         scanResumeIdentity = nil
         persistenceWarning = persistenceResult.recoveryMessage
-        var loaded = scanned
+        let loaded = scanned
         // Restore prior ratings from the sidecar file, if present.
         if let session = persistenceResult.session {
             var ratingByFilename: [String: (Rating, Date?)] = [:]
@@ -1214,18 +1230,6 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Every element written through the `items` property wrapper copies the
-    /// whole published array (Combine's `@Published` has no in-place accessor)
-    /// and fires one objectWillChange. Looping `items[i].rating = …` directly
-    /// is therefore O(N) per photo — seconds of main-thread stall on a large
-    /// folder — so every multi-element mutation must go through here: one
-    /// copy, one publish, however many elements change.
-    private func updateItems(_ mutate: (inout [PhotoItem]) -> Void) {
-        var updated = items
-        mutate(&updated)
-        items = updated
-    }
-
     /// Applies one rating to several photos as a single undoable step.
     private func applyRating(_ rating: Rating, to targets: [Int]) {
         let valid = targets.filter { items.indices.contains($0) }
@@ -1241,16 +1245,17 @@ final class SessionStore: ObservableObject {
         }
         pushUndo(.ratings(changes, previousFileID: currentItemID))
         let now = Date()
-        updateItems { updated in
-            for index in valid {
-                let previousState = updated[index].ratingState
-                updated[index].rating = rating
-                updated[index].ratedAt = now
-                transitionRatingCount(
-                    from: previousState,
-                    to: updated[index].ratingState
-                )
-            }
+        // Ratings live in each physical file's tiny shared storage. Publish
+        // once, then update only the selected records without copying the
+        // full immutable metadata array.
+        objectWillChange.send()
+        for index in valid {
+            let previousState = items[index].ratingState
+            items[index].setRating(rating, ratedAt: now)
+            transitionRatingCount(
+                from: previousState,
+                to: items[index].ratingState
+            )
         }
         scheduleSave()
     }
@@ -1267,15 +1272,13 @@ final class SessionStore: ObservableObject {
             }
             pushUndo(.ratings(changes, previousFileID: currentItemID))
         }
-        updateItems { updated in
-            let previousState = updated[index].ratingState
-            updated[index].rating = rating
-            updated[index].ratedAt = Date()
-            transitionRatingCount(
-                from: previousState,
-                to: updated[index].ratingState
-            )
-        }
+        let previousState = items[index].ratingState
+        objectWillChange.send()
+        items[index].setRating(rating, ratedAt: Date())
+        transitionRatingCount(
+            from: previousState,
+            to: items[index].ratingState
+        )
         scheduleSave()
     }
 
@@ -1311,11 +1314,9 @@ final class SessionStore: ObservableObject {
         }
         guard !changes.isEmpty else { return }
         pushUndo(.ratings(changes, previousFileID: currentItemID))
-        updateItems { updated in
-            for i in updated.indices {
-                updated[i].rating = .undecided
-                updated[i].ratedAt = nil
-            }
+        objectWillChange.send()
+        for item in items {
+            item.setRating(.undecided, ratedAt: nil)
         }
         ratingTally = (0, 0, items.count)
         mixedRatingCount = 0
@@ -1362,27 +1363,34 @@ final class SessionStore: ObservableObject {
         setSelectionIndices([])
         switch step {
         case .ratings(let changes, let previousFileID):
-            updateItems { updated in
-                var previousStates: [Int: PhotoItemRatingState] = [:]
-                for change in changes {
+            let indexedChanges: [(index: Int, change: RatingChange)] =
+                changes.compactMap { change in
                     guard let index = itemIndexByFileID[change.fileID],
-                          updated.indices.contains(index) else { continue }
-                    previousStates[index] = previousStates[index]
-                        ?? updated[index].ratingState
-                    updated[index].restoreRating(
-                        PhotoFileRatingSnapshot(
-                            fileID: change.fileID,
-                            rating: change.previousRating,
-                            ratedAt: change.previousRatedAt
-                        )
-                    )
+                          items.indices.contains(index) else { return nil }
+                    return (index: index, change: change)
                 }
-                for (index, previousState) in previousStates {
-                    transitionRatingCount(
-                        from: previousState,
-                        to: updated[index].ratingState
+            var previousStates: [Int: PhotoItemRatingState] = [:]
+            for (index, _) in indexedChanges {
+                previousStates[index] = previousStates[index]
+                    ?? items[index].ratingState
+            }
+            if !indexedChanges.isEmpty {
+                objectWillChange.send()
+            }
+            for (index, change) in indexedChanges {
+                items[index].restoreRating(
+                    PhotoFileRatingSnapshot(
+                        fileID: change.fileID,
+                        rating: change.previousRating,
+                        ratedAt: change.previousRatedAt
                     )
-                }
+                )
+            }
+            for (index, previousState) in previousStates {
+                transitionRatingCount(
+                    from: previousState,
+                    to: items[index].ratingState
+                )
             }
             restoreCurrentFile(
                 fileID: previousFileID,
@@ -1860,6 +1868,13 @@ final class SessionStore: ObservableObject {
         zoomMode = (zoomMode == mode) ? .fit : mode
     }
 
+    @discardableResult
+    func toggleClippingWarnings() -> Bool {
+        guard canToggleClippingWarnings else { return false }
+        showClippingWarnings.toggle()
+        return true
+    }
+
     /// ⌘+ / ⌘− in the Grid view: bigger thumbnails mean fewer per row.
     func zoomGrid(larger: Bool) {
         let next = larger ? gridThumbSize * 1.25 : gridThumbSize / 1.25
@@ -2052,11 +2067,12 @@ final class SessionStore: ObservableObject {
             scannedAt: Date(),
             entries: items.flatMap { item in
                 item.individualFiles.map { file in
-                    SessionEntry(
+                    let rating = file.ratingSnapshot
+                    return SessionEntry(
                         filename: file.id,
                         pairedFilename: nil,
-                        rating: file.rating.rawValue,
-                        ratedAt: file.ratedAt
+                        rating: rating.rating.rawValue,
+                        ratedAt: rating.ratedAt
                     )
                 }
             }
@@ -2106,6 +2122,7 @@ final class SessionStore: ObservableObject {
     private func finishClosingSession() {
         videoPlayback.stop()
         zoomMode = .fit
+        showClippingWarnings = false
         actualSizeViewport.reset()
         scanTask?.cancel()
         scanTask = nil

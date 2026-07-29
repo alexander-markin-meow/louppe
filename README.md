@@ -52,6 +52,7 @@ missing or a file no longer matches, it leaves everything untouched and offers
 | E or ⌘E | Export |
 | Q | Show/hide the browser (thumbnail column; Gallery view only) |
 | W | Show/hide the info panel |
+| X | Show/hide red clipping warnings on the current Gallery photo |
 | R | Clear all ratings (16+ ratings ask for confirmation; Enter confirms; ⌘Z restores) |
 | ⌘R | Re-scan folder for new photos |
 | ⌘+ / ⌘− | Bigger / smaller thumbnails in the Grid view |
@@ -69,6 +70,12 @@ Videos use their first frame as the thumbnail and show their duration at all
 times. Use the play/pause button to preview a video directly in the Grid, or
 open it in Gallery for the full native macOS player with timeline, volume,
 full-screen, and Picture in Picture controls. Only one video plays at a time.
+
+For a single supported photo, the Info panel shows a luminance histogram plus
+near-black and near-white percentages. Its red edge bins mark the same warning
+ranges used by **Clipping Warnings**; press **X** in Gallery to paint those
+pixels red on the large photo. Videos, unsupported files, and multi-selections
+omit the complete histogram section without reserving an empty gap.
 
 While a folder is being scanned, Louppe shows its name, full path, and running
 photo count. Use **Cancel Scan** in the toolbar or press **Esc** to stop the
@@ -220,6 +227,7 @@ Core logic in `Sources/Louppe/`, one screen per file in `Sources/Louppe/Views/`:
 - `CleanUpWorker.swift` — background Trash/restore operations and linear merge
 - `FolderScanner.swift` — recursive folder scan, RAW+JPEG pairing, sorting
 - `ImagePipeline.swift` — image decoding and video first frames, thumbnail caches, prefetching
+- `HistogramPipeline.swift` — bounded photo histogram analysis and clipping-warning previews
 - `HighResolutionImagePipeline.swift` — bounded source-pixel tiles for true 100% viewing
 - `ZoomViewport.swift` — backing-scale and persistent pan-position geometry
 - `VideoSupport.swift` — native video metadata and duration formatting

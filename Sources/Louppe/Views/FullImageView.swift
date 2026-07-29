@@ -3,28 +3,39 @@ import AppKit
 
 /// The big central image in the Gallery view, with fit / 100% / phone-size zoom.
 struct FullImageView: View {
+    private static let navigationDebounceNanoseconds: UInt64 = 40_000_000
+
     let item: PhotoItem
     @Binding var zoomMode: ZoomMode
+    let showsClippingWarnings: Bool
     let actualSizeViewport: ActualSizeViewport
     /// Reports decode start/finish upward — the toolbar shows a small spinner
     /// there instead of flashing one in the middle of the photo area.
     var onLoading: (Bool) -> Void
 
     @State private var image: NSImage?
+    @State private var clippingImage: NSImage?
     /// Low-res stand-in (the Browser thumbnail) shown while the real
     /// decode runs, so switching photos never flashes an empty pane.
     @State private var preview: NSImage?
     @State private var failedToLoad = false
     @State private var loadedItemID: String
 
+    private struct ClippingLoadID: Hashable {
+        let itemID: String
+        let isEnabled: Bool
+    }
+
     init(
         item: PhotoItem,
         zoomMode: Binding<ZoomMode>,
+        showsClippingWarnings: Bool = false,
         actualSizeViewport: ActualSizeViewport,
         onLoading: @escaping (Bool) -> Void = { _ in }
     ) {
         self.item = item
         self._zoomMode = zoomMode
+        self.showsClippingWarnings = showsClippingWarnings
         self.actualSizeViewport = actualSizeViewport
         self.onLoading = onLoading
         self._loadedItemID = State(initialValue: item.id)
@@ -34,6 +45,9 @@ struct FullImageView: View {
         guard item.isSupported else { return }
         let cachedFull = ImagePipeline.shared.cachedFullImage(for: item)
         self._image = State(initialValue: cachedFull)
+        self._clippingImage = State(
+            initialValue: ClippingPreviewPipeline.shared.cachedImage(for: item)
+        )
         if cachedFull == nil {
             self._preview = State(initialValue: ImagePipeline.shared.cachedThumbnail(for: item))
         }
@@ -46,6 +60,15 @@ struct FullImageView: View {
         let displayedPreview = loadedItemID == item.id
             ? preview
             : ImagePipeline.shared.cachedThumbnail(for: item)
+        let displayedClippingImage = loadedItemID == item.id
+            ? clippingImage
+            : ClippingPreviewPipeline.shared.cachedImage(for: item)
+        let presentationImage = showsClippingWarnings
+            ? displayedClippingImage ?? displayedImage
+            : displayedImage
+        let presentationPreview = showsClippingWarnings
+            ? displayedClippingImage ?? displayedPreview
+            : displayedPreview
         Group {
             if !item.isSupported {
                 ContentUnavailableView(
@@ -58,20 +81,21 @@ struct FullImageView: View {
                 case .actual:
                     ActualSizeImageView(
                         item: item,
-                        preview: displayedImage ?? displayedPreview,
+                        preview: presentationImage ?? presentationPreview,
+                        showsClippingWarnings: showsClippingWarnings,
                         viewport: actualSizeViewport,
                         onLoading: onLoading
                     )
-                case .fit where displayedImage != nil:
-                    if let displayedImage {
-                        Image(nsImage: displayedImage)
+                case .fit where presentationImage != nil:
+                    if let presentationImage {
+                        Image(nsImage: presentationImage)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                case .small where displayedImage != nil:
-                    if let displayedImage {
-                        Image(nsImage: displayedImage)
+                case .small where presentationImage != nil:
+                    if let presentationImage {
+                        Image(nsImage: presentationImage)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(maxWidth: 400, maxHeight: 600)
@@ -84,9 +108,9 @@ struct FullImageView: View {
                             systemImage: "exclamationmark.triangle",
                             description: Text("The file may be corrupt or unreadable. You can still rate it — \(item.displayName)")
                         )
-                    } else if let displayedPreview {
+                    } else if let presentationPreview {
                         // Blurry-but-instant stand-in; the full decode replaces it.
-                        Image(nsImage: displayedPreview)
+                        Image(nsImage: presentationPreview)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -104,6 +128,9 @@ struct FullImageView: View {
                 for: requestedItem
             )
             image = cachedFull
+            clippingImage = ClippingPreviewPipeline.shared.cachedImage(
+                for: requestedItem
+            )
             preview = cachedFull == nil
                 ? ImagePipeline.shared.cachedThumbnail(for: requestedItem)
                 : nil
@@ -113,7 +140,9 @@ struct FullImageView: View {
 
             // Key repeat can create and cancel several view tasks in a few
             // milliseconds. Let stale tasks disappear before they add work.
-            try? await Task.sleep(nanoseconds: 40_000_000)
+            try? await Task.sleep(
+                nanoseconds: Self.navigationDebounceNanoseconds
+            )
             guard !Task.isCancelled, loadedItemID == requestedItem.id
             else { return }
             onLoading(true)
@@ -135,6 +164,39 @@ struct FullImageView: View {
             else { return }
             image = loaded
             failedToLoad = (loaded == nil)
+        }
+        .task(
+            id: ClippingLoadID(
+                itemID: item.id,
+                isEnabled: showsClippingWarnings
+            )
+        ) {
+            let requestedItem = item
+            let cached = ClippingPreviewPipeline.shared.cachedImage(
+                for: requestedItem
+            )
+            clippingImage = cached
+            guard showsClippingWarnings,
+                  requestedItem.mediaKind == .photo,
+                  requestedItem.isSupported,
+                  cached == nil
+            else { return }
+            // Match the normal preview's key-repeat protection. Without this,
+            // clipping inspection immediately requested a full decode for
+            // every transient photo and defeated the debounce above.
+            try? await Task.sleep(
+                nanoseconds: Self.navigationDebounceNanoseconds
+            )
+            guard !Task.isCancelled,
+                  loadedItemID == requestedItem.id else { return }
+            onLoading(true)
+            defer { onLoading(false) }
+            let loaded = await ClippingPreviewPipeline.shared.image(
+                for: requestedItem
+            )
+            guard !Task.isCancelled,
+                  loadedItemID == requestedItem.id else { return }
+            clippingImage = loaded
         }
     }
 }

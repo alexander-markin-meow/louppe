@@ -19,9 +19,18 @@ struct PreparedSessionIndex {
         let positionInGroup: Int
     }
 
+    /// Stable Browser identity prepared only when visibility changes. Keeping
+    /// this beside `visibleIndices` avoids rebuilding an O(N) id/index array
+    /// every time a rating or loading indicator publishes the store.
+    struct VisibleEntry: Identifiable, Equatable {
+        let id: String
+        let index: Int
+    }
+
     private(set) var sortedIndices: [Int] = []
     private(set) var itemIndexByID: [String: Int] = [:]
     private(set) var visibleIndices: [Int] = []
+    private(set) var visibleEntries: [VisibleEntry] = []
     private(set) var visibleGroups: [PhotoGroup] = []
     private(set) var visibleGroupTitles: [Int: String] = [:]
     private(set) var visibleLocations: [Int: VisibleLocation] = [:]
@@ -50,6 +59,14 @@ struct PreparedSessionIndex {
         let interval = Self.signposter.beginInterval("Sort Session")
         defer {
             Self.signposter.endInterval("Sort Session", interval)
+        }
+        // FolderScanner and every structural reconstruction keep `items` in
+        // PhotoSort() order. Reuse that physical order for the default view
+        // instead of repeating the same O(N log N) localized-name sort on the
+        // main actor after a scan, or when the user returns to the default.
+        if sort == PhotoSort() {
+            sortedIndices = Array(items.indices)
+            return
         }
         sortedIndices = items.indices.sorted {
             sort.areInOrder(items[$0], items[$1])
@@ -89,6 +106,10 @@ struct PreparedSessionIndex {
             sort: sort,
             isGroupingEnabled: isGroupingEnabled
         )
+        visibleEntries = visibleIndices.compactMap { index in
+            guard items.indices.contains(index) else { return nil }
+            return VisibleEntry(id: items[index].id, index: index)
+        }
 
         var titles: [Int: String] = [:]
         var locations: [Int: VisibleLocation] = [:]

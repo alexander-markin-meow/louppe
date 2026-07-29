@@ -1,16 +1,27 @@
 import SwiftUI
 
-/// The info panel: filename and rating, camera/lens, shooting settings, then
-/// the remaining EXIF fields.
+/// The info panel: filename and rating, photo histogram, camera/lens, shooting
+/// settings, then the remaining EXIF fields.
 struct MetadataPanel: View {
+    /// EXIF detail and histogram analysis are secondary to the visible photo.
+    /// A short dwell prevents key repeat from opening every transient file.
+    private static let inspectionDebounceNanoseconds: UInt64 = 80_000_000
+
     @ObservedObject var store: SessionStore
     let item: PhotoItem
 
     @State private var fields: [MetadataField] = []
+    @State private var histogram: HistogramAnalysis?
+    @State private var histogramLoadFailed = false
 
     private struct MetadataLoadID: Hashable {
         let itemID: String
         let isMultipleSelection: Bool
+    }
+
+    private struct HistogramLoadID: Hashable {
+        let itemID: String
+        let isEligible: Bool
     }
 
     private let shootingLabels = ["Aperture", "Shutter", "ISO"]
@@ -77,6 +88,19 @@ struct MetadataPanel: View {
         )
     }
 
+    private var showsHistogram: Bool {
+        store.selectedIndices.count <= 1
+            && item.mediaKind == .photo
+            && item.isSupported
+    }
+
+    private var histogramLoadID: HistogramLoadID {
+        HistogramLoadID(
+            itemID: item.id,
+            isEligible: showsHistogram
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
@@ -97,6 +121,10 @@ struct MetadataPanel: View {
                 fields = []
                 return
             }
+            try? await Task.sleep(
+                nanoseconds: Self.inspectionDebounceNanoseconds
+            )
+            guard !Task.isCancelled else { return }
             let current = item
             let loaded = await Task.detached(priority: .userInitiated) {
                 MetadataExtractor.fields(for: current)
@@ -104,6 +132,23 @@ struct MetadataPanel: View {
             if !Task.isCancelled {
                 fields = loaded
             }
+        }
+        .task(id: histogramLoadID) {
+            histogram = nil
+            histogramLoadFailed = false
+            guard histogramLoadID.isEligible else { return }
+            try? await Task.sleep(
+                nanoseconds: Self.inspectionDebounceNanoseconds
+            )
+            guard !Task.isCancelled else { return }
+            let requestedItem = item
+            let loaded = await HistogramPipeline.shared.analysis(
+                for: requestedItem
+            )
+            guard !Task.isCancelled,
+                  requestedItem.id == item.id else { return }
+            histogram = loaded
+            histogramLoadFailed = (loaded == nil)
         }
     }
 
@@ -133,6 +178,18 @@ struct MetadataPanel: View {
             .accessibilityLabel("Change Rating")
             .accessibilityValue(ratingDescription)
             .help("Change rating")
+        }
+
+        if showsHistogram {
+            HistogramSection(
+                analysis: histogram,
+                loadFailed: histogramLoadFailed,
+                store: store
+            )
+
+            if hasCameraLensInfo || hasShootingInfo || !otherFields.isEmpty {
+                Divider()
+            }
         }
 
         if let cameraLensText {

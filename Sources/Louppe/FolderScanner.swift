@@ -58,6 +58,13 @@ enum FolderScanner {
     static func isVideoExtension(_ ext: String) -> Bool {
         let normalized = ext.lowercased()
         if videoExtensions.contains(normalized) { return true }
+        // Known still-image formats never need a Uniform Type Identifier
+        // lookup. Pairing and metadata construction ask this repeatedly, so
+        // keep their common photo path to two in-memory Set lookups.
+        if supportedExtensions.contains(normalized)
+            || unsupportedVisualExtensions.contains(normalized) {
+            return false
+        }
         return UTType(filenameExtension: normalized)?.conforms(to: .movie) == true
     }
 
@@ -214,10 +221,16 @@ enum FolderScanner {
             // RAW and sidecar movie the same base name. Only RAW + JPEG is a
             // pair; pairing a RAW with MOV/PNG/TIFF would make the latter
             // disappear from the review session.
-            let videos = urls.filter { isVideoExtension($0.pathExtension) }
+            var videos: [URL] = []
+            var images: [URL] = []
+            for url in urls {
+                if isVideoExtension(url.pathExtension) {
+                    videos.append(url)
+                } else {
+                    images.append(url)
+                }
+            }
             for video in videos { pairs.append((video, nil)) }
-
-            let images = urls.filter { !isVideoExtension($0.pathExtension) }
             let raws = images.filter {
                 rawExtensions.contains($0.pathExtension.lowercased())
             }
@@ -308,15 +321,12 @@ enum FolderScanner {
         ).volumeSupportsCaseSensitiveNames) ?? false
     }
 
-    private static func sortItems(_ items: [PhotoItem]) -> [PhotoItem] {
-        items.sorted { a, b in
-            switch (a.captureDate, b.captureDate) {
-            case let (da?, db?) where da != db: return da < db
-            case (nil, .some): return false
-            case (.some, nil): return true
-            default: return a.id.localizedStandardCompare(b.id) == .orderedAscending
-            }
-        }
+    /// `PreparedSessionIndex` reuses this physical order for `PhotoSort()`.
+    /// Keep the scanner and the UI comparator literally shared so opening a
+    /// folder never needs to repeat the same large localized-name sort.
+    static func sortItems(_ items: [PhotoItem]) -> [PhotoItem] {
+        let defaultSort = PhotoSort()
+        return items.sorted(by: defaultSort.areInOrder)
     }
 
     /// How many EXIF readers run at once during a scan. Header parsing mixes
@@ -452,6 +462,7 @@ enum FolderScanner {
     }
 
     private static func enrichMetadata(for file: PhotoFile) -> PhotoFile {
+        let rating = file.ratingSnapshot
         let isVideo = isVideoExtension(file.url.pathExtension)
         let info = isVideo
             ? MetadataExtractor.ScanInfo()
@@ -477,8 +488,8 @@ enum FolderScanner {
             modificationDate: file.modificationDate,
             fileSize: file.fileSize,
             metadataIsLoaded: true,
-            rating: file.rating,
-            ratedAt: file.ratedAt
+            rating: rating.rating,
+            ratedAt: rating.ratedAt
         )
     }
 

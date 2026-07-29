@@ -126,6 +126,7 @@ final class ZoomTests: XCTestCase {
         scrollView.configure(
             item: first,
             preview: nil,
+            showsClippingWarnings: false,
             viewport: viewport,
             onLoading: { _ in }
         )
@@ -166,6 +167,7 @@ final class ZoomTests: XCTestCase {
         scrollView.configure(
             item: second,
             preview: nil,
+            showsClippingWarnings: false,
             viewport: viewport,
             onLoading: { _ in }
         )
@@ -193,6 +195,7 @@ final class ZoomTests: XCTestCase {
         scrollView.configure(
             item: second,
             preview: nil,
+            showsClippingWarnings: false,
             viewport: viewport,
             onLoading: { _ in }
         )
@@ -357,6 +360,36 @@ final class ZoomTests: XCTestCase {
         XCTAssertEqual(edge?.pixelRect, CGRect(x: 9216, y: 9216, width: 784, height: 784))
         XCTAssertEqual(edge?.image.width, 784)
         XCTAssertEqual(edge?.image.height, 784)
+        pipeline.removeAllTiles()
+    }
+
+    func testActualSizeClippingTileUsesTheSharedRedWarning() async throws {
+        let pipeline = HighResolutionImagePipeline.shared
+        pipeline.removeAllTiles()
+        let source = ZoomImageSource(
+            key: "clipping-\(UUID().uuidString)",
+            image: CIImage(
+                color: CIColor(red: 1, green: 1, blue: 1)
+            ).cropped(
+                to: CGRect(x: 0, y: 0, width: 8, height: 8)
+            ),
+            pixelSize: CGSize(width: 8, height: 8)
+        )
+
+        guard let tile = await pipeline.tile(
+            for: source,
+            coordinate: ZoomTileCoordinate(column: 0, row: 0),
+            showsClippingWarnings: true
+        ) else {
+            throw XCTSkip(
+                "Core Image rendering service is unavailable in this sandbox"
+            )
+        }
+
+        let pixel = try firstRGBPixel(of: tile.image)
+        XCTAssertGreaterThan(pixel.red, 240)
+        XCTAssertLessThan(pixel.green, 100)
+        XCTAssertLessThan(pixel.blue, 100)
         pipeline.removeAllTiles()
     }
 

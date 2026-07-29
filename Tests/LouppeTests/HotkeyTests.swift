@@ -50,6 +50,33 @@ final class HotkeyTests: XCTestCase {
         XCTAssertNil(photoStore.videoPlayback.itemID)
     }
 
+    func testXTogglesClippingWarningsOnlyForSingleGalleryPhoto() {
+        let store = readyStore(itemCount: 3, firstItemIsVideo: false)
+        let view = SessionView(store: store)
+
+        XCTAssertTrue(view.handleKey(keyEvent(code: 7, characters: "x")))
+        XCTAssertTrue(store.showClippingWarnings)
+        XCTAssertTrue(view.handleKey(keyEvent(code: 7, characters: "x")))
+        XCTAssertFalse(store.showClippingWarnings)
+
+        store.viewMode = .grid
+        XCTAssertFalse(view.handleKey(keyEvent(code: 7, characters: "x")))
+        XCTAssertFalse(store.showClippingWarnings)
+
+        store.viewMode = .gallery
+        store.selectAllVisible()
+        XCTAssertFalse(view.handleKey(keyEvent(code: 7, characters: "x")))
+        XCTAssertFalse(store.showClippingWarnings)
+    }
+
+    func testXDoesNotToggleClippingWarningsForVideo() {
+        let store = readyStore(itemCount: 2, firstItemIsVideo: true)
+        let view = SessionView(store: store)
+
+        XCTAssertFalse(view.handleKey(keyEvent(code: 7, characters: "x")))
+        XCTAssertFalse(store.showClippingWarnings)
+    }
+
     private func readyStore(itemCount: Int, firstItemIsVideo: Bool) -> SessionStore {
         _ = NSApplication.shared
         let store = SessionStore()

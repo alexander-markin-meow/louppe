@@ -50,8 +50,10 @@ struct PerformanceChecks {
         try operationJournalRestoresInterruptedTrash()
         try operationJournalCompletesInterruptedTrashUndo()
         try completedWorkerRemovesItsJournal()
+        try scannerAndPreparedIndexShareDefaultOrder()
         try preparedSessionIndexKeepsStableGroupIdentity()
         try preparedSessionIndexScaleBaselines()
+        try ratingMutationScaleBaseline()
         try selectionStatePreservesImplicitCurrentAndToggleRules()
         try selectionStateRangesFiltersAndRemapsByID()
         try visibleLocationMapTracksDerivedState()
@@ -62,11 +64,11 @@ struct PerformanceChecks {
         try batchRatingUndoRestoresEveryRating()
         try exportMoveRemovalUpdatesSessionState()
         if ProcessInfo.processInfo.environment["LOUPPE_SKIP_REAL_TRASH"] == "1" {
-            print("Performance checks passed (57/59; 2 real Trash checks explicitly skipped)")
+            print("Performance checks passed (59/61; 2 real Trash checks explicitly skipped)")
         } else {
             try cleanUpPairRoundTripsThroughTrash()
             try cleanUpPairFailureRollsBackFirstFile()
-            print("Performance checks passed (59/59)")
+            print("Performance checks passed (61/61)")
         }
     }
 
@@ -553,9 +555,14 @@ struct PerformanceChecks {
         let rawURL = root.appendingPathComponent("SHOT.NEF")
         let jpegURL = root.appendingPathComponent("SHOT.JPG")
 
-        var raw = makeItem(id: "SHOT.NEF", primaryURL: rawURL)
+        let raw = makeItem(id: "SHOT.NEF", primaryURL: rawURL)
+        let rawValueCopy = raw
         raw.rating = .yes
-        var jpeg = makeItem(id: "SHOT.JPG", primaryURL: jpegURL)
+        try expect(
+            rawValueCopy.rating == .yes,
+            "PhotoItem value copies should share only their physical-file rating storage"
+        )
+        let jpeg = makeItem(id: "SHOT.JPG", primaryURL: jpegURL)
         jpeg.rating = .no
         let grouped = try FolderScanner.projectPairingMode(
             .together,
@@ -1354,6 +1361,32 @@ struct PerformanceChecks {
         try expect(!FileOperationJournal.hasPendingOperations(directory: journals), "completed worker should remove its journal")
     }
 
+    private static func scannerAndPreparedIndexShareDefaultOrder() throws {
+        let sameTime = Date(timeIntervalSince1970: 1_700_000_000)
+        let unsorted = [
+            makeItem(id: "A/Z.JPG", captureDate: sameTime),
+            makeItem(id: "B/A.JPG", captureDate: sameTime),
+            makeItem(
+                id: "OLDER.JPG",
+                captureDate: sameTime.addingTimeInterval(-1)
+            ),
+            makeItem(id: "UNKNOWN.JPG", captureDate: nil),
+        ]
+        let scannerOrder = FolderScanner.sortItems(unsorted)
+        let expected = unsorted.sorted(by: PhotoSort().areInOrder)
+        try expect(
+            scannerOrder.map(\.id) == expected.map(\.id),
+            "scanner order should exactly match the default UI comparator"
+        )
+
+        var index = PreparedSessionIndex()
+        index.rebuildItems(scannerOrder, sort: PhotoSort())
+        try expect(
+            index.sortedIndices == Array(scannerOrder.indices),
+            "default prepared order should reuse the scanner's physical order"
+        )
+    }
+
     private static func preparedSessionIndexKeepsStableGroupIdentity() throws {
         let items = [
             makeItem(id: "ALPHA_FIRST.JPG", camera: "Alpha"),
@@ -1396,6 +1429,12 @@ struct PerformanceChecks {
         try expect(
             index.visibleGroups.first?.indices == [1],
             "filtered camera group should retain only its visible member"
+        )
+        try expect(
+            index.visibleEntries == [
+                .init(id: "ALPHA_SECOND.PNG", index: 1),
+            ],
+            "Browser identities should be cached with the visible generation"
         )
         try expect(
             index.location(forItemIndex: 1)
@@ -1445,9 +1484,13 @@ struct PerformanceChecks {
             var filter = PhotoFilter()
             filter.excludedTypes = ["PNG"]
             var index = PreparedSessionIndex()
+            var defaultIndex = PreparedSessionIndex()
 
             let rebuildDuration = clock.measure {
                 index.rebuildItems(items, sort: sort)
+            }
+            let defaultRebuildDuration = clock.measure {
+                defaultIndex.rebuildItems(items, sort: PhotoSort())
             }
             let filterDuration = clock.measure {
                 index.applyFilter(
@@ -1470,12 +1513,53 @@ struct PerformanceChecks {
                 index.visibleLocations.count == itemCount / 2,
                 "\(itemCount)-item baseline should map every visible item"
             )
+            try expect(
+                defaultIndex.sortedIndices == Array(items.indices),
+                "\(itemCount)-item default order should reuse scanner order"
+            )
             print(
                 "Prepared index \(itemCount) items: "
                     + "rebuild \(milliseconds(rebuildDuration)) ms, "
+                    + "default reuse \(milliseconds(defaultRebuildDuration)) ms, "
                     + "filter/group \(milliseconds(filterDuration)) ms"
             )
         }
+    }
+
+    /// Rating one photo is the culling hot path. Keep this separate from
+    /// session preparation so a regression cannot hide behind scan/sort time.
+    @MainActor
+    private static func ratingMutationScaleBaseline() throws {
+        let itemCount = 100_000
+        let store = SessionStore()
+        store.items = (0..<itemCount).map {
+            makeItem(id: String(format: "RATING_%06d.JPG", $0))
+        }
+
+        let clock = ContinuousClock()
+        var publishes = 0
+        let subscription = store.objectWillChange.sink { _ in publishes += 1 }
+        let duration = clock.measure {
+            store.toggleRating(at: 0)
+        }
+        subscription.cancel()
+
+        try expect(
+            store.items[0].rating == .yes,
+            "large-session rating should update the requested photo"
+        )
+        try expect(
+            publishes <= 3,
+            "one rating should publish once, not once per session item"
+        )
+        try expect(
+            duration < .milliseconds(10),
+            "rating one photo in a 100,000-item session should stay within 10 ms"
+        )
+        print(
+            "Rating one of \(itemCount) items: "
+                + "\(milliseconds(duration)) ms"
+        )
     }
 
     private static func milliseconds(_ duration: Duration) -> String {
@@ -1942,16 +2026,14 @@ struct PerformanceChecks {
         }
     }
 
-    /// Each element written through `@Published items` copies the whole array
-    /// and fires objectWillChange, so a per-element clear-all loop is O(N²)
-    /// with thousands of publishes — the publish storm left stale rating
-    /// badges in the Browser and froze large folders. Batched clearing must
-    /// stay at one array publish however many photos change.
+    /// Ratings use shared per-file storage rather than copying `items`, but a
+    /// per-element publication storm would still freeze visible Browser rows.
+    /// Clear All must publish once however many physical ratings it resets.
     @MainActor
     private static func clearAllRatingsPublishesOnceForLargeSessions() throws {
         let store = SessionStore()
         store.items = (0..<3000).map { i in
-            var item = makeItem(id: String(format: "IMG_%04d.JPG", i))
+            let item = makeItem(id: String(format: "IMG_%04d.JPG", i))
             item.rating = i.isMultiple(of: 2) ? .yes : .no
             item.ratedAt = Date(timeIntervalSince1970: TimeInterval(i))
             return item
@@ -2004,7 +2086,7 @@ struct PerformanceChecks {
     private static func exportMoveRemovalUpdatesSessionState() throws {
         let store = SessionStore()
         store.items = (0..<10).map { i in
-            var item = makeItem(id: String(format: "IMG_%04d.JPG", i))
+            let item = makeItem(id: String(format: "IMG_%04d.JPG", i))
             item.rating = i < 4 ? .yes : (i < 7 ? .no : .undecided)
             return item
         }

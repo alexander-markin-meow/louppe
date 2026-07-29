@@ -16,26 +16,13 @@ struct BrowserView: View {
     /// Keyboard navigation keeps following as before.
     @State private var suppressNextFollow = false
 
-    /// Structural removals can put a different item at the same numeric
-    /// index. Key Browser rows by the media id so SwiftUI never reuses the
-    /// removed item's selection state for its successor.
-    private struct Entry: Identifiable {
-        let id: String
-        let index: Int
-    }
-
-    private var visibleEntries: [Entry] {
-        store.visibleIndices.compactMap { index in
-            guard store.items.indices.contains(index) else { return nil }
-            return Entry(id: store.items[index].id, index: index)
-        }
-    }
-
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 LazyVStack(spacing: 6) {
-                    ForEach(visibleEntries) { entry in
+                    // Prepared entries keep stable media IDs without rebuilding
+                    // this whole array for each rating/loading publication.
+                    ForEach(store.browserEntries) { entry in
                         BrowserRow(store: store, index: entry.index) {
                             // Only set when the click will actually move
                             // currentIndex, so the flag is always consumed

@@ -85,6 +85,7 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/CleanUpWorker.swift` | Background Trash/restore file loops, progress throttling, pair rollback, O(n+k) restoration merge |
 | `Sources/Louppe/FolderScanner.swift` | Recursive scan, deterministic volume-aware RAW+JPEG pairing, lazy partner-JPEG metadata enrichment, in-memory pairing projection, chronological sort |
 | `Sources/Louppe/ImagePipeline.swift` | ImageIO decoding + AVFoundation first-frame generation, thumbnail memory+disk caches, prefetching |
+| `Sources/Louppe/HistogramPipeline.swift` | Bounded photo-only luminance analysis plus cached Fit/phone-size clipping-warning previews |
 | `Sources/Louppe/HighResolutionImagePipeline.swift` | Lazy Core Image source-region rendering plus the bounded 100% tile cache |
 | `Sources/Louppe/ZoomViewport.swift` | Pure backing-scale/normalized-position geometry and persistent non-published 100% viewport state |
 | `Sources/Louppe/VideoSupport.swift` | Native movie metadata loading, duration formatting |
@@ -101,7 +102,8 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Views/GalleryView.swift` | Gallery layout: Browser / photo / info panel |
 | `Sources/Louppe/Views/BrowserView.swift` | Optional vertical thumbnail Browser with day separators |
 | `Sources/Louppe/Views/GridView.swift` | Grid view, day-grouped rows, click-to-rate, rubber-band selection |
-| `Sources/Louppe/Views/MetadataPanel.swift` | Info panel (filename header, camera, exposure row, fields) |
+| `Sources/Louppe/Views/MetadataPanel.swift` | Info panel (filename header, photo histogram, camera, exposure row, fields) |
+| `Sources/Louppe/Views/HistogramView.swift` | Photo-only histogram, shadow/highlight percentages, and Gallery clipping toggle |
 | `Sources/Louppe/Views/ThumbnailView.swift` | Async thumbnail tile + rating badge |
 | `Sources/Louppe/Views/MediaTileAccessibility.swift` | Shared VoiceOver descriptions and open/rate/select actions for Browser/Grid tiles |
 | `Sources/Louppe/Views/FullImageView.swift` | Large photo with fit / 100% / phone-size zoom |
@@ -165,7 +167,7 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   Keep the row's `.id(item.id)` too (follow-scroll target + state reset when
   Clean Up remaps indices). Details in `Docs/PERFORMANCE.md`.
 - **ImageIO embedded thumbnails**: many JPEGs embed a tiny (~160px) preview.
-  `ImagePipeline.decode` asks for the fast embedded path first and falls back
+  `ImagePipeline.decodeImage` asks for the fast embedded path first and falls back
   to a full decode when the result is undersized — removing that fallback
   brings back blurry/pixelated previews.
 - **100% view identity is persistent**: `GalleryView` must not add

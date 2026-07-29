@@ -37,6 +37,9 @@ struct GalleryView: View {
                         FullImageView(
                             item: item,
                             zoomMode: $store.zoomMode,
+                            showsClippingWarnings:
+                                store.showClippingWarnings
+                                && store.selectedIndices.count <= 1,
                             actualSizeViewport: store.actualSizeViewport
                         ) { loading in
                             store.fullImageLoads += loading ? 1 : -1

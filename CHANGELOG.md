@@ -5,7 +5,23 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-07-28
+## 1.7.0 (9) — 2026-07-29
+
+- Smoothed fast culling and large-folder opening. Transient key-repeat photos
+  no longer immediately start EXIF, histogram, or clipping-warning work;
+  Browser row identities are reused between structural changes; known photo
+  formats avoid repeated system type detection; and the prepared session index
+  reuses the scanner's exact default order instead of sorting the full folder
+  a second time on the main UI thread. Rating one photo now updates only its
+  tiny per-file decision record instead of copying every photo's scan metadata;
+  the 100,000-item performance check dropped from 20.5 ms to about 0.2 ms.
+
+- Added a photo-only luminance histogram to the Info panel, including
+  near-black and near-white percentages with red warnings when either exceeds
+  10%. Gallery clipping inspection can now be toggled with **X** or the Info
+  panel button, painting the matching pixels red in Fit, phone-size, and true
+  100% tiled views without allocating a whole full-resolution bitmap. Videos,
+  unsupported files, and multi-selections omit the complete histogram section.
 
 - Made the RAW+JPEG switch reproject the current session instead of rescanning
   the source folder. The first split reads metadata only from hidden JPEG

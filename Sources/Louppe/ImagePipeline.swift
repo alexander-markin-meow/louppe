@@ -211,7 +211,7 @@ final class ImagePipeline: @unchecked Sendable {
 
         // Try the on-disk thumbnail cache first.
         let diskURL = diskCacheRoot.appendingPathComponent(diskFileName(for: key))
-        if let cgImage = decode(url: diskURL, maxPixel: Self.thumbPixelSize) {
+        if let cgImage = Self.decodeImage(url: diskURL, maxPixel: Self.thumbPixelSize) {
             let image = NSImage(cgImage: cgImage, size: .zero)
             thumbCache.setObject(image, forKey: key as NSString, cost: Self.cost(of: cgImage))
             return image
@@ -219,7 +219,7 @@ final class ImagePipeline: @unchecked Sendable {
 
         let cgImage = item.isVideo
             ? decodeFirstVideoFrame(url: item.primaryURL, maxPixel: Self.thumbPixelSize)
-            : decode(url: item.primaryURL, maxPixel: Self.thumbPixelSize)
+            : Self.decodeImage(url: item.primaryURL, maxPixel: Self.thumbPixelSize)
         guard let cgImage else { return nil }
         let image = NSImage(cgImage: cgImage, size: .zero)
         thumbCache.setObject(image, forKey: key as NSString, cost: Self.cost(of: cgImage))
@@ -237,7 +237,7 @@ final class ImagePipeline: @unchecked Sendable {
 
     private func loadFullSync(url: URL, key: String) -> NSImage? {
         if let cached = fullCache.object(forKey: key as NSString) { return cached }
-        guard let cgImage = decode(url: url, maxPixel: Self.fullPixelSize) else { return nil }
+        guard let cgImage = Self.decodeImage(url: url, maxPixel: Self.fullPixelSize) else { return nil }
         let image = NSImage(cgImage: cgImage, size: .zero)
         fullCache.setObject(image, forKey: key as NSString, cost: Self.cost(of: cgImage))
         return image
@@ -273,7 +273,7 @@ final class ImagePipeline: @unchecked Sendable {
     /// reuse it would return that tiny image upscaled — visibly pixelated. So:
     /// try the fast embedded path first, and if the result is much smaller than
     /// what we asked for, fall back to a real decode of the full image.
-    private func decode(url: URL, maxPixel: CGFloat) -> CGImage? {
+    static func decodeImage(url: URL, maxPixel: CGFloat) -> CGImage? {
         let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
             return nil

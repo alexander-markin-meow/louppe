@@ -7,6 +7,7 @@ import AppKit
 struct ActualSizeImageView: NSViewRepresentable {
     let item: PhotoItem
     let preview: NSImage?
+    let showsClippingWarnings: Bool
     let viewport: ActualSizeViewport
     let onLoading: (Bool) -> Void
 
@@ -21,6 +22,7 @@ struct ActualSizeImageView: NSViewRepresentable {
         scrollView.configure(
             item: item,
             preview: preview,
+            showsClippingWarnings: showsClippingWarnings,
             viewport: viewport,
             onLoading: onLoading
         )
@@ -67,6 +69,7 @@ final class ActualSizeScrollView: NSScrollView {
     func configure(
         item: PhotoItem,
         preview: NSImage?,
+        showsClippingWarnings: Bool,
         viewport: ActualSizeViewport,
         onLoading: @escaping (Bool) -> Void
     ) {
@@ -80,6 +83,9 @@ final class ActualSizeScrollView: NSScrollView {
             self?.onLoading(active)
         }
         canvas.setPreview(preview)
+        let clippingChanged = canvas.setShowsClippingWarnings(
+            showsClippingWarnings
+        )
 
         let itemChanged = currentItemID != item.id
         if itemChanged {
@@ -111,6 +117,9 @@ final class ActualSizeScrollView: NSScrollView {
             applyViewportPosition()
         } else if itemChanged, canvas.source != nil {
             applyViewportPosition()
+        }
+        if clippingChanged {
+            canvas.updateVisibleRect(contentView.documentVisibleRect)
         }
     }
 
@@ -265,6 +274,7 @@ private final class ActualSizeCanvasView: NSView {
     private var wanted: Set<ZoomTileCoordinate> = []
     private var generation: UInt64 = 0
     private var reportsTileActivity = false
+    private var showsClippingWarnings = false
 
     func beginItem(key: String) {
         guard itemKey != key else { return }
@@ -284,6 +294,22 @@ private final class ActualSizeCanvasView: NSView {
         guard self.preview !== preview else { return }
         self.preview = preview
         needsDisplay = true
+    }
+
+    @discardableResult
+    func setShowsClippingWarnings(_ value: Bool) -> Bool {
+        guard showsClippingWarnings != value else { return false }
+        stopReportingActivity()
+        showsClippingWarnings = value
+        tiles = [:]
+        pending = []
+        wanted = []
+        generation &+= 1
+        HighResolutionImagePipeline.shared.cancelTileRequests(
+            exceptSourceKey: nil
+        )
+        needsDisplay = true
+        return true
     }
 
     func setSource(
@@ -368,7 +394,8 @@ private final class ActualSizeCanvasView: NSView {
         tiles = tiles.filter { coordinates.contains($0.key) }
         HighResolutionImagePipeline.shared.retainTileRequests(
             sourceKey: source.key,
-            coordinates: coordinates
+            coordinates: coordinates,
+            showsClippingWarnings: showsClippingWarnings
         )
         requestMissingTiles(source: source)
     }
@@ -460,7 +487,8 @@ private final class ActualSizeCanvasView: NSView {
             Task { @MainActor [weak self] in
                 let tile = await HighResolutionImagePipeline.shared.tile(
                     for: source,
-                    coordinate: coordinate
+                    coordinate: coordinate,
+                    showsClippingWarnings: self?.showsClippingWarnings ?? false
                 )
                 guard let self else { return }
                 guard self.generation == requestGeneration else { return }

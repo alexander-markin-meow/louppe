@@ -29,6 +29,11 @@ operations belong elsewhere:
   coalesced; foreground and prefetch calls share the same in-flight operation,
   and a foreground join promotes utility prefetch work. With separate queues
   the current full image never waits behind tile backlog at all.
+- `HistogramPipeline` decodes at most two 1,024-pixel photo previews at once,
+  coalesces same-photo requests, and retains only 256 small histogram value
+  results. Videos, unsupported files, and multi-selection summaries do not
+  enqueue analysis. `ClippingPreviewPipeline` reuses `ImagePipeline`'s
+  coalesced full preview and transforms at most two images concurrently.
 - `HighResolutionImagePipeline` is the separate 100% lane. It keeps lazy,
   oriented Core Image source recipes for at most four recent photos, renders
   at most two 1,024-source-pixel tiles concurrently, coalesces identical tile
@@ -52,16 +57,23 @@ operations belong elsewhere:
 
 Do not move filesystem loops or JSON encoding back onto `SessionStore`.
 
-## Batched `items` mutations
+## Shared rating storage
 
-Combine's `@Published` exposes no in-place accessor, so every element written
-through the wrapper (`items[i].rating = …`) copies the entire array and fires
-its own `objectWillChange`. A per-element loop is O(N²) with thousands of
-publishes — on a large folder that froze the app for seconds and the publish
-storm left stale rating badges in the Browser. Any mutation touching more than
-one element must go through `SessionStore.updateItems`, which mutates one
-local copy and publishes once (verified by the clear-all/batch-rating
-performance checks).
+`PhotoItem` is mostly immutable scan metadata. Copying the complete
+`@Published [PhotoItem]` array for one F/D decision made rating latency grow
+with the folder size: the 100,000-item check measured 20.5 ms for one rating.
+Each physical `PhotoFile` therefore keeps only its `Rating`/`ratedAt` pair in a
+small shared, lock-protected storage object. `SessionStore` sends one
+`objectWillChange`, updates the touched file or RAW+JPEG pair, and adjusts the
+cached tally without replacing `items`; the same check is about 0.2 ms.
+
+Value copies of a `PhotoItem` intentionally share that physical-file rating
+storage. This preserves independent RAW and JPEG decisions through pairing
+projection and gives detached readers an atomic rating/date snapshot. Do not
+put the mutable fields back directly into the large value array. Clear All
+remains O(N), but it mutates only the small rating records and publishes once;
+normal single-photo culling is O(1). The large-session rating, clear-all, batch
+rating, pairing, persistence, and undo checks enforce these boundaries.
 
 ## Browser row invalidation
 
@@ -86,17 +98,23 @@ coalesce into a single update transaction.
 
 - Thumbnails: at most 1,200 objects and 256 MiB decoded cost.
 - Full previews: at most 8 objects and 384 MiB decoded cost.
+- Clipping-warning previews: at most 2 objects and 128 MiB decoded cost.
+- Histograms: at most 256 value-only results; analysis bitmaps are temporary
+  and no larger than 1,024 pixels.
 - Actual-size tiles: 128 MiB decoded cost across 1,024 × 1,024 source-pixel
-  tiles. The lazy source recipe is not a whole decoded bitmap.
+  tiles, including both normal and clipping-warning variants. The lazy source
+  recipe is not a whole decoded bitmap.
 - Disk thumbnails: 512 MiB maximum and 90-day maximum age, pruned on the utility
   queue at startup.
 
 Decoded cost is `bytesPerRow × height`. Thumbnail JPEG encoding/writing happens
 after the image is returned to the view. Keep the undersized-embedded-preview
-fallback in `ImagePipeline.decode`; it prevents pixelated JPEG previews.
+fallback in `ImagePipeline.decodeImage`; it prevents pixelated JPEG previews.
 Neighbour prefetch is debounced by 60 ms, and a new full-image view waits 40 ms
 before enqueuing a decode so key repeat does not flood the bounded queue with
-views that have already disappeared.
+views that have already disappeared. Fit/phone-size clipping previews share
+that same delay, while secondary Info-panel EXIF and histogram work waits
+80 ms. Full and clipping-preview memory-cache hits are still immediate.
 
 At 100%, document points are source pixels divided by the window's backing
 scale: one image pixel therefore maps to one physical display pixel on both
@@ -106,6 +124,14 @@ published; scroll-wheel traffic must not invalidate the rest of the session
 UI. The AppKit scroll view survives item changes, clamps the position for each
 new aspect ratio, and preserves an unscrollable axis for the next larger
 photo. Pressing S or closing/changing folders resets it to center.
+
+Clipping warnings use the same 8-bit sRGB luminance thresholds as the Info
+panel histogram: 0–5 for shadows and 250–255 for highlights. Fit and
+phone-size modes reuse a bounded 4,096-pixel warning preview. At 100%, the
+threshold is applied inside the existing two-operation tile lane, keyed by
+warning mode, so toggling never constructs a whole source-resolution bitmap.
+Changing photos or warning mode advances the viewport generation before stale
+tile results can display.
 
 Thumbnail cache keys use each file's modification date captured by
 `FolderScanner`. Do not put a filesystem metadata lookup back in
@@ -182,6 +208,7 @@ the session after the user has left the scanning view.
 - cached type/camera/lens counts and labels;
 - cached calendar-day counts and folder-wide aperture/shutter/ISO ranges;
 - a sorted index list reused by filter-only changes;
+- stable Browser id/index entries rebuilt only with the visible generation;
 - cached visible day groups and day-start indices.
 - one visible-location map containing each item index's global position,
   group, and position inside that group. Navigation, range selection,
@@ -313,6 +340,12 @@ hosted CI machines vary. Structural counts and every location mapping are
 asserted. Grid sections use metadata-derived stable IDs, so filtering a
 group's former first member does not make SwiftUI discard and recreate the
 remaining section.
+
+`FolderScanner.sortItems` uses the exact `PhotoSort()` comparator. The prepared
+index therefore treats the physical item order as the default sorted order and
+does not repeat the same O(N log N) localized-name sort on the main actor after
+opening a folder or when returning to the default sort. Non-default sort keys
+still rebuild their own index order.
 
 ## Selection state
 

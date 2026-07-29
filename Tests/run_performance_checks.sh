@@ -18,6 +18,7 @@ swiftc \
     Sources/Louppe/MetadataExtractor.swift \
     Sources/Louppe/VideoSupport.swift \
     Sources/Louppe/ImagePipeline.swift \
+    Sources/Louppe/HistogramPipeline.swift \
     Sources/Louppe/HighResolutionImagePipeline.swift \
     Sources/Louppe/ZoomViewport.swift \
     Sources/Louppe/VideoPlaybackController.swift \
