@@ -96,6 +96,10 @@ observes `SessionStore` directly and reads its current `PhotoItem` inside
 thumbnail-state correctness. This is especially important because the Grid's
 interactive rating control must redraw immediately after pointer, keyboard,
 Clear All, or undo changes without replacing the large `items` array.
+Direct Grid photo and rating-control clicks suppress the next one-shot
+follow-scroll because their tile is already rendered under the pointer.
+Keyboard navigation and structural current-item changes continue following the
+stable media ID.
 
 The fan-out is bounded: only realized rows and cells subscribe, their bodies
 are a bounds check plus cache-hit lookups, and multiple publishes in one turn

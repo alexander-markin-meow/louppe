@@ -11,7 +11,8 @@ release bundle.
   changing its decision, while a larger clickable status circle cycles
   Undecided, Yes, and No. Grid cells now observe rating changes directly, so
   their status circles refresh immediately after pointer, keyboard, Clear All,
-  and undo actions.
+  and undo actions. Selecting or rating a visible tile no longer re-centers the
+  Grid under the pointer.
 
 - Added location-aware Gallery zoom: double-clicking the displayed photo now
   enters true 100% zoom at the clicked detail; double-clicking it again returns

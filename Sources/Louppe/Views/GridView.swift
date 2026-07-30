@@ -32,6 +32,10 @@ struct GridView: View {
     /// A cancellable, one-shot follow request. Unlike a bound scroll position,
     /// this stays completely idle while the user manually scrolls the grid.
     @State private var followTask: Task<Void, Never>?
+    /// A pointer click already targets a rendered tile, so centering that same
+    /// tile would move the Grid under the pointer. Keyboard navigation and
+    /// structural current-item changes continue to follow normally.
+    @State private var suppressNextFollow = false
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: store.gridThumbSize, maximum: store.gridThumbSize * 1.4), spacing: 10)]
@@ -118,7 +122,14 @@ struct GridView: View {
                 .onChange(of: store.gridThumbSize) { _, _ in
                     updateColumnCount(for: geometry.size.width)
                 }
-                .onChange(of: store.currentIndex) {
+                // Follow the stable media identity as well as numeric index
+                // changes: Clean Up or Move can replace an item at the same
+                // index.
+                .onChange(of: store.currentItem?.id) {
+                    if suppressNextFollow {
+                        suppressNextFollow = false
+                        return
+                    }
                     followCurrentPhoto(using: proxy, animated: true)
                 }
                 .onDisappear {
@@ -165,7 +176,11 @@ struct GridView: View {
     }
 
     private func cell(index: Int, item: PhotoItem) -> some View {
-        GridCell(store: store, index: index)
+        GridCell(
+            store: store,
+            index: index,
+            onPointerCurrentChange: suppressFollowForPointerAction
+        )
         .id(item.id)
         .contentShape(Rectangle())
         .background(
@@ -176,6 +191,11 @@ struct GridView: View {
                 )
             }
         )
+    }
+
+    private func suppressFollowForPointerAction() {
+        suppressNextFollow = true
+        followTask?.cancel()
     }
 
     // MARK: - Rubber-band selection
@@ -219,13 +239,21 @@ struct GridView: View {
 /// shared per-file rating storage changes. Keeping the observation here makes
 /// the badge, selection frame, and accessibility value update immediately.
 private struct GridCell: View {
+    private static let ratingBadgeSize: CGFloat = 21
+    private static let ratingButtonSize: CGFloat = 40
+
     @ObservedObject var store: SessionStore
     let index: Int
+    let onPointerCurrentChange: () -> Void
 
     var body: some View {
         if store.items.indices.contains(index) {
             let item = store.items[index]
-            let actions = GridCellActions(store: store, index: index)
+            let actions = GridCellActions(
+                store: store,
+                index: index,
+                onPointerCurrentChange: onPointerCurrentChange
+            )
             VStack(spacing: 3) {
                 ZStack {
                     ThumbnailView(
@@ -292,13 +320,16 @@ private struct GridCell: View {
                         RatingBadge(
                             rating: item.rating,
                             isMixed: item.hasMixedRatings,
-                            size: 18
+                            size: Self.ratingBadgeSize
                         )
-                        .frame(width: 30, height: 30)
+                        .frame(
+                            width: Self.ratingButtonSize,
+                            height: Self.ratingButtonSize
+                        )
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .padding(1)
+                    .padding(2)
                     .help("Change rating")
                     .accessibilityLabel("Change rating for \(item.displayName)")
                     .accessibilityValue(
@@ -329,7 +360,11 @@ private struct GridCell: View {
             GridCellActions(store: store, index: index).openInGallery()
         }
         .exclusively(before: TapGesture(count: 1).onEnded {
-            GridCellActions(store: store, index: index).selectPhoto()
+            GridCellActions(
+                store: store,
+                index: index,
+                onPointerCurrentChange: onPointerCurrentChange
+            ).selectPhoto()
         })
     }
 }
@@ -341,6 +376,7 @@ private struct GridCell: View {
 struct GridCellActions {
     let store: SessionStore
     let index: Int
+    var onPointerCurrentChange: () -> Void = {}
 
     func makeCurrent() {
         store.setIndex(index)
@@ -348,6 +384,9 @@ struct GridCellActions {
 
     func selectPhoto() {
         store.handleThumbnailClick(at: index) {
+            if index != store.currentIndex {
+                onPointerCurrentChange()
+            }
             makeCurrent()
         }
     }
@@ -364,6 +403,17 @@ struct GridCellActions {
     func cycleRating(currentEvent: NSEvent? = NSApp.currentEvent) {
         guard GridRatingActivation.shouldActivate(for: currentEvent) else {
             return
+        }
+        guard !store.isFileOperationRunning,
+              store.items.indices.contains(index)
+        else {
+            return
+        }
+        let ratesExistingSelection =
+            store.selectedIndices.count > 1
+            && store.selectedIndices.contains(index)
+        if !ratesExistingSelection, index != store.currentIndex {
+            onPointerCurrentChange()
         }
         store.toggleRating(at: index)
     }

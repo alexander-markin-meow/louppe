@@ -92,6 +92,61 @@ final class SelectionStateTests: XCTestCase {
         XCTAssertEqual(store.currentIndex, 2)
     }
 
+    func testGridPhotoClickSignalsBeforeChangingCurrentPhoto() {
+        let store = readyStore()
+        var currentWhenSignalled: Int?
+        let actions = GridCellActions(
+            store: store,
+            index: 3,
+            onPointerCurrentChange: {
+                currentWhenSignalled = store.currentIndex
+            }
+        )
+
+        actions.selectPhoto()
+
+        XCTAssertEqual(currentWhenSignalled, 0)
+        XCTAssertEqual(store.currentIndex, 3)
+    }
+
+    func testGridRatingClickSignalsOnlyWhenItMovesCurrentPhoto() {
+        let store = readyStore()
+        var signalCount = 0
+        let actions = GridCellActions(
+            store: store,
+            index: 2,
+            onPointerCurrentChange: {
+                signalCount += 1
+            }
+        )
+
+        actions.cycleRating(currentEvent: nil)
+        actions.cycleRating(currentEvent: nil)
+
+        XCTAssertEqual(signalCount, 1)
+        XCTAssertEqual(store.currentIndex, 2)
+        XCTAssertEqual(store.items[2].rating, .no)
+    }
+
+    func testGridBatchRatingDoesNotSignalCurrentPhotoChange() {
+        let store = readyStore()
+        store.selectRange(to: 2)
+        var signalCount = 0
+        let actions = GridCellActions(
+            store: store,
+            index: 1,
+            onPointerCurrentChange: {
+                signalCount += 1
+            }
+        )
+
+        actions.cycleRating(currentEvent: nil)
+
+        XCTAssertEqual(signalCount, 0)
+        XCTAssertEqual(store.currentIndex, 0)
+        XCTAssertEqual(store.items.prefix(3).map(\.rating), [.yes, .yes, .yes])
+    }
+
     func testGridRatingControlPreservesBatchSelectionBehavior() {
         let store = readyStore()
         store.selectRange(to: 2)
