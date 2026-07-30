@@ -9,6 +9,10 @@ struct FullImageView: View {
     @Binding var zoomMode: ZoomMode
     let showsClippingWarnings: Bool
     let actualSizeViewport: ActualSizeViewport
+    /// Fit/phone-size double-click asks the store to enter 100% at this point.
+    let onZoomToActual: (NormalizedImagePosition) -> Void
+    /// A second double-click in 100% asks the store to return to Fit.
+    let onZoomToFit: () -> Void
     /// Reports decode start/finish upward — the toolbar shows a small spinner
     /// there instead of flashing one in the middle of the photo area.
     var onLoading: (Bool) -> Void
@@ -31,12 +35,16 @@ struct FullImageView: View {
         zoomMode: Binding<ZoomMode>,
         showsClippingWarnings: Bool = false,
         actualSizeViewport: ActualSizeViewport,
+        onZoomToActual: @escaping (NormalizedImagePosition) -> Void,
+        onZoomToFit: @escaping () -> Void,
         onLoading: @escaping (Bool) -> Void = { _ in }
     ) {
         self.item = item
         self._zoomMode = zoomMode
         self.showsClippingWarnings = showsClippingWarnings
         self.actualSizeViewport = actualSizeViewport
+        self.onZoomToActual = onZoomToActual
+        self.onZoomToFit = onZoomToFit
         self.onLoading = onLoading
         self._loadedItemID = State(initialValue: item.id)
         // Seed from the in-memory caches — synchronous dictionary lookups,
@@ -84,22 +92,23 @@ struct FullImageView: View {
                         preview: presentationImage ?? presentationPreview,
                         showsClippingWarnings: showsClippingWarnings,
                         viewport: actualSizeViewport,
+                        onDoubleClick: onZoomToFit,
                         onLoading: onLoading
                     )
                 case .fit where presentationImage != nil:
                     if let presentationImage {
-                        Image(nsImage: presentationImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        ZoomableFittedImage(
+                            image: presentationImage,
+                            onDoubleClick: onZoomToActual
+                        )
                     }
                 case .small where presentationImage != nil:
                     if let presentationImage {
-                        Image(nsImage: presentationImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: 400, maxHeight: 600)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        ZoomableFittedImage(
+                            image: presentationImage,
+                            maximumSize: CGSize(width: 400, height: 600),
+                            onDoubleClick: onZoomToActual
+                        )
                     }
                 case .fit, .small:
                     if loadedItemID == item.id, failedToLoad {
@@ -110,10 +119,13 @@ struct FullImageView: View {
                         )
                     } else if let presentationPreview {
                         // Blurry-but-instant stand-in; the full decode replaces it.
-                        Image(nsImage: presentationPreview)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        ZoomableFittedImage(
+                            image: presentationPreview,
+                            maximumSize: zoomMode == .small
+                                ? CGSize(width: 400, height: 600)
+                                : nil,
+                            onDoubleClick: onZoomToActual
+                        )
                     } else {
                         // Loading with nothing cached yet: keep the photo area
                         // quiet; the toolbar spinner is the indication.
@@ -198,5 +210,84 @@ struct FullImageView: View {
                   loadedItemID == requestedItem.id else { return }
             clippingImage = loaded
         }
+    }
+}
+
+/// Displays exactly the fitted image rectangle so only the photo—not its
+/// letterboxed surroundings—owns the location-aware double-click gesture.
+private struct ZoomableFittedImage: View {
+    let image: NSImage
+    var maximumSize: CGSize? = nil
+    let onDoubleClick: (NormalizedImagePosition) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            let imageFrame = FittedImageGeometry.frame(
+                imageSize: image.size,
+                containerSize: geometry.size,
+                maximumSize: maximumSize
+            )
+            if !imageFrame.isEmpty {
+                Image(nsImage: image)
+                    .resizable()
+                    .frame(
+                        width: imageFrame.width,
+                        height: imageFrame.height
+                    )
+                    .position(
+                        x: imageFrame.midX,
+                        y: imageFrame.midY
+                    )
+                    .contentShape(Rectangle())
+                    .overlay {
+                        FittedImageDoubleClickOverlay(
+                            onDoubleClick: onDoubleClick
+                        )
+                        .accessibilityHidden(true)
+                    }
+                    .accessibilityHint(
+                        "Double-click to inspect this point at 100 percent."
+                    )
+            }
+        }
+    }
+}
+
+/// A native macOS click surface sized to the rendered photo rectangle. It
+/// reports pointer locations in the same top-left coordinate system used by
+/// the tiled 100% viewport.
+private struct FittedImageDoubleClickOverlay: NSViewRepresentable {
+    let onDoubleClick: (NormalizedImagePosition) -> Void
+
+    func makeNSView(context: Context) -> FittedImageDoubleClickView {
+        let view = FittedImageDoubleClickView()
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(
+        _ nsView: FittedImageDoubleClickView,
+        context: Context
+    ) {
+        nsView.onDoubleClick = onDoubleClick
+    }
+}
+
+@MainActor
+final class FittedImageDoubleClickView: NSView {
+    override var isFlipped: Bool { true }
+
+    var onDoubleClick: (NormalizedImagePosition) -> Void = { _ in }
+
+    override func mouseDown(with event: NSEvent) {
+        guard event.clickCount == 2 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard let position = FittedImageGeometry.normalizedPosition(
+            at: point,
+            in: bounds
+        ) else {
+            return
+        }
+        onDoubleClick(position)
     }
 }

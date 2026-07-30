@@ -9,6 +9,7 @@ struct ActualSizeImageView: NSViewRepresentable {
     let preview: NSImage?
     let showsClippingWarnings: Bool
     let viewport: ActualSizeViewport
+    let onDoubleClick: () -> Void
     let onLoading: (Bool) -> Void
 
     func makeNSView(context: Context) -> ActualSizeScrollView {
@@ -24,6 +25,7 @@ struct ActualSizeImageView: NSViewRepresentable {
             preview: preview,
             showsClippingWarnings: showsClippingWarnings,
             viewport: viewport,
+            onDoubleClick: onDoubleClick,
             onLoading: onLoading
         )
     }
@@ -42,7 +44,7 @@ final class ActualSizeScrollView: NSScrollView {
     private var sourceTask: Task<Void, Never>?
     private var currentItemID: String?
     private var sourceGeneration: UInt64 = 0
-    private var appliedResetGeneration: UInt64?
+    private var appliedPositionRequestGeneration: UInt64?
     private var backingScale: CGFloat = 1
     private var isApplyingViewport = false
     private var viewport: ActualSizeViewport?
@@ -71,17 +73,19 @@ final class ActualSizeScrollView: NSScrollView {
         preview: NSImage?,
         showsClippingWarnings: Bool,
         viewport: ActualSizeViewport,
+        onDoubleClick: @escaping () -> Void = {},
         onLoading: @escaping (Bool) -> Void
     ) {
         self.viewport = viewport
         self.onLoading = onLoading
         setAccessibilityLabel("100% view of \(item.displayName)")
         setAccessibilityHelp(
-            "Scroll to inspect the photo. The position follows navigation until S resets it."
+            "Scroll to inspect the photo. Double-click to return to Fit. The position follows navigation until S resets it."
         )
         canvas.onTileActivityChanged = { [weak self] active in
             self?.onLoading(active)
         }
+        canvas.onDoubleClick = onDoubleClick
         canvas.setPreview(preview)
         let clippingChanged = canvas.setShowsClippingWarnings(
             showsClippingWarnings
@@ -110,10 +114,12 @@ final class ActualSizeScrollView: NSScrollView {
             }
         }
 
-        let resetChanged =
-            appliedResetGeneration != viewport.resetGeneration
-        if resetChanged {
-            appliedResetGeneration = viewport.resetGeneration
+        let positionRequestChanged =
+            appliedPositionRequestGeneration
+                != viewport.positionRequestGeneration
+        if positionRequestChanged {
+            appliedPositionRequestGeneration =
+                viewport.positionRequestGeneration
             applyViewportPosition()
         } else if itemChanged, canvas.source != nil {
             applyViewportPosition()
@@ -124,9 +130,11 @@ final class ActualSizeScrollView: NSScrollView {
     }
 
     func prepareForRemoval() {
-        // S resets the viewport before SwiftUI removes this representable.
-        // Do not let teardown capture the old scroll position over that reset.
-        if appliedResetGeneration == viewport?.resetGeneration {
+        // S requests the centered viewport before SwiftUI removes this
+        // representable. Do not capture the old scroll position over a newer
+        // explicit position request.
+        if appliedPositionRequestGeneration
+            == viewport?.positionRequestGeneration {
             captureViewport()
         }
         sourceTask?.cancel()
@@ -264,6 +272,7 @@ private final class ActualSizeCanvasView: NSView {
     private(set) var source: ZoomImageSource?
     private(set) var imageSize: CGSize = .zero
     var onTileActivityChanged: (Bool) -> Void = { _ in }
+    var onDoubleClick: () -> Void = {}
 
     private var itemKey: String?
     private var preview: NSImage?
@@ -408,6 +417,16 @@ private final class ActualSizeCanvasView: NSView {
         tiles = [:]
     }
 
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let displayedFrame = source == nil ? fittedPreviewFrame() : imageFrame
+        if event.clickCount == 2, displayedFrame.contains(point) {
+            onDoubleClick()
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if source == nil {
@@ -447,22 +466,8 @@ private final class ActualSizeCanvasView: NSView {
 
     private func drawPreviewFitted() {
         guard let preview else { return }
-        let sourceSize = preview.size
-        guard sourceSize.width > 0, sourceSize.height > 0 else { return }
-        let scale = min(
-            bounds.width / sourceSize.width,
-            bounds.height / sourceSize.height
-        )
-        let size = CGSize(
-            width: sourceSize.width * scale,
-            height: sourceSize.height * scale
-        )
-        let rect = CGRect(
-            x: (bounds.width - size.width) / 2,
-            y: (bounds.height - size.height) / 2,
-            width: size.width,
-            height: size.height
-        )
+        let rect = fittedPreviewFrame()
+        guard !rect.isEmpty else { return }
         NSGraphicsContext.current?.imageInterpolation = .high
         preview.draw(
             in: rect,
@@ -471,6 +476,14 @@ private final class ActualSizeCanvasView: NSView {
             fraction: 1,
             respectFlipped: true,
             hints: nil
+        )
+    }
+
+    private func fittedPreviewFrame() -> CGRect {
+        guard let preview else { return .zero }
+        return FittedImageGeometry.frame(
+            imageSize: preview.size,
+            containerSize: bounds.size
         )
     }
 

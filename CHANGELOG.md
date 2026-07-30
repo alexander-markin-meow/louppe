@@ -5,7 +5,18 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-07-29
+## 1.7.0 (9) — 2026-07-30
+
+- Split Grid selection from rating: clicking a photo now selects it without
+  changing its decision, while a larger clickable status circle cycles
+  Undecided, Yes, and No. Grid cells now observe rating changes directly, so
+  their status circles refresh immediately after pointer, keyboard, Clear All,
+  and undo actions.
+
+- Added location-aware Gallery zoom: double-clicking the displayed photo now
+  enters true 100% zoom at the clicked detail; double-clicking it again returns
+  to Fit. The letterboxed background does nothing and S keeps its centered
+  behavior.
 
 - Smoothed fast culling and large-folder opening. Transient key-repeat photos
   no longer immediately start EXIF, histogram, or clipping-warning work;

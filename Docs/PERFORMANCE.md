@@ -75,7 +75,7 @@ remains O(N), but it mutates only the small rating records and publishes once;
 normal single-photo culling is O(1). The large-session rating, clear-all, batch
 rating, pairing, persistence, and undo checks enforce these boundaries.
 
-## Browser row invalidation
+## Lazy thumbnail invalidation
 
 Batching alone did not cure the stale Browser: on macOS 26 a `LazyVStack`'s
 diff of already-created rows is not a reliable invalidation path — realized
@@ -90,8 +90,15 @@ row directly, independent of the container's caching. Two invariants:
   resets `ThumbnailView`'s cached `@State` image when Clean Up or its undo
   remaps an absolute index to a different photo.
 
-The fan-out is bounded: only realized rows subscribe, their bodies are a
-bounds check plus cache-hit lookups, and multiple publishes in one turn
+The Grid has the same lazy-container boundary. Each realized `GridCell`
+observes `SessionStore` directly and reads its current `PhotoItem` inside
+`body`, while the outer lazy grid retains `.id(item.id)` for follow-scroll and
+thumbnail-state correctness. This is especially important because the Grid's
+interactive rating control must redraw immediately after pointer, keyboard,
+Clear All, or undo changes without replacing the large `items` array.
+
+The fan-out is bounded: only realized rows and cells subscribe, their bodies
+are a bounds check plus cache-hit lookups, and multiple publishes in one turn
 coalesce into a single update transaction.
 
 ## Image cache budgets
@@ -124,6 +131,13 @@ published; scroll-wheel traffic must not invalidate the rest of the session
 UI. The AppKit scroll view survives item changes, clamps the position for each
 new aspect ratio, and preserves an unscrollable axis for the next larger
 photo. Pressing S or closing/changing folders resets it to center.
+
+Fit and phone-size presentations map a double-click through their actual
+letterboxed image rectangle to a normalized source position, request that
+position from `ActualSizeViewport`, and only then enter 100%. The clicked point
+therefore lands under the 100% viewport center (clamped at image edges), while
+double-clicking the 100% image returns to Fit. The surrounding background does
+nothing in either mode, and S retains its centered reset behavior.
 
 Clipping warnings use the same 8-bit sRGB luminance thresholds as the Info
 panel histogram: 0–5 for shadows and 250–255 for highlights. Fit and

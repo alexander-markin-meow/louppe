@@ -1080,7 +1080,7 @@ final class SessionStore: ObservableObject {
 
     /// Routes a thumbnail click by modifier key — shared by the Browser and
     /// Grid views so both respond identically. `plainClick` runs when no
-    /// modifier is held (the Browser jumps; the Grid cycles rating).
+    /// modifier is held; both views use it to make the clicked photo current.
     func handleThumbnailClick(at index: Int, plainClick: () -> Void) {
         guard !isFileOperationRunning else { return }
         if NSEvent.modifierFlags.contains(.shift) {
@@ -1193,10 +1193,10 @@ final class SessionStore: ObservableObject {
         advanceToNextUndecided()
     }
 
-    /// Grid click: cycle the clicked photo's rating. Clicking a photo
-    /// that's part of a multi-selection gives the whole selection the clicked
-    /// photo's next rating in one undoable step; the selection stays so the
-    /// user can keep cycling.
+    /// Grid rating-control click: cycle the clicked photo's rating. Using the
+    /// control on a photo that's part of a multi-selection gives the whole
+    /// selection the clicked photo's next rating in one undoable step; the
+    /// selection stays so the user can keep cycling.
     func toggleRating(at index: Int) {
         guard !isFileOperationRunning else { return }
         guard items.indices.contains(index) else { return }
@@ -1866,6 +1866,19 @@ final class SessionStore: ObservableObject {
             actualSizeViewport.reset()
         }
         zoomMode = (zoomMode == mode) ? .fit : mode
+    }
+
+    /// Gallery double-click enters 100% with the clicked image point under the
+    /// viewport center. Unlike S, it deliberately does not reset to center.
+    func zoomToActual(at position: NormalizedImagePosition) {
+        actualSizeViewport.request(position: position)
+        zoomMode = .actual
+    }
+
+    /// A second Gallery double-click leaves the saved inspection point intact
+    /// but returns the presentation to Fit. S remains the centered reset.
+    func zoomToFit() {
+        zoomMode = .fit
     }
 
     @discardableResult

@@ -63,8 +63,15 @@ missing or a file no longer matches, it leaves everything untouched and offers
 | Esc | Cancel scanning, or clear the active photo selection |
 | ⌘⌫ | Move selected photo(s) to the Trash — instant, no dialog (⌘Z restores) |
 
-In the **Grid view**: single-click a photo to cycle its rating
-(undecided → yes → no), double-click to open it big in the main view.
+In the **Grid view**, single-click a photo or its filename to select it without
+changing its rating. Click the larger status circle in the photo's top-right
+corner to cycle undecided → yes → no → undecided. Double-click the photo to
+open it big in Gallery.
+
+In the **Gallery view**, double-click a point on the displayed photo to inspect
+that exact area at true 100% zoom, then double-click the photo again to return
+to Fit. The letterboxed background does not respond. The **S** shortcut
+continues to enter 100% at the center or return to Fit.
 
 Videos use their first frame as the thumbnail and show their duration at all
 times. Use the play/pause button to preview a video directly in the Grid, or
@@ -122,13 +129,13 @@ missing the chosen metadata stay at the end in either direction.
 - **⌘A** selects everything currently shown (filtered-out photos stay out).
 - **⌘⇧← / ⌘⇧→** select everything from the current photo to the first / last.
 - With several photos selected, **F** and **D** rate them all at once and jump
-  to the next undecided photo — one ⌘Z undoes the whole batch. In the Light
-  Table, clicking any photo inside the selection cycles the rating for all of
-  them. The toolbar counter shows how many items are selected. The Info panel
-  switches to a selection summary with the selected item and underlying file
-  counts, every camera, lens, capture-date span, combined size, and file type
-  represented in the selection. RAW+JPEG details show both files' sizes and
-  their total.
+  to the next undecided photo — one ⌘Z undoes the whole batch. In the Grid,
+  clicking the status circle on any photo inside the selection cycles
+  the rating for all of them. The toolbar counter shows how many items are
+  selected. The Info panel switches to a selection summary with the selected
+  item and underlying file counts, every camera, lens, capture-date span,
+  combined size, and file type represented in the selection. RAW+JPEG details
+  show both files' sizes and their total.
 - **Esc**, a plain click, or an arrow key drops the selection.
 
 ### Cleaning up the folder

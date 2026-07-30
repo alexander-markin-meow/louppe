@@ -75,6 +75,93 @@ final class ZoomTests: XCTestCase {
         XCTAssertEqual(result.y, 0.65, accuracy: 0.001)
     }
 
+    func testFittedImageClickMapsThroughLetterboxing() {
+        let frame = FittedImageGeometry.frame(
+            imageSize: CGSize(width: 2000, height: 1000),
+            containerSize: CGSize(width: 1000, height: 1000)
+        )
+        XCTAssertEqual(
+            frame,
+            CGRect(x: 0, y: 250, width: 1000, height: 500)
+        )
+
+        let position = FittedImageGeometry.normalizedPosition(
+            at: CGPoint(x: 250, y: 375),
+            in: frame
+        )
+        XCTAssertEqual(position?.x ?? -1, 0.25, accuracy: 0.001)
+        XCTAssertEqual(position?.y ?? -1, 0.25, accuracy: 0.001)
+        XCTAssertNil(
+            FittedImageGeometry.normalizedPosition(
+                at: CGPoint(x: 250, y: 100),
+                in: frame
+            )
+        )
+    }
+
+    func testPhoneSizeFitRetainsAspectRatioAndContainerCenter() {
+        let frame = FittedImageGeometry.frame(
+            imageSize: CGSize(width: 3000, height: 2000),
+            containerSize: CGSize(width: 1200, height: 900),
+            maximumSize: CGSize(width: 400, height: 600)
+        )
+
+        XCTAssertEqual(frame.width, 400, accuracy: 0.001)
+        XCTAssertEqual(frame.height, 266.667, accuracy: 0.001)
+        XCTAssertEqual(frame.midX, 600, accuracy: 0.001)
+        XCTAssertEqual(frame.midY, 450, accuracy: 0.001)
+    }
+
+    func testFittedImageDoubleClickViewReportsTheClickedPoint() throws {
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 400, height: 200),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        let clickView = FittedImageDoubleClickView(
+            frame: window.contentView!.bounds
+        )
+        window.contentView = clickView
+        var reportedPosition: NormalizedImagePosition?
+        clickView.onDoubleClick = { position in
+            reportedPosition = position
+        }
+
+        clickView.mouseDown(
+            with: try mouseDownEvent(
+                in: clickView,
+                at: CGPoint(x: 100, y: 50),
+                clickCount: 1,
+                eventNumber: 1
+            )
+        )
+        XCTAssertNil(reportedPosition)
+
+        clickView.mouseDown(
+            with: try mouseDownEvent(
+                in: clickView,
+                at: CGPoint(x: 100, y: 50),
+                clickCount: 2,
+                eventNumber: 2
+            )
+        )
+        XCTAssertEqual(reportedPosition?.x ?? -1, 0.25, accuracy: 0.001)
+        XCTAssertEqual(reportedPosition?.y ?? -1, 0.25, accuracy: 0.001)
+
+        reportedPosition = nil
+        clickView.mouseDown(
+            with: try mouseDownEvent(
+                in: clickView,
+                at: CGPoint(x: 401, y: 50),
+                clickCount: 2,
+                eventNumber: 3
+            )
+        )
+        XCTAssertNil(reportedPosition)
+    }
+
     func testNavigationKeepsPositionAndSResetsIt() {
         _ = NSApplication.shared
         let store = readyStore()
@@ -93,6 +180,84 @@ final class ZoomTests: XCTestCase {
         XCTAssertTrue(view.handleKey(keyEvent(code: 1, characters: "s")))
         XCTAssertEqual(store.zoomMode, .fit)
         XCTAssertEqual(store.actualSizeViewport.position, .center)
+    }
+
+    func testDoubleClickTogglesRequestedActualAndFitWhileSStillResets() {
+        let store = readyStore()
+        let clicked = NormalizedImagePosition(x: 0.21, y: 0.74)
+
+        store.zoomToActual(at: clicked)
+
+        XCTAssertEqual(store.zoomMode, .actual)
+        XCTAssertEqual(store.actualSizeViewport.position, clicked)
+
+        store.zoomToFit()
+
+        XCTAssertEqual(store.zoomMode, .fit)
+        XCTAssertEqual(store.actualSizeViewport.position, clicked)
+
+        store.toggleZoom(.actual)
+
+        XCTAssertEqual(store.zoomMode, .actual)
+        XCTAssertEqual(store.actualSizeViewport.position, .center)
+    }
+
+    func testActualScrollViewDoubleClickOnlyExitsOverDisplayedImage() throws {
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        let scrollView = ActualSizeScrollView(frame: window.contentView!.bounds)
+        window.contentView = scrollView
+        let preview = NSImage(size: CGSize(width: 100, height: 100))
+        var exitCount = 0
+        scrollView.configure(
+            item: makeItem("PREVIEW.JPG"),
+            preview: preview,
+            showsClippingWarnings: false,
+            viewport: ActualSizeViewport(),
+            onDoubleClick: {
+                exitCount += 1
+            },
+            onLoading: { _ in }
+        )
+        scrollView.layoutSubtreeIfNeeded()
+
+        let inside = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: CGPoint(x: 160, y: 120),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 2,
+                pressure: 1
+            )
+        )
+        scrollView.documentView?.mouseDown(with: inside)
+        XCTAssertEqual(exitCount, 1)
+
+        let outside = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: CGPoint(x: 10, y: 120),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 2,
+                clickCount: 2,
+                pressure: 1
+            )
+        )
+        scrollView.documentView?.mouseDown(with: outside)
+        XCTAssertEqual(exitCount, 1)
+        scrollView.prepareForRemoval()
     }
 
     func testActualScrollViewRestoresPositionForNextFileAndReset() async throws {
@@ -493,5 +658,26 @@ final class ZoomTests: XCTestCase {
             isARepeat: false,
             keyCode: code
         )!
+    }
+
+    private func mouseDownEvent(
+        in view: NSView,
+        at localPoint: CGPoint,
+        clickCount: Int,
+        eventNumber: Int
+    ) throws -> NSEvent {
+        try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: view.convert(localPoint, to: nil),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: view.window?.windowNumber ?? 0,
+                context: nil,
+                eventNumber: eventNumber,
+                clickCount: clickCount,
+                pressure: 1
+            )
+        )
     }
 }

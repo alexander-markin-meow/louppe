@@ -92,6 +92,57 @@ enum ActualSizeGeometry {
     }
 }
 
+/// Geometry for mapping a click in a letterboxed Fit/phone-size presentation
+/// back to the corresponding normalized point in the source image.
+enum FittedImageGeometry {
+    static func frame(
+        imageSize: CGSize,
+        containerSize: CGSize,
+        maximumSize: CGSize? = nil
+    ) -> CGRect {
+        guard imageSize.width > 0,
+              imageSize.height > 0,
+              containerSize.width > 0,
+              containerSize.height > 0
+        else { return .zero }
+
+        let availableSize = CGSize(
+            width: min(containerSize.width, maximumSize?.width ?? .greatestFiniteMagnitude),
+            height: min(containerSize.height, maximumSize?.height ?? .greatestFiniteMagnitude)
+        )
+        let scale = min(
+            availableSize.width / imageSize.width,
+            availableSize.height / imageSize.height
+        )
+        guard scale.isFinite, scale > 0 else { return .zero }
+
+        let fittedSize = CGSize(
+            width: imageSize.width * scale,
+            height: imageSize.height * scale
+        )
+        return CGRect(
+            x: (containerSize.width - fittedSize.width) / 2,
+            y: (containerSize.height - fittedSize.height) / 2,
+            width: fittedSize.width,
+            height: fittedSize.height
+        )
+    }
+
+    static func normalizedPosition(
+        at point: CGPoint,
+        in imageFrame: CGRect
+    ) -> NormalizedImagePosition? {
+        guard imageFrame.width > 0,
+              imageFrame.height > 0,
+              imageFrame.contains(point)
+        else { return nil }
+        return NormalizedImagePosition(
+            x: (point.x - imageFrame.minX) / imageFrame.width,
+            y: (point.y - imageFrame.minY) / imageFrame.height
+        )
+    }
+}
+
 /// Non-published interaction state for 100% viewing.
 ///
 /// Scroll-wheel events can arrive many times per frame. Keeping this outside
@@ -101,14 +152,20 @@ enum ActualSizeGeometry {
 @MainActor
 final class ActualSizeViewport {
     private(set) var position: NormalizedImagePosition = .center
-    private(set) var resetGeneration: UInt64 = 0
+    /// Changes only for an explicit placement request (S or double-click), not
+    /// for ordinary scroll capture.
+    private(set) var positionRequestGeneration: UInt64 = 0
 
     func update(position: NormalizedImagePosition) {
         self.position = position
     }
 
+    func request(position: NormalizedImagePosition) {
+        self.position = position
+        positionRequestGeneration &+= 1
+    }
+
     func reset() {
-        position = .center
-        resetGeneration &+= 1
+        request(position: .center)
     }
 }

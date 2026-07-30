@@ -40,7 +40,13 @@ struct GalleryView: View {
                             showsClippingWarnings:
                                 store.showClippingWarnings
                                 && store.selectedIndices.count <= 1,
-                            actualSizeViewport: store.actualSizeViewport
+                            actualSizeViewport: store.actualSizeViewport,
+                            onZoomToActual: { position in
+                                store.zoomToActual(at: position)
+                            },
+                            onZoomToFit: {
+                                store.zoomToFit()
+                            }
                         ) { loading in
                             store.fullImageLoads += loading ? 1 : -1
                         }

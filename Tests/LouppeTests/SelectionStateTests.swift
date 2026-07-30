@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Louppe
 
@@ -48,6 +49,62 @@ final class SelectionStateTests: XCTestCase {
         XCTAssertEqual(store.currentIndex, 0)
     }
 
+    func testPlainGridSelectionLeavesRatingUntouchedAndClearsSelection() {
+        let store = readyStore()
+        store.toggleRating(at: 0)
+        store.selectRange(to: 2)
+
+        GridCellActions(store: store, index: 3).selectPhoto()
+
+        XCTAssertEqual(store.currentIndex, 3)
+        XCTAssertTrue(store.selectedIndices.isEmpty)
+        XCTAssertEqual(
+            store.items.map(\.rating),
+            [.yes, .undecided, .undecided, .undecided]
+        )
+    }
+
+    func testGridRatingControlCyclesEveryStateWithoutAdvancing() {
+        let store = readyStore()
+        let actions = GridCellActions(store: store, index: 2)
+
+        actions.cycleRating(currentEvent: nil)
+        XCTAssertEqual(store.items[2].rating, .yes)
+        XCTAssertEqual(store.currentIndex, 2)
+
+        actions.cycleRating(currentEvent: nil)
+        XCTAssertEqual(store.items[2].rating, .no)
+        XCTAssertEqual(store.currentIndex, 2)
+
+        actions.cycleRating(currentEvent: nil)
+        XCTAssertEqual(store.items[2].rating, .undecided)
+        XCTAssertEqual(store.currentIndex, 2)
+    }
+
+    func testGridRatingControlIgnoresSecondActionFromDoubleClick() throws {
+        let store = readyStore()
+        let actions = GridCellActions(store: store, index: 2)
+
+        actions.cycleRating(currentEvent: try mouseEvent(clickCount: 1))
+        actions.cycleRating(currentEvent: try mouseEvent(clickCount: 2))
+
+        XCTAssertEqual(store.items[2].rating, .yes)
+        XCTAssertEqual(store.currentIndex, 2)
+    }
+
+    func testGridRatingControlPreservesBatchSelectionBehavior() {
+        let store = readyStore()
+        store.selectRange(to: 2)
+
+        GridCellActions(store: store, index: 1).cycleRating(
+            currentEvent: nil
+        )
+
+        XCTAssertEqual(store.items.prefix(3).map(\.rating), [.yes, .yes, .yes])
+        XCTAssertEqual(store.selectedIndices, [0, 1, 2])
+        XCTAssertEqual(store.currentIndex, 0)
+    }
+
     func testZeroMatchFilterHasNoImplicitSelection() {
         let store = readyStore()
         store.filter.excludedTypes = ["JPEG", "PNG"]
@@ -82,6 +139,22 @@ final class SelectionStateTests: XCTestCase {
             cameraModel: nil,
             lensModel: nil,
             fileSize: 1
+        )
+    }
+
+    private func mouseEvent(clickCount: Int) throws -> NSEvent {
+        try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseUp,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                eventNumber: clickCount,
+                clickCount: clickCount,
+                pressure: 0
+            )
         )
     }
 }

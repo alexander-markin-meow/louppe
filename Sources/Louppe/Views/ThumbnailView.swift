@@ -10,6 +10,8 @@ struct ThumbnailView: View {
     var isCurrent: Bool
     /// Part of a multi-selection: same accent as the current photo, dimmed.
     var isSelected: Bool = false
+    /// Grid supplies its own interactive badge above the tile's click target.
+    var showsRatingBadge: Bool = true
     var videoPlayback: VideoPlaybackController?
 
     @State private var image: NSImage?
@@ -18,11 +20,13 @@ struct ThumbnailView: View {
         item: PhotoItem,
         isCurrent: Bool,
         isSelected: Bool = false,
+        showsRatingBadge: Bool = true,
         videoPlayback: VideoPlaybackController? = nil
     ) {
         self.item = item
         self.isCurrent = isCurrent
         self.isSelected = isSelected
+        self.showsRatingBadge = showsRatingBadge
         self.videoPlayback = videoPlayback
         // Reappearing lazy cells should render their memory-cached image on
         // their first frame instead of flashing a placeholder and scheduling
@@ -68,11 +72,13 @@ struct ThumbnailView: View {
                 .strokeBorder(borderColor, lineWidth: 3)
         }
         .overlay(alignment: .topTrailing) {
-            RatingBadge(
-                rating: item.rating,
-                isMixed: item.hasMixedRatings
-            )
+            if showsRatingBadge {
+                RatingBadge(
+                    rating: item.rating,
+                    isMixed: item.hasMixedRatings
+                )
                 .padding(4)
+            }
         }
         .overlay(alignment: .bottomTrailing) {
             if item.isVideo {

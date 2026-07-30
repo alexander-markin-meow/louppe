@@ -1,9 +1,11 @@
+import AppKit
 import SwiftUI
 
-/// The Grid view: click to cycle a photo's rating, double-click to open it in
-/// the Gallery view, and click-and-drag to rubber-band-select several
-/// photos at once. Days are separated by a horizontal line and each day
-/// starts on a fresh row. ⌘+/⌘− resize the tiles; W toggles photo info.
+/// The Grid view: click a photo to make it current, use its rating control to
+/// cycle the decision, double-click to open it in the Gallery view, and
+/// click-and-drag to rubber-band-select several photos at once. Days are
+/// separated by a horizontal line and each day starts on a fresh row.
+/// ⌘+/⌘− resize the tiles; W toggles photo info.
 struct GridView: View {
     @ObservedObject var store: SessionStore
 
@@ -163,73 +165,7 @@ struct GridView: View {
     }
 
     private func cell(index: Int, item: PhotoItem) -> some View {
-        VStack(spacing: 3) {
-            ZStack {
-                ThumbnailView(
-                    item: item,
-                    isCurrent: index == store.currentIndex,
-                    isSelected: store.selectedIndices.contains(index),
-                    videoPlayback: store.videoPlayback
-                )
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(cellTapGesture(index: index))
-                    .mediaTileAccessibility(
-                        item: item,
-                        isCurrent: index == store.currentIndex,
-                        isSelected: store.selectedIndices.contains(index),
-                        showActionTitle: "Make Current",
-                        show: {
-                            store.setIndex(index)
-                        },
-                        open: {
-                            store.setIndex(index)
-                            store.viewMode = .gallery
-                        },
-                        rate: { rating in
-                            store.rate(rating, at: index)
-                        },
-                        toggleSelection: {
-                            store.toggleSelection(of: index)
-                        }
-                    )
-
-                if item.isVideo, item.videoIsPlayable {
-                    Button {
-                        if index != store.currentIndex { store.setIndex(index) }
-                        store.videoPlayback.toggle(item)
-                    } label: {
-                        Image(systemName: store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
-                            ? "pause.fill"
-                            : "play.fill")
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.circle)
-                    .tint(.black.opacity(0.62))
-                    .foregroundStyle(.white)
-                    .controlSize(.large)
-                    .help(store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
-                        ? "Pause video"
-                        : "Play video")
-                    .accessibilityLabel(store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
-                        ? "Pause video"
-                        : "Play video")
-                }
-            }
-            .aspectRatio(1, contentMode: .fit)
-            Text(item.displayName)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .contentShape(Rectangle())
-                .gesture(cellTapGesture(index: index))
-                .accessibilityHidden(true)
-        }
+        GridCell(store: store, index: index)
         .id(item.id)
         .contentShape(Rectangle())
         .background(
@@ -240,21 +176,6 @@ struct GridView: View {
                 )
             }
         )
-    }
-
-    /// The play button is a sibling of this hit target, not its descendant.
-    /// That keeps a playback click from also triggering the cell's rating or
-    /// double-click gestures — the source of Grid playback being cancelled.
-    private func cellTapGesture(index: Int) -> some Gesture {
-        TapGesture(count: 2).onEnded {
-            store.setIndex(index)
-            store.viewMode = .gallery
-        }
-        .exclusively(before: TapGesture(count: 1).onEnded {
-            store.handleThumbnailClick(at: index) {
-                store.toggleRating(at: index)
-            }
-        })
     }
 
     // MARK: - Rubber-band selection
@@ -290,6 +211,172 @@ struct GridView: View {
                 .offset(x: rect.minX, y: rect.minY)
                 .allowsHitTesting(false)
         }
+    }
+}
+
+/// One live Grid tile. Like BrowserRow, it observes the store directly because
+/// macOS lazy containers can retain an already-created value subtree after the
+/// shared per-file rating storage changes. Keeping the observation here makes
+/// the badge, selection frame, and accessibility value update immediately.
+private struct GridCell: View {
+    @ObservedObject var store: SessionStore
+    let index: Int
+
+    var body: some View {
+        if store.items.indices.contains(index) {
+            let item = store.items[index]
+            let actions = GridCellActions(store: store, index: index)
+            VStack(spacing: 3) {
+                ZStack {
+                    ThumbnailView(
+                        item: item,
+                        isCurrent: index == store.currentIndex,
+                        isSelected: store.selectedIndices.contains(index),
+                        showsRatingBadge: false,
+                        videoPlayback: store.videoPlayback
+                    )
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(cellTapGesture)
+                        .mediaTileAccessibility(
+                            item: item,
+                            isCurrent: index == store.currentIndex,
+                            isSelected: store.selectedIndices.contains(index),
+                            showActionTitle: "Make Current",
+                            show: {
+                                actions.makeCurrent()
+                            },
+                            open: {
+                                actions.openInGallery()
+                            },
+                            rate: { rating in
+                                store.rate(rating, at: index)
+                            },
+                            toggleSelection: {
+                                store.toggleSelection(of: index)
+                            }
+                        )
+
+                    if item.isVideo, item.videoIsPlayable {
+                        Button {
+                            if index != store.currentIndex { store.setIndex(index) }
+                            store.videoPlayback.toggle(item)
+                        } label: {
+                            Image(systemName: store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
+                                ? "pause.fill"
+                                : "play.fill")
+                                .frame(width: 18, height: 18)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.circle)
+                        .tint(.black.opacity(0.62))
+                        .foregroundStyle(.white)
+                        .controlSize(.large)
+                        .help(store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
+                            ? "Pause video"
+                            : "Play video")
+                        .accessibilityLabel(store.videoPlayback.isActive(item) && store.videoPlayback.isPlaying
+                            ? "Pause video"
+                            : "Play video")
+                    }
+                }
+                // Keep the rating control above the photo's selection gesture
+                // so its click never falls through and changes two things.
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        actions.cycleRating()
+                    } label: {
+                        RatingBadge(
+                            rating: item.rating,
+                            isMixed: item.hasMixedRatings,
+                            size: 18
+                        )
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(1)
+                    .help("Change rating")
+                    .accessibilityLabel("Change rating for \(item.displayName)")
+                    .accessibilityValue(
+                        MediaTileAccessibility.ratingDescription(
+                            for: item.ratingState
+                        )
+                    )
+                }
+                .aspectRatio(1, contentMode: .fit)
+
+                Text(item.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .contentShape(Rectangle())
+                    .gesture(cellTapGesture)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    /// The play and rating buttons are separate hit targets above this gesture.
+    /// A plain photo click now selects; modifier selection and double-click
+    /// retain their existing behavior.
+    private var cellTapGesture: some Gesture {
+        TapGesture(count: 2).onEnded {
+            GridCellActions(store: store, index: index).openInGallery()
+        }
+        .exclusively(before: TapGesture(count: 1).onEnded {
+            GridCellActions(store: store, index: index).selectPhoto()
+        })
+    }
+}
+
+/// The actions shared by the Grid's pointer and accessibility entry points.
+/// Keeping them separate from the view makes the hit-target behavior directly
+/// regression-testable without duplicating SessionStore mutations in tests.
+@MainActor
+struct GridCellActions {
+    let store: SessionStore
+    let index: Int
+
+    func makeCurrent() {
+        store.setIndex(index)
+    }
+
+    func selectPhoto() {
+        store.handleThumbnailClick(at: index) {
+            makeCurrent()
+        }
+    }
+
+    func openInGallery() {
+        makeCurrent()
+        store.viewMode = .gallery
+    }
+
+    /// SwiftUI's native Button action fires for both clicks in a double-click.
+    /// Honor the first activation and ignore later clicks in that same mouse
+    /// sequence. Keyboard and accessibility activations have no mouse event
+    /// and continue to use the normal native Button path.
+    func cycleRating(currentEvent: NSEvent? = NSApp.currentEvent) {
+        guard GridRatingActivation.shouldActivate(for: currentEvent) else {
+            return
+        }
+        store.toggleRating(at: index)
+    }
+}
+
+private enum GridRatingActivation {
+    static func shouldActivate(for event: NSEvent?) -> Bool {
+        guard let event,
+              event.type == .leftMouseDown || event.type == .leftMouseUp
+        else {
+            return true
+        }
+        return event.clickCount < 2
     }
 }
 
