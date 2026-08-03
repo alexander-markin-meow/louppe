@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage
 import ImageIO
+import SwiftUI
 import UniformTypeIdentifiers
 import XCTest
 @testable import Louppe
@@ -382,6 +383,81 @@ final class ZoomTests: XCTestCase {
         scrollView.prepareForRemoval()
     }
 
+    func testActualScrollViewReloadsSameIDPhysicalReplacement() async throws {
+        _ = NSApplication.shared
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "louppe-zoom-replacement-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("SAME.JPG")
+        let fixedDate = Date(timeIntervalSince1970: 1_650_000_000)
+        try writeJPEG(width: 1600, height: 1200, to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: fixedDate],
+            ofItemAtPath: url.path
+        )
+        let first = makeItem(
+            "SAME.JPG",
+            url: url,
+            modificationDate: fixedDate
+        )
+
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        let scrollView = ActualSizeScrollView(
+            frame: window.contentView!.bounds
+        )
+        window.contentView = scrollView
+        let viewport = ActualSizeViewport()
+        scrollView.configure(
+            item: first,
+            preview: nil,
+            showsClippingWarnings: false,
+            viewport: viewport,
+            onLoading: { _ in }
+        )
+        let firstDocument = try await waitForScrollableDocument(
+            in: scrollView
+        )
+
+        try writeJPEG(width: 1200, height: 1800, to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: fixedDate],
+            ofItemAtPath: url.path
+        )
+        let replacement = makeItem(
+            "SAME.JPG",
+            url: url,
+            modificationDate: fixedDate
+        )
+        XCTAssertNotEqual(first.contentRevision, replacement.contentRevision)
+
+        scrollView.configure(
+            item: replacement,
+            preview: nil,
+            showsClippingWarnings: false,
+            viewport: viewport,
+            onLoading: { _ in }
+        )
+        let replacementDocument = try await waitForScrollableDocument(
+            in: scrollView,
+            differentFrom: firstDocument
+        )
+
+        XCTAssertNotEqual(firstDocument, replacementDocument)
+        scrollView.prepareForRemoval()
+    }
+
     func testTopLeftTileMapsToTopOfOrientedSource() async throws {
         let pipeline = HighResolutionImagePipeline.shared
         pipeline.removeAllTiles()
@@ -587,6 +663,14 @@ final class ZoomTests: XCTestCase {
     }
 
     private func makeItem(_ id: String, url: URL) -> PhotoItem {
+        makeItem(id, url: url, modificationDate: nil)
+    }
+
+    private func makeItem(
+        _ id: String,
+        url: URL,
+        modificationDate: Date?
+    ) -> PhotoItem {
         PhotoItem(
             id: id,
             primaryURL: url,
@@ -594,6 +678,7 @@ final class ZoomTests: XCTestCase {
             captureDate: nil,
             cameraModel: nil,
             lensModel: nil,
+            primaryModificationDate: modificationDate,
             fileSize: 1
         )
     }

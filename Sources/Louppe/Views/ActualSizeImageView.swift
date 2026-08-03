@@ -42,7 +42,7 @@ struct ActualSizeImageView: NSViewRepresentable {
 final class ActualSizeScrollView: NSScrollView {
     private let canvas = ActualSizeCanvasView()
     private var sourceTask: Task<Void, Never>?
-    private var currentItemID: String?
+    private var currentContentRevision: PhotoContentRevision?
     private var sourceGeneration: UInt64 = 0
     private var appliedPositionRequestGeneration: UInt64?
     private var backingScale: CGFloat = 1
@@ -91,10 +91,11 @@ final class ActualSizeScrollView: NSScrollView {
             showsClippingWarnings
         )
 
-        let itemChanged = currentItemID != item.id
+        let requestedRevision = item.contentRevision
+        let itemChanged = currentContentRevision != requestedRevision
         if itemChanged {
             captureViewport()
-            currentItemID = item.id
+            currentContentRevision = requestedRevision
             sourceGeneration &+= 1
             let generation = sourceGeneration
             sourceTask?.cancel()
@@ -109,7 +110,8 @@ final class ActualSizeScrollView: NSScrollView {
                 )
                 guard !Task.isCancelled,
                       self.sourceGeneration == generation,
-                      self.currentItemID == item.id else { return }
+                      self.currentContentRevision == requestedRevision
+                else { return }
                 self.install(source: source)
             }
         }

@@ -20,10 +20,15 @@ final class ExportManager: ObservableObject {
         /// Copy only: the photographer stopped the operation. Completed photos
         /// remain copied; the in-progress photo was rolled back.
         let cancelled: Bool
-        /// The operation's durable checkpoint could not be written.
+        /// The operation could not establish or advance its durable
+        /// file-safety boundary.
         let journalFailure: Bool
-        /// Louppe has started restoring the conservative pre-export state.
+        /// Louppe has started reconciling an interrupted operation. Copy keeps
+        /// verified completed files; Move restores its conservative source state.
         let recoveryRequired: Bool
+        /// Concrete worker failure retained for the export result and the
+        /// recovery alert. Nil only when no useful cause was available.
+        let failureMessage: String?
         let destination: URL
 
         var isClean: Bool {
@@ -58,7 +63,8 @@ final class ExportManager: ObservableObject {
         onOperationDidFinish: @escaping @MainActor (
             _ mode: ExportMode,
             _ movedIDs: [String],
-            _ requiresRecovery: Bool
+            _ requiresRecovery: Bool,
+            _ interruptionMessage: String?
         ) -> Void
     ) {
         let selected = items.filter { ratings.contains($0.rating) }
@@ -78,8 +84,9 @@ final class ExportManager: ObservableObject {
         panel.prompt = "Export Here"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
 
+        let validatedDestination: URL
         do {
-            try ExportDestinationValidator.validate(
+            validatedDestination = try ExportDestinationValidator.validate(
                 sourceFolder: sourceFolder,
                 destination: destination,
                 items: selected,
@@ -93,7 +100,7 @@ final class ExportManager: ObservableObject {
         export(
             selected: selected,
             mode: mode,
-            to: destination,
+            to: validatedDestination,
             onOperationWillStart: onOperationWillStart,
             onOperationDidFinish: onOperationDidFinish
         )
@@ -107,7 +114,8 @@ final class ExportManager: ObservableObject {
         onOperationDidFinish: @escaping @MainActor (
             _ mode: ExportMode,
             _ movedIDs: [String],
-            _ requiresRecovery: Bool
+            _ requiresRecovery: Bool,
+            _ interruptionMessage: String?
         ) -> Void
     ) {
         let totalFiles = selected.reduce(0) { $0 + $1.allURLs.count }
@@ -153,7 +161,12 @@ final class ExportManager: ObservableObject {
             isCancellingCopy = false
             switch result {
             case .copy(let copy):
-                onOperationDidFinish(.copy, [], copy.requiresRecovery)
+                onOperationDidFinish(
+                    .copy,
+                    [],
+                    copy.requiresRecovery,
+                    copy.failureMessage
+                )
                 state = .finished(Outcome(
                     mode: .copy,
                     files: copy.copiedFiles,
@@ -162,6 +175,7 @@ final class ExportManager: ObservableObject {
                     cancelled: copy.cancelled,
                     journalFailure: copy.journalFailure,
                     recoveryRequired: copy.requiresRecovery,
+                    failureMessage: copy.failureMessage,
                     destination: destination
                 ))
             case .move(let move):
@@ -170,7 +184,8 @@ final class ExportManager: ObservableObject {
                 onOperationDidFinish(
                     .move,
                     move.requiresRecovery ? [] : move.movedItemIDs,
-                    move.requiresRecovery
+                    move.requiresRecovery,
+                    move.failureMessage
                 )
                 state = .finished(Outcome(
                     mode: .move,
@@ -180,6 +195,7 @@ final class ExportManager: ObservableObject {
                     cancelled: false,
                     journalFailure: move.journalFailure,
                     recoveryRequired: move.requiresRecovery,
+                    failureMessage: move.failureMessage,
                     destination: destination
                 ))
             }

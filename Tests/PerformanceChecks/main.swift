@@ -33,6 +33,7 @@ struct PerformanceChecks {
         try await newerBackupWinsOverStaleSidecar()
         try await corruptSidecarRecoversFromBackup()
         try await invalidSessionSchemasAreRejected()
+        try await legacySidecarKeepsByteDistinctUnicodeEntries()
         try await persistenceReportsBackupAndTotalFailure()
         try exportCollisionSuffixSkipsTakenNames()
         try exportPairCollisionUsesSharedSuffix()
@@ -42,12 +43,20 @@ struct PerformanceChecks {
         try exportMoveReportsFullyMovedPhotos()
         try exportMovePairRollsBackOnPartialFailure()
         try exportMoveRefusesInPlaceDestination()
+        try exportMoveAtomicRenameNeverOverwritesRaceWinner()
         try exportDestinationRejectsSourceAndDescendant()
-        try operationJournalRemovesInterruptedCopyIdempotently()
+        try operationJournalPreservesInterruptedCopyIdempotently()
+        try operationJournalPreservesCopyWhenSourceIsMissing()
+        try operationJournalPreservesCopyWhenSourceIsReplaced()
+        try operationJournalPreservesCopyWhenSourceIsRewrittenInPlace()
         try operationJournalRestoresInterruptedMove()
+        try operationJournalPreservesMoveWhenSourceIsReplaced()
+        try operationJournalRestoresMoveWithResolvedIdentity()
+        try operationJournalCompletesRolledBackTransactions()
         try operationJournalPreservesCommittedExport()
         try operationJournalRefusesSameNamedReplacement()
         try operationJournalRestoresInterruptedTrash()
+        try operationJournalPreservesTrashWhenSourceIsReplaced()
         try operationJournalCompletesInterruptedTrashUndo()
         try completedWorkerRemovesItsJournal()
         try scannerAndPreparedIndexShareDefaultOrder()
@@ -64,11 +73,12 @@ struct PerformanceChecks {
         try batchRatingUndoRestoresEveryRating()
         try exportMoveRemovalUpdatesSessionState()
         if ProcessInfo.processInfo.environment["LOUPPE_SKIP_REAL_TRASH"] == "1" {
-            print("Performance checks passed (59/61; 2 real Trash checks explicitly skipped)")
+            print("Performance checks passed (68/71; 3 real Trash checks explicitly skipped)")
         } else {
             try cleanUpPairRoundTripsThroughTrash()
             try cleanUpPairFailureRollsBackFirstFile()
-            print("Performance checks passed (61/61)")
+            try cleanUpRollbackPreservesRacingSourceReplacement()
+            print("Performance checks passed (71/71)")
         }
     }
 
@@ -652,6 +662,20 @@ struct PerformanceChecks {
             beforeRemoval == afterRemoval,
             "thumbnail cache keys must use scan metadata instead of reading the live filesystem"
         )
+
+        let otherFolder = folder
+            .deletingLastPathComponent()
+            .appendingPathComponent("Other-\(UUID().uuidString)")
+        let sameRelativeIDElsewhere = makeItem(
+            id: item.id,
+            primaryURL: otherFolder.appendingPathComponent("CACHE.JPG"),
+            modificationDate: modificationDate
+        )
+        try expect(
+            ImagePipeline.cacheKey(for: sameRelativeIDElsewhere)
+                != beforeRemoval,
+            "equal relative names and timestamps in different folders must never share cached pixels"
+        )
     }
 
     private static func olderSidecarSaveCannotOverwriteNewerSnapshot() async throws {
@@ -790,6 +814,65 @@ struct PerformanceChecks {
             "ratings from a different folder must never be applied"
         )
 
+        var missingEncodingContract = session(
+            rating: Rating.yes.rawValue,
+            folder: folder
+        )
+        missingEncodingContract.version =
+            SessionConstants.currentSchemaVersion
+        missingEncodingContract.fileIDEncoding = nil
+        try writeSessionFixture(missingEncodingContract, to: sidecar)
+        loaded = await persistence.read(for: folder)
+        try expect(
+            loaded.blockingMessage != nil,
+            "schema 3 must require its byte-exact file-ID encoding contract"
+        )
+
+        var directUnicodeID = session(
+            rating: Rating.yes.rawValue,
+            folder: folder
+        )
+        directUnicodeID.version = SessionConstants.currentSchemaVersion
+        directUnicodeID.fileIDEncoding = .percentEncodedFileSystemPath
+        directUnicodeID.entries[0].filename = "café.NEF"
+        try writeSessionFixture(directUnicodeID, to: sidecar)
+        loaded = await persistence.read(for: folder)
+        try expect(
+            loaded.blockingMessage != nil,
+            "schema 3 must reject non-ASCII IDs that bypass exact percent encoding"
+        )
+
+        var malformedEscape = directUnicodeID
+        malformedEscape.entries[0].filename = "bad%GG.NEF"
+        try writeSessionFixture(malformedEscape, to: sidecar)
+        loaded = await persistence.read(for: folder)
+        try expect(
+            loaded.blockingMessage != nil,
+            "schema 3 must reject malformed percent escapes"
+        )
+
+        var overlappingPhysicalIDs = directUnicodeID
+        overlappingPhysicalIDs.entries = [
+            SessionEntry(
+                filename: "A.NEF",
+                pairedFilename: "A.JPG",
+                rating: Rating.yes.rawValue,
+                ratedAt: nil
+            ),
+            SessionEntry(
+                filename: "A.JPG",
+                pairedFilename: nil,
+                rating: Rating.no.rawValue,
+                ratedAt: nil
+            ),
+        ]
+        try writeSessionFixture(overlappingPhysicalIDs, to: sidecar)
+        loaded = await persistence.read(for: folder)
+        try expect(
+            loaded.blockingMessage != nil,
+            "one physical file must not receive conflicting primary and paired entries"
+        )
+
         try FileManager.default.removeItem(at: backup)
         var invalidRating = session(rating: "maybe", folder: folder)
         invalidRating.entries[0].filename = "../OUTSIDE.JPG"
@@ -801,17 +884,113 @@ struct PerformanceChecks {
         )
     }
 
+    private static func legacySidecarKeepsByteDistinctUnicodeEntries() async throws {
+        let root = try disposableFolder(named: "PersistenceUnicodeIdentity")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Photos", isDirectory: true)
+        let backup = root.appendingPathComponent("Backup", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true
+        )
+        let persistence = SessionPersistence(backupDirectory: backup)
+        let composed = "caf\u{00E9}.NEF"
+        let decomposed = "cafe\u{0301}.NEF"
+        let fixture = SessionFile(
+            version: 2,
+            sourcePath: folder.path,
+            scannedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            entries: [
+                SessionEntry(
+                    filename: composed,
+                    pairedFilename: nil,
+                    rating: Rating.yes.rawValue,
+                    ratedAt: nil
+                ),
+                SessionEntry(
+                    filename: decomposed,
+                    pairedFilename: nil,
+                    rating: Rating.no.rawValue,
+                    ratedAt: nil
+                ),
+            ]
+        )
+
+        _ = await persistence.save(fixture, for: folder, sequence: 1)
+        let loaded = await persistence.read(for: folder)
+        guard let loadedSession = loaded.session else {
+            throw CheckFailure(
+                "a legacy sidecar with byte-distinct Unicode names should remain readable"
+            )
+        }
+        let entries = loadedSession.entries
+        var ratingsByUTF8: [Data: String] = [:]
+        for entry in entries {
+            ratingsByUTF8[Data(entry.filename.utf8)] = entry.rating
+        }
+        try expect(
+            entries.count == 2 && ratingsByUTF8.count == 2,
+            "legacy sidecar validation must not merge canonical-equivalent filenames"
+        )
+        try expect(
+            ratingsByUTF8[Data(composed.utf8)] == Rating.yes.rawValue
+                && ratingsByUTF8[Data(decomposed.utf8)] == Rating.no.rawValue,
+            "byte-distinct legacy filenames must retain independent ratings"
+        )
+
+        let composedFile = PhotoFile(
+            id: "caf%C3%A9.NEF",
+            url: folder.appendingPathComponent("composed.NEF"),
+            displayRelativePath: composed,
+            captureDate: nil,
+            cameraModel: nil,
+            lensModel: nil,
+            fileSize: 1
+        )
+        let decomposedFile = PhotoFile(
+            id: "cafe%CC%81.NEF",
+            url: folder.appendingPathComponent("decomposed.NEF"),
+            displayRelativePath: decomposed,
+            captureDate: nil,
+            cameraModel: nil,
+            lensModel: nil,
+            fileSize: 1
+        )
+        let ratings = SessionRatingIndex(session: loadedSession)
+        try expect(
+            ratings.value(for: composedFile)?.rating == .yes
+                && ratings.value(for: decomposedFile)?.rating == .no,
+            "legacy rating application must preserve byte-distinct Unicode identities"
+        )
+    }
+
     private static func persistenceReportsBackupAndTotalFailure() async throws {
         let root = try disposableFolder(named: "PersistenceFailures")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let sourcePlaceholder = root.appendingPathComponent("NotAFolder")
-        try Data("file".utf8).write(to: sourcePlaceholder)
+        let sourceFolder = root.appendingPathComponent(
+            "ReadOnlyPhotos",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: sourceFolder,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500],
+            ofItemAtPath: sourceFolder.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: sourceFolder.path
+            )
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let workingBackup = root.appendingPathComponent("Backup", isDirectory: true)
         let backupPersistence = SessionPersistence(backupDirectory: workingBackup)
         let backupResult = await backupPersistence.save(
-            session(rating: Rating.yes.rawValue, folder: sourcePlaceholder),
-            for: sourcePlaceholder,
+            session(rating: Rating.yes.rawValue, folder: sourceFolder),
+            for: sourceFolder,
             sequence: 1
         )
         guard case .savedToBackup = backupResult else {
@@ -822,8 +1001,8 @@ struct PerformanceChecks {
         try Data("file".utf8).write(to: blockedBackup)
         let failingPersistence = SessionPersistence(backupDirectory: blockedBackup)
         let failure = await failingPersistence.save(
-            session(rating: Rating.no.rawValue, folder: sourcePlaceholder),
-            for: sourcePlaceholder,
+            session(rating: Rating.no.rawValue, folder: sourceFolder),
+            for: sourceFolder,
             sequence: 1
         )
         guard case .failed = failure else {
@@ -868,19 +1047,113 @@ struct PerformanceChecks {
         let folder = try disposableFolder(named: "CleanUpRollback")
         defer { try? FileManager.default.removeItem(at: folder) }
         let raw = folder.appendingPathComponent("PAIR.NEF")
-        let missingJPEG = folder.appendingPathComponent("MISSING.JPG")
+        let jpeg = folder.appendingPathComponent("PAIR.JPG")
+        let displacedJPEG = folder.appendingPathComponent("PAIR.external.JPG")
         try Data("raw".utf8).write(to: raw)
-        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: missingJPEG)
+        try Data("jpeg".utf8).write(to: jpeg)
+        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg)
         let journals = folder.appendingPathComponent("Journals", isDirectory: true)
+        let displacer = ProgressFileDisplacer(
+            from: jpeg,
+            to: displacedJPEG
+        )
 
         let result = CleanUpWorker.moveToTrash(
             [CleanUpPhotoSnapshot(index: 0, item: item)],
             journalDirectory: journals
-        ) { _, _ in }
+        ) { done, _ in
+            displacer.displaceAfterFirstProgress(done: done)
+        }
+        if let failure = displacer.failureDescription {
+            throw CheckFailure(failure)
+        }
         try expect(result.succeeded.isEmpty, "incomplete pair must not count as removed")
         try expect(result.failedPhotos == 1, "incomplete pair should report one failure")
         try expect(result.inconsistentPhotos == 0, "successful rollback should remain consistent")
         try expect(FileManager.default.fileExists(atPath: raw.path), "first file must roll back when its pair fails")
+        try expect(
+            FileManager.default.fileExists(atPath: displacedJPEG.path),
+            "the injected second-file failure must occur after journal activation"
+        )
+    }
+
+    private static func cleanUpRollbackPreservesRacingSourceReplacement() throws {
+        let folder = try disposableFolder(named: "CleanUpRollbackReplacement")
+        let raw = folder.appendingPathComponent("PAIR.NEF")
+        let jpeg = folder.appendingPathComponent("PAIR.JPG")
+        let later = folder.appendingPathComponent("LATER.JPG")
+        let displacedJPEG = folder.appendingPathComponent("PAIR.external.JPG")
+        let journals = folder.appendingPathComponent("Journals", isDirectory: true)
+        let rawData = Data("original raw".utf8)
+        let replacementData = Data("same-path replacement".utf8)
+        try rawData.write(to: raw)
+        try Data("jpeg".utf8).write(to: jpeg)
+        try Data("later".utf8).write(to: later)
+        let pair = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg)
+        let laterItem = makeItem(id: "LATER.JPG", primaryURL: later)
+        let race = CleanUpRollbackReplacementRace(
+            pairedSource: jpeg,
+            displacedPairedSource: displacedJPEG,
+            replacementURL: raw,
+            replacementData: replacementData
+        )
+        defer {
+            // Leave no test original behind in the real Trash even when an
+            // assertion below throws before the explicit recovery step.
+            if FileOperationJournal.hasPendingOperations(directory: journals) {
+                if (try? Data(contentsOf: raw)) == replacementData {
+                    try? FileManager.default.removeItem(at: raw)
+                }
+                if FileManager.default.fileExists(atPath: displacedJPEG.path),
+                   !FileManager.default.fileExists(atPath: jpeg.path) {
+                    try? FileManager.default.moveItem(
+                        at: displacedJPEG,
+                        to: jpeg
+                    )
+                }
+                _ = FileOperationJournal.recoverPendingOperations(
+                    directory: journals
+                )
+            }
+            try? FileManager.default.removeItem(at: folder)
+        }
+
+        let result = CleanUpWorker.moveToTrash(
+            [
+                CleanUpPhotoSnapshot(index: 0, item: pair),
+                CleanUpPhotoSnapshot(index: 1, item: laterItem),
+            ],
+            journalDirectory: journals
+        ) { done, _ in
+            race.injectAfterFirstProgress(done: done)
+        }
+        if let failure = race.failureDescription {
+            throw CheckFailure(failure)
+        }
+
+        try expect(result.succeeded.isEmpty, "ambiguous rollback must not report a removed photo")
+        try expect(result.failedPhotos == 2, "rollback ambiguity must stop before the later photo")
+        try expect(result.inconsistentPhotos == 1, "same-path rollback collision must be explicit")
+        try expect(result.requiresRecovery, "ambiguous rollback must keep its journal retryable")
+        let survivingReplacement = try Data(contentsOf: raw)
+        try expect(
+            survivingReplacement == replacementData,
+            "Clean Up rollback must leave a same-path replacement untouched"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: later.path),
+            "no later photo may be touched after rollback becomes ambiguous"
+        )
+
+        try FileManager.default.removeItem(at: raw)
+        try FileManager.default.moveItem(at: displacedJPEG, to: jpeg)
+        let recovery = FileOperationJournal.recoverPendingOperations(
+            directory: journals
+        )
+        let recoveredOriginal = try Data(contentsOf: raw)
+        try expect(recovery.unresolvedOperations == 0, "Clean Up journal should recover after the race clears")
+        try expect(recoveredOriginal == rawData, "recovery must restore the exact trashed original")
+        try expect(!FileOperationJournal.hasPendingOperations(directory: journals), "recovered Clean Up journal should retire")
     }
 
     private static func exportCollisionSuffixSkipsTakenNames() throws {
@@ -977,15 +1250,26 @@ struct PerformanceChecks {
         let destination = try disposableFolder(named: "ExportCopyRollbackDestination")
         defer { try? FileManager.default.removeItem(at: destination) }
         let raw = source.appendingPathComponent("PAIR.NEF")
-        let missingJPEG = source.appendingPathComponent("PAIR.JPG")
+        let jpeg = source.appendingPathComponent("PAIR.JPG")
+        let displacedJPEG = source.appendingPathComponent("PAIR.external.JPG")
         try Data("raw".utf8).write(to: raw)
-        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: missingJPEG)
+        try Data("jpeg".utf8).write(to: jpeg)
+        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg)
+        let displacer = ProgressFileDisplacer(
+            from: jpeg,
+            to: displacedJPEG
+        )
 
         let result = ExportWorker.copy(
             [item],
             to: destination,
             journalDirectory: source.appendingPathComponent("Journals", isDirectory: true)
-        ) { _, _ in }
+        ) { done, _ in
+            displacer.displaceAfterFirstProgress(done: done)
+        }
+        if let failure = displacer.failureDescription {
+            throw CheckFailure(failure)
+        }
         try expect(result.copiedFiles == 0, "a failed pair must not count a partial copy")
         try expect(result.failedPhotos == 1, "a failed pair should report one failed photo")
         try expect(result.inconsistentPhotos == 0, "successful copy rollback should remain consistent")
@@ -994,6 +1278,10 @@ struct PerformanceChecks {
             "the first copied member must be removed when its partner fails"
         )
         try expect(FileManager.default.fileExists(atPath: raw.path), "copy rollback must never touch the original")
+        try expect(
+            FileManager.default.fileExists(atPath: displacedJPEG.path),
+            "the copy fixture must fail the second member after the first was copied"
+        )
     }
 
     private static func exportCopyCanCancelWithoutPartialPair() throws {
@@ -1078,15 +1366,26 @@ struct PerformanceChecks {
         let destination = try disposableFolder(named: "ExportMoveRollbackDestination")
         defer { try? FileManager.default.removeItem(at: destination) }
         let raw = source.appendingPathComponent("PAIR.NEF")
-        let missingJPEG = source.appendingPathComponent("MISSING.JPG")
+        let jpeg = source.appendingPathComponent("PAIR.JPG")
+        let displacedJPEG = source.appendingPathComponent("PAIR.external.JPG")
         try Data("raw".utf8).write(to: raw)
-        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: missingJPEG)
+        try Data("jpeg".utf8).write(to: jpeg)
+        let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg)
+        let displacer = ProgressFileDisplacer(
+            from: jpeg,
+            to: displacedJPEG
+        )
 
         let result = ExportWorker.move(
             [item],
             to: destination,
             journalDirectory: source.appendingPathComponent("Journals", isDirectory: true)
-        ) { _, _ in }
+        ) { done, _ in
+            displacer.displaceAfterFirstProgress(done: done)
+        }
+        if let failure = displacer.failureDescription {
+            throw CheckFailure(failure)
+        }
         try expect(result.movedItemIDs.isEmpty, "an incomplete pair must not count as moved")
         try expect(result.failedPhotos == 1, "an incomplete pair should report one failed photo")
         try expect(result.inconsistentPhotos == 0, "a successful rollback should remain consistent")
@@ -1094,6 +1393,10 @@ struct PerformanceChecks {
         try expect(
             !FileManager.default.fileExists(atPath: destination.appendingPathComponent("PAIR.NEF").path),
             "no file of a failed pair may stay at the destination"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: displacedJPEG.path),
+            "the Move fixture must fail the second member after the first was moved"
         )
     }
 
@@ -1115,6 +1418,47 @@ struct PerformanceChecks {
         try expect(
             !FileManager.default.fileExists(atPath: folder.appendingPathComponent("SINGLE (1).JPG").path),
             "an in-place move must not rename the original with a collision suffix"
+        )
+    }
+
+    private static func exportMoveAtomicRenameNeverOverwritesRaceWinner() throws {
+        let root = try disposableFolder(named: "ExportMoveRenameRace")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let destination = root.appendingPathComponent("DESTINATION.JPG")
+        try Data("planned original".utf8).write(to: source)
+        try Data("race winner".utf8).write(to: destination)
+
+        do {
+            try ExportWorker.atomicExclusiveRename(
+                from: source,
+                to: destination
+            )
+            throw CheckFailure(
+                "exclusive Move rename must reject a late destination collision"
+            )
+        } catch let error as POSIXError {
+            try expect(
+                error.code == .EEXIST,
+                "a late destination collision should fail with EEXIST"
+            )
+        }
+        let sourceContents = try Data(contentsOf: source)
+        let destinationContents = try Data(contentsOf: destination)
+        try expect(
+            sourceContents == Data("planned original".utf8),
+            "the source must remain intact after a collision race"
+        )
+        try expect(
+            destinationContents == Data("race winner".utf8),
+            "Move must never overwrite a late destination"
+        )
+        try expect(
+            !ExportWorker.restoreMovedFile(
+                from: root.appendingPathComponent("MISSING.partial"),
+                to: root.appendingPathComponent("ROLLBACK.JPG")
+            ),
+            "a touched Move file missing from its expected path must retain recovery state"
         )
     }
 
@@ -1157,7 +1501,7 @@ struct PerformanceChecks {
         )
     }
 
-    private static func operationJournalRemovesInterruptedCopyIdempotently() throws {
+    private static func operationJournalPreservesInterruptedCopyIdempotently() throws {
         let root = try disposableFolder(named: "JournalCopyRecovery")
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("SOURCE.JPG")
@@ -1179,15 +1523,66 @@ struct PerformanceChecks {
         try FileManager.default.moveItem(at: temporary, to: destination)
         try writer.mark(.completed, fileAt: 0, identityAt: destination)
 
+        let blockedReport = FileOperationJournal.recoverPendingOperations(
+            directory: journals
+        )
+        try expect(
+            blockedReport.operationLockUnavailable,
+            "a second process must not inspect an operation whose owner still holds the lock"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: destination.path),
+            "lock contention must leave the active operation's files untouched"
+        )
+
+        writer.relinquishOperationLockForCrashSimulation()
+        do {
+            _ = try FileOperationJournal.start(
+                kind: .exportCopy,
+                seeds: [
+                    .init(
+                        itemID: "SOURCE.JPG",
+                        source: source,
+                        destination: root.appendingPathComponent("SECOND.JPG")
+                    ),
+                ],
+                directory: journals
+            )
+            throw CheckFailure(
+                "a new operation must not start before stale-journal recovery"
+            )
+        } catch FileOperationJournal.JournalError.recoveryRequired {
+            // Expected: the lock holder released on simulated process death,
+            // but the durable transaction still owns the operation root.
+        }
         let report = FileOperationJournal.recoverPendingOperations(directory: journals)
         try expect(report.restoredOperations == 1, "interrupted copy should recover as one operation")
-        try expect(report.removedPartialCopies == 1, "recovery should remove the partial destination copy")
+        try expect(report.preservedCopies == 1, "recovery should preserve the completed destination copy")
         try expect(FileManager.default.fileExists(atPath: source.path), "copy recovery must preserve the original")
-        try expect(!FileManager.default.fileExists(atPath: destination.path), "copy recovery should remove its own copy")
+        try expect(FileManager.default.fileExists(atPath: destination.path), "copy recovery should keep its completed copy")
         try expect(!FileOperationJournal.hasPendingOperations(directory: journals), "resolved copy journal should be removed")
 
         let secondReport = FileOperationJournal.recoverPendingOperations(directory: journals)
         try expect(secondReport.foundOperations == 0, "repeating recovery should be a no-op")
+
+        let inspectionBlocker = root.appendingPathComponent(
+            "NotAnOperationDirectory"
+        )
+        try Data("not a directory".utf8).write(to: inspectionBlocker)
+        try expect(
+            FileOperationJournal.hasPendingOperations(
+                directory: inspectionBlocker
+            ),
+            "an unreadable operation root must fail closed"
+        )
+        let blockedInspection =
+            FileOperationJournal.recoverPendingOperations(
+                directory: inspectionBlocker
+            )
+        try expect(
+            blockedInspection.hasUnresolvedFiles,
+            "operation-root inspection failure must require visible attention"
+        )
     }
 
     private static func operationJournalRestoresInterruptedMove() throws {
@@ -1212,10 +1607,447 @@ struct PerformanceChecks {
         // Simulate termination after the final rename but before `.completed`.
         try FileManager.default.moveItem(at: temporary, to: destination)
 
+        writer.relinquishOperationLockForCrashSimulation()
         let report = FileOperationJournal.recoverPendingOperations(directory: journals)
         try expect(report.restoredFiles == 1, "interrupted move should restore one source file")
         try expect(FileManager.default.fileExists(atPath: source.path), "move recovery should restore the original path")
         try expect(!FileManager.default.fileExists(atPath: destination.path), "move recovery should empty its destination")
+    }
+
+    private static func operationJournalPreservesCopyWhenSourceIsMissing() throws {
+        let root = try disposableFolder(named: "JournalCopyMissingSource")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let destination = root.appendingPathComponent("COPIED.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("only surviving copy".utf8).write(to: source)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [.init(itemID: "SOURCE.JPG", source: source, destination: destination)],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("copy journal should reserve a temporary path")
+        }
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.copyItem(at: source, to: temporary)
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        try writer.mark(.completed, fileAt: 0, identityAt: destination)
+        try FileManager.default.removeItem(at: source)
+
+        writer.relinquishOperationLockForCrashSimulation()
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        let destinationContents = try Data(contentsOf: destination)
+        try expect(report.unresolvedFiles == 0, "a completed Copy should not require its source during recovery")
+        try expect(report.preservedCopies == 1, "the completed Copy should be preserved")
+        try expect(
+            destinationContents == Data("only surviving copy".utf8),
+            "Copy recovery must preserve its destination when the original is missing"
+        )
+        try expect(
+            !FileOperationJournal.hasPendingOperations(directory: journals),
+            "a completed Copy should retire its journal even when the source is offline"
+        )
+    }
+
+    private static func operationJournalPreservesCopyWhenSourceIsReplaced() throws {
+        let root = try disposableFolder(named: "JournalCopyReplacedSource")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let destination = root.appendingPathComponent("COPIED.JPG")
+        let replacement = root.appendingPathComponent("REPLACEMENT.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("original".utf8).write(to: source)
+        try Data("replacement".utf8).write(to: replacement)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [.init(itemID: "SOURCE.JPG", source: source, destination: destination)],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("copy journal should reserve a temporary path")
+        }
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.copyItem(at: source, to: temporary)
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        try writer.mark(.completed, fileAt: 0, identityAt: destination)
+        try FileManager.default.removeItem(at: source)
+        try FileManager.default.moveItem(at: replacement, to: source)
+
+        writer.relinquishOperationLockForCrashSimulation()
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        let sourceContents = try Data(contentsOf: source)
+        let destinationContents = try Data(contentsOf: destination)
+        try expect(report.unresolvedFiles == 0, "a completed Copy should not inspect a later source replacement")
+        try expect(report.preservedCopies == 1, "the completed Copy should be preserved")
+        try expect(
+            sourceContents == Data("replacement".utf8),
+            "Copy recovery must leave the replacement source untouched"
+        )
+        try expect(
+            destinationContents == Data("original".utf8),
+            "Copy recovery must preserve its copy when source identity changed"
+        )
+        try expect(
+            !FileOperationJournal.hasPendingOperations(directory: journals),
+            "a completed Copy should retire its journal without touching a replacement source"
+        )
+    }
+
+    private static func operationJournalPreservesCopyWhenSourceIsRewrittenInPlace() throws {
+        let root = try disposableFolder(named: "JournalCopyRewrittenSource")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let destination = root.appendingPathComponent("COPIED.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("original".utf8).write(to: source)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [
+                .init(
+                    itemID: "SOURCE.JPG",
+                    source: source,
+                    destination: destination
+                ),
+            ],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("copy journal should reserve a temporary path")
+        }
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.copyItem(at: source, to: temporary)
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        try writer.mark(.completed, fileAt: 0, identityAt: destination)
+
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.truncate(atOffset: 0)
+        // Same byte count as "original": recovery must not rely on size.
+        try handle.write(contentsOf: Data("mutation".utf8))
+        try handle.close()
+
+        writer.relinquishOperationLockForCrashSimulation()
+        let report = FileOperationJournal.recoverPendingOperations(
+            directory: journals
+        )
+        let rewrittenSourceContents = try Data(contentsOf: source)
+        let intactCopyContents = try Data(contentsOf: destination)
+        try expect(
+            report.unresolvedFiles == 0,
+            "a completed Copy should not inspect a later in-place source rewrite"
+        )
+        try expect(report.preservedCopies == 1, "the completed Copy should be preserved")
+        try expect(
+            rewrittenSourceContents == Data("mutation".utf8),
+            "Copy recovery must preserve the rewritten source"
+        )
+        try expect(
+            intactCopyContents == Data("original".utf8),
+            "Copy recovery must preserve its intact copy after a source rewrite"
+        )
+        try expect(
+            !FileOperationJournal.hasPendingOperations(directory: journals),
+            "a completed Copy should retire its journal without touching a rewritten source"
+        )
+    }
+
+    private static func operationJournalPreservesMoveWhenSourceIsReplaced() throws {
+        let root = try disposableFolder(named: "JournalMoveReplacedSource")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.NEF")
+        let destination = root.appendingPathComponent("MOVED.NEF")
+        let replacement = root.appendingPathComponent("REPLACEMENT.NEF")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("original raw".utf8).write(to: source)
+        try Data("replacement raw".utf8).write(to: replacement)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportMove,
+            seeds: [.init(itemID: "SOURCE.NEF", source: source, destination: destination)],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("move journal should reserve a temporary path")
+        }
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(at: source, to: temporary)
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        try writer.mark(.completed, fileAt: 0, identityAt: destination)
+        try FileManager.default.moveItem(at: replacement, to: source)
+
+        writer.relinquishOperationLockForCrashSimulation()
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        let sourceContents = try Data(contentsOf: source)
+        let destinationContents = try Data(contentsOf: destination)
+        try expect(report.unresolvedFiles == 1, "a replaced Move source should remain unresolved")
+        try expect(
+            sourceContents == Data("replacement raw".utf8),
+            "Move recovery must leave the replacement source untouched"
+        )
+        try expect(
+            destinationContents == Data("original raw".utf8),
+            "Move recovery must never delete the actual original after a source replacement"
+        )
+        try expect(
+            FileOperationJournal.hasPendingOperations(directory: journals),
+            "a replaced Move source must preserve its retryable journal"
+        )
+    }
+
+    private static func operationJournalRestoresMoveWithResolvedIdentity() throws {
+        let root = try disposableFolder(named: "JournalMoveResolvedIdentity")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.NEF")
+        let destination = root.appendingPathComponent("MOVED.NEF")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("cross-volume raw".utf8).write(to: source)
+
+        let writer = try FileOperationJournal.start(
+            kind: .exportMove,
+            seeds: [.init(itemID: "SOURCE.NEF", source: source, destination: destination)],
+            directory: journals
+        )
+        guard let temporary = writer.temporaryURL(at: 0) else {
+            throw CheckFailure("move journal should reserve a temporary path")
+        }
+        let originalAttributes = try FileManager.default.attributesOfItem(atPath: source.path)
+        try writer.mark(.started, fileAt: 0)
+        // A copy plus source removal deterministically simulates the new inode
+        // produced by FileManager's cross-volume move implementation.
+        try FileManager.default.copyItem(at: source, to: temporary)
+        let stagedAttributes = try FileManager.default.attributesOfItem(atPath: temporary.path)
+        try expect(
+            (originalAttributes[.systemFileNumber] as? NSNumber)
+                != (stagedAttributes[.systemFileNumber] as? NSNumber),
+            "the cross-volume fixture must produce a distinct file identity"
+        )
+        try writer.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.removeItem(at: source)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+
+        writer.relinquishOperationLockForCrashSimulation()
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        let restoredContents = try Data(contentsOf: source)
+        try expect(report.restoredFiles == 1, "resolved Move identity should restore one source")
+        try expect(
+            restoredContents == Data("cross-volume raw".utf8),
+            "Move recovery should restore the checkpointed cross-volume file"
+        )
+        try expect(
+            !FileManager.default.fileExists(atPath: destination.path),
+            "resolved Move recovery should empty its destination"
+        )
+        try expect(
+            !FileOperationJournal.hasPendingOperations(directory: journals),
+            "a restored cross-volume Move journal should be removed"
+        )
+    }
+
+    private static func operationJournalCompletesRolledBackTransactions() throws {
+        let root = try disposableFolder(named: "JournalRolledBack")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+
+        let movedSource = root.appendingPathComponent("MOVE.NEF")
+        let movedDestination = root.appendingPathComponent("MOVED.NEF")
+        try Data("move contents".utf8).write(to: movedSource)
+        let moveWriter = try FileOperationJournal.start(
+            kind: .exportMove,
+            seeds: [
+                .init(
+                    itemID: "MOVE.NEF",
+                    source: movedSource,
+                    destination: movedDestination
+                ),
+            ],
+            directory: journals
+        )
+        guard let temporary = moveWriter.temporaryURL(at: 0) else {
+            throw CheckFailure("Move rollback journal should reserve a temporary path")
+        }
+        try moveWriter.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(at: movedSource, to: temporary)
+        try moveWriter.mark(.staged, fileAt: 0, identityAt: temporary)
+        try FileManager.default.moveItem(at: temporary, to: movedSource)
+        try moveWriter.mark(.rolledBack, fileAt: 0)
+        moveWriter.relinquishOperationLockForCrashSimulation()
+
+        var report = FileOperationJournal.recoverPendingOperations(
+            directory: journals
+        )
+        try expect(
+            report.restoredOperations == 1 && report.unresolvedFiles == 0,
+            "a completed Move rollback must not become a false unresolved recovery"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: movedSource.path)
+                && !FileManager.default.fileExists(atPath: movedDestination.path),
+            "Move rollback recovery must preserve the restored original"
+        )
+
+        let preCheckpointMoveSource = root.appendingPathComponent(
+            "MOVE-PRE-CHECKPOINT.NEF"
+        )
+        let preCheckpointMoveDestination = root.appendingPathComponent(
+            "MOVED-PRE-CHECKPOINT.NEF"
+        )
+        try Data("pre-checkpoint move".utf8).write(
+            to: preCheckpointMoveSource
+        )
+        let preCheckpointMoveWriter = try FileOperationJournal.start(
+            kind: .exportMove,
+            seeds: [
+                .init(
+                    itemID: "MOVE-PRE-CHECKPOINT.NEF",
+                    source: preCheckpointMoveSource,
+                    destination: preCheckpointMoveDestination
+                ),
+            ],
+            directory: journals
+        )
+        guard let preCheckpointTemporary =
+                preCheckpointMoveWriter.temporaryURL(at: 0) else {
+            throw CheckFailure(
+                "pre-checkpoint Move journal should reserve a temporary path"
+            )
+        }
+        try preCheckpointMoveWriter.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(
+            at: preCheckpointMoveSource,
+            to: preCheckpointTemporary
+        )
+        try preCheckpointMoveWriter.mark(
+            .staged,
+            fileAt: 0,
+            identityAt: preCheckpointTemporary
+        )
+        try FileManager.default.moveItem(
+            at: preCheckpointTemporary,
+            to: preCheckpointMoveSource
+        )
+        // Simulate process death after the rollback itself but before the
+        // `.rolledBack` checkpoint can be written.
+        preCheckpointMoveWriter.relinquishOperationLockForCrashSimulation()
+
+        report = FileOperationJournal.recoverPendingOperations(
+            directory: journals
+        )
+        try expect(
+            report.restoredOperations == 1 && report.unresolvedFiles == 0,
+            "Move recovery must recognize a rollback completed before its checkpoint"
+        )
+        let preCheckpointMoveContents = try Data(
+            contentsOf: preCheckpointMoveSource
+        )
+        try expect(
+            preCheckpointMoveContents == Data("pre-checkpoint move".utf8),
+            "pre-checkpoint Move rollback must preserve the original"
+        )
+
+        let trashedSource = root.appendingPathComponent("TRASH.JPG")
+        let simulatedTrash = root.appendingPathComponent("TRASHED.JPG")
+        try Data("trash contents".utf8).write(to: trashedSource)
+        let trashWriter = try FileOperationJournal.start(
+            kind: .moveToTrash,
+            seeds: [
+                .init(
+                    itemID: "TRASH.JPG",
+                    source: trashedSource,
+                    destination: nil
+                ),
+            ],
+            directory: journals
+        )
+        try trashWriter.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(at: trashedSource, to: simulatedTrash)
+        try trashWriter.mark(
+            .completed,
+            fileAt: 0,
+            resolvedDestination: simulatedTrash,
+            identityAt: simulatedTrash
+        )
+        try FileManager.default.moveItem(at: simulatedTrash, to: trashedSource)
+        try trashWriter.mark(.rolledBack, fileAt: 0)
+        trashWriter.relinquishOperationLockForCrashSimulation()
+
+        report = FileOperationJournal.recoverPendingOperations(
+            directory: journals
+        )
+        try expect(
+            report.restoredOperations == 1 && report.unresolvedFiles == 0,
+            "a completed Trash rollback must not become a false unresolved recovery"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: trashedSource.path)
+                && !FileManager.default.fileExists(atPath: simulatedTrash.path),
+            "Trash rollback recovery must preserve the restored original"
+        )
+
+        let preCheckpointTrashSource = root.appendingPathComponent(
+            "TRASH-PRE-CHECKPOINT.JPG"
+        )
+        let preCheckpointTrashDestination = root.appendingPathComponent(
+            "TRASHED-PRE-CHECKPOINT.JPG"
+        )
+        try Data("pre-checkpoint trash".utf8).write(
+            to: preCheckpointTrashSource
+        )
+        let preCheckpointTrashWriter = try FileOperationJournal.start(
+            kind: .moveToTrash,
+            seeds: [
+                .init(
+                    itemID: "TRASH-PRE-CHECKPOINT.JPG",
+                    source: preCheckpointTrashSource,
+                    destination: nil
+                ),
+            ],
+            directory: journals
+        )
+        try preCheckpointTrashWriter.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(
+            at: preCheckpointTrashSource,
+            to: preCheckpointTrashDestination
+        )
+        try preCheckpointTrashWriter.mark(
+            .completed,
+            fileAt: 0,
+            resolvedDestination: preCheckpointTrashDestination,
+            identityAt: preCheckpointTrashDestination
+        )
+        try FileManager.default.moveItem(
+            at: preCheckpointTrashDestination,
+            to: preCheckpointTrashSource
+        )
+        // Same crash window as Move: filesystem rollback succeeded, checkpoint
+        // did not.
+        preCheckpointTrashWriter
+            .relinquishOperationLockForCrashSimulation()
+
+        report = FileOperationJournal.recoverPendingOperations(
+            directory: journals
+        )
+        try expect(
+            report.restoredOperations == 1 && report.unresolvedFiles == 0,
+            "Trash recovery must recognize a rollback completed before its checkpoint"
+        )
+        let preCheckpointTrashContents = try Data(
+            contentsOf: preCheckpointTrashSource
+        )
+        try expect(
+            preCheckpointTrashContents == Data("pre-checkpoint trash".utf8),
+            "pre-checkpoint Trash rollback must preserve the original"
+        )
+        try expect(
+            !FileOperationJournal.hasPendingOperations(directory: journals),
+            "successfully rolled-back transactions should leave no recovery journal"
+        )
     }
 
     private static func operationJournalPreservesCommittedExport() throws {
@@ -1241,10 +2073,619 @@ struct PerformanceChecks {
         try writer.mark(.completed, fileAt: 0, identityAt: destination)
         try writer.markCommitted()
 
+        writer.relinquishOperationLockForCrashSimulation()
         let report = FileOperationJournal.recoverPendingOperations(directory: journals)
         try expect(report.committedOperations == 1, "committed operation should only clear its stale journal")
         try expect(FileManager.default.fileExists(atPath: destination.path), "committed destination must be preserved")
         try expect(FileManager.default.fileExists(atPath: source.path), "committed copy must preserve its source")
+
+        let secondSource = root.appendingPathComponent("SECOND.JPG")
+        let secondDestination = root.appendingPathComponent("SECOND-COPY.JPG")
+        try Data("second source".utf8).write(to: secondSource)
+        let tamperedWriter = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [
+                .init(
+                    itemID: "SECOND.JPG",
+                    source: secondSource,
+                    destination: secondDestination
+                ),
+            ],
+            directory: journals
+        )
+        guard let secondTemporary = tamperedWriter.temporaryURL(at: 0) else {
+            throw CheckFailure("second copy journal should reserve a temporary path")
+        }
+        try tamperedWriter.mark(.started, fileAt: 0)
+        try FileManager.default.copyItem(
+            at: secondSource,
+            to: secondTemporary
+        )
+        try tamperedWriter.mark(
+            .staged,
+            fileAt: 0,
+            identityAt: secondTemporary
+        )
+        try FileManager.default.moveItem(
+            at: secondTemporary,
+            to: secondDestination
+        )
+        try tamperedWriter.mark(
+            .completed,
+            fileAt: 0,
+            identityAt: secondDestination
+        )
+        try tamperedWriter.markCommitted()
+        try Data("tampered".utf8).write(
+            to: tamperedWriter.token.directory
+                .appendingPathComponent("committed"),
+            options: .atomic
+        )
+        tamperedWriter.relinquishOperationLockForCrashSimulation()
+
+        let tamperedReport =
+            FileOperationJournal.recoverPendingOperations(
+                directory: journals
+            )
+        try expect(
+            tamperedReport.hasUnresolvedFiles,
+            "a malformed commit marker must never authorize journal removal"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: secondSource.path)
+                && FileManager.default.fileExists(
+                    atPath: secondDestination.path
+                ),
+            "invalid commit metadata must leave both source and copy untouched"
+        )
+        try expect(
+            FileOperationJournal.hasPendingOperations(directory: journals),
+            "a malformed commit marker must remain retryable"
+        )
+
+        let legacyRoot = try disposableFolder(named: "JournalLegacyCommit")
+        defer { try? FileManager.default.removeItem(at: legacyRoot) }
+        let legacySource = legacyRoot.appendingPathComponent("SOURCE.JPG")
+        let legacyDestination = legacyRoot.appendingPathComponent("COPY.JPG")
+        let legacyJournals = legacyRoot.appendingPathComponent(
+            "Journals",
+            isDirectory: true
+        )
+        try Data("legacy committed source".utf8).write(to: legacySource)
+        let legacyWriter = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [
+                .init(
+                    itemID: "SOURCE.JPG",
+                    source: legacySource,
+                    destination: legacyDestination
+                ),
+            ],
+            directory: legacyJournals
+        )
+        guard let legacyTemporary = legacyWriter.temporaryURL(at: 0) else {
+            throw CheckFailure(
+                "legacy commit journal should reserve a temporary path"
+            )
+        }
+        try legacyWriter.mark(.started, fileAt: 0)
+        try FileManager.default.copyItem(
+            at: legacySource,
+            to: legacyTemporary
+        )
+        try legacyWriter.mark(
+            .staged,
+            fileAt: 0,
+            identityAt: legacyTemporary
+        )
+        try FileManager.default.moveItem(
+            at: legacyTemporary,
+            to: legacyDestination
+        )
+        try legacyWriter.mark(
+            .completed,
+            fileAt: 0,
+            identityAt: legacyDestination
+        )
+        let legacyPlan = FileOperationJournal.Plan(
+            version: 1,
+            operationID: legacyWriter.plan.operationID,
+            kind: legacyWriter.plan.kind,
+            createdAt: legacyWriter.plan.createdAt,
+            files: legacyWriter.plan.files
+        )
+        let legacyPlanEncoder = JSONEncoder()
+        legacyPlanEncoder.dateEncodingStrategy = .iso8601
+        legacyPlanEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let encodedLegacyPlan = try legacyPlanEncoder.encode(legacyPlan)
+        guard var legacyObject = try JSONSerialization.jsonObject(
+            with: encodedLegacyPlan
+        ) as? [String: Any],
+        var legacyFiles = legacyObject["files"] as? [[String: Any]],
+        var legacyIdentity = legacyFiles.first?["identity"]
+            as? [String: Any] else {
+            throw CheckFailure("could not construct authentic legacy plan JSON")
+        }
+        // These keys did not exist in the original version-1 journal schema.
+        legacyIdentity.removeValue(forKey: "logicalSize")
+        legacyIdentity.removeValue(forKey: "modificationTime")
+        legacyIdentity.removeValue(forKey: "statusChangeTime")
+        legacyIdentity.removeValue(forKey: "birthTime")
+        legacyFiles[0]["identity"] = legacyIdentity
+        legacyObject["files"] = legacyFiles
+        let authenticLegacyPlanData = try JSONSerialization.data(
+            withJSONObject: legacyObject,
+            options: [.sortedKeys]
+        )
+        try authenticLegacyPlanData.write(
+            to: legacyWriter.token.directory.appendingPathComponent(
+                "plan.json"
+            ),
+            options: .atomic
+        )
+        try Data("committed\n".utf8).write(
+            to: legacyWriter.token.directory.appendingPathComponent(
+                "committed"
+            ),
+            options: .atomic
+        )
+        legacyWriter.relinquishOperationLockForCrashSimulation()
+
+        let legacyReport =
+            FileOperationJournal.recoverPendingOperations(
+                directory: legacyJournals
+            )
+        try expect(
+            legacyReport.committedOperations == 1
+                && !legacyReport.hasUnresolvedFiles,
+            "an exact version-1 commit marker must remain recoverable after update"
+        )
+        let legacySourceContents = try Data(contentsOf: legacySource)
+        let legacyDestinationContents = try Data(
+            contentsOf: legacyDestination
+        )
+        try expect(
+            legacySourceContents == Data("legacy committed source".utf8)
+                && legacyDestinationContents
+                    == Data("legacy committed source".utf8),
+            "legacy committed recovery must preserve both the source and completed copy"
+        )
+        try expect(
+            !FileOperationJournal.hasPendingOperations(
+                directory: legacyJournals
+            ),
+            "a valid legacy committed journal should be cleared"
+        )
+
+        let emptyLegacyID = UUID().uuidString.lowercased()
+        let emptyLegacyDirectory = legacyJournals.appendingPathComponent(
+            "\(emptyLegacyID).operation",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: emptyLegacyDirectory.appendingPathComponent(
+                "steps",
+                isDirectory: true
+            ),
+            withIntermediateDirectories: true
+        )
+        let emptyLegacyPlan = FileOperationJournal.Plan(
+            version: 1,
+            operationID: emptyLegacyID,
+            kind: .exportCopy,
+            createdAt: Date(timeIntervalSince1970: 1),
+            files: []
+        )
+        try legacyPlanEncoder.encode(emptyLegacyPlan).write(
+            to: emptyLegacyDirectory.appendingPathComponent("plan.json"),
+            options: .atomic
+        )
+        try Data("committed\n".utf8).write(
+            to: emptyLegacyDirectory.appendingPathComponent("committed"),
+            options: .atomic
+        )
+        let emptyLegacyReport =
+            FileOperationJournal.recoverPendingOperations(
+                directory: legacyJournals
+            )
+        try expect(
+            emptyLegacyReport.committedOperations == 1
+                && !emptyLegacyReport.hasUnresolvedFiles,
+            "an old committed empty operation must not block the upgraded app"
+        )
+
+        let collisionRoot = try disposableFolder(named: "JournalPathCollision")
+        defer { try? FileManager.default.removeItem(at: collisionRoot) }
+        let collisionSource = collisionRoot.appendingPathComponent("SOURCE.JPG")
+        let collisionJournals = collisionRoot.appendingPathComponent(
+            "Journals",
+            isDirectory: true
+        )
+        try Data("irreplaceable original".utf8).write(to: collisionSource)
+        let hardLinkedSource = collisionRoot.appendingPathComponent(
+            "HARD-LINKED-SOURCE.JPG"
+        )
+        try FileManager.default.linkItem(
+            at: collisionSource,
+            to: hardLinkedSource
+        )
+
+        do {
+            _ = try FileOperationJournal.start(
+                kind: .exportCopy,
+                seeds: [
+                    .init(
+                        itemID: "SOURCE.JPG",
+                        source: collisionSource,
+                        destination: hardLinkedSource
+                    ),
+                ],
+                directory: collisionJournals
+            )
+            throw CheckFailure(
+                "an owned path hard-linked to its source must be rejected"
+            )
+        } catch FileOperationJournal.JournalError.unsafePlan {
+            // Expected.
+        }
+
+        let hardLinkWriter = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [
+                .init(
+                    itemID: "SOURCE.JPG",
+                    source: collisionSource,
+                    destination: collisionRoot.appendingPathComponent(
+                        "SOURCE-COPY.JPG"
+                    )
+                ),
+                .init(
+                    itemID: "HARD-LINKED-SOURCE.JPG",
+                    source: hardLinkedSource,
+                    destination: collisionRoot.appendingPathComponent(
+                        "HARD-LINK-COPY.JPG"
+                    )
+                ),
+            ],
+            directory: collisionJournals
+        )
+        hardLinkWriter.relinquishOperationLockForCrashSimulation()
+        let hardLinkReport =
+            FileOperationJournal.recoverPendingOperations(
+                directory: collisionJournals
+            )
+        try expect(
+            hardLinkReport.restoredOperations == 1
+                && !hardLinkReport.hasUnresolvedFiles,
+            "distinct hard-linked source paths must remain valid operation inputs"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: collisionSource.path)
+                && FileManager.default.fileExists(
+                    atPath: hardLinkedSource.path
+                ),
+            "valid hard-linked sources must remain untouched during no-op recovery"
+        )
+
+        let hardLinkedPair = makeItem(
+            id: "SOURCE.JPG",
+            primaryURL: collisionSource,
+            pairedURL: hardLinkedSource,
+            pairedFileSize: 1
+        )
+        let hardLinkCopyDestination = collisionRoot.appendingPathComponent(
+            "HardLinkCopies",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: hardLinkCopyDestination,
+            withIntermediateDirectories: true
+        )
+        let hardLinkCopyResult = ExportWorker.copy(
+            [hardLinkedPair],
+            to: hardLinkCopyDestination,
+            journalDirectory: collisionJournals
+        ) { _, _ in }
+        try expect(
+            hardLinkCopyResult.copiedFiles == 2
+                && hardLinkCopyResult.failedPhotos == 0
+                && !hardLinkCopyResult.journalFailure,
+            "Copy must support distinct hard-linked source names"
+        )
+        try expect(
+            FileManager.default.fileExists(
+                atPath: hardLinkCopyDestination
+                    .appendingPathComponent(collisionSource.lastPathComponent)
+                    .path
+            )
+                && FileManager.default.fileExists(
+                    atPath: hardLinkCopyDestination
+                        .appendingPathComponent(
+                            hardLinkedSource.lastPathComponent
+                        )
+                        .path
+                ),
+            "Copy must create both requested hard-link-name outputs"
+        )
+
+        let hardLinkMoveDestination = collisionRoot.appendingPathComponent(
+            "HardLinkMoves",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: hardLinkMoveDestination,
+            withIntermediateDirectories: true
+        )
+        let hardLinkMoveResult = ExportWorker.move(
+            [hardLinkedPair],
+            to: hardLinkMoveDestination,
+            journalDirectory: collisionJournals
+        ) { _, _ in }
+        try expect(
+            hardLinkMoveResult.movedFiles == 0
+                && hardLinkMoveResult.failedPhotos == 1
+                && hardLinkMoveResult.journalFailure
+                && !hardLinkMoveResult.requiresRecovery,
+            "Move must reject hard-linked source names before touching either"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: collisionSource.path)
+                && FileManager.default.fileExists(
+                    atPath: hardLinkedSource.path
+                ),
+            "rejected hard-linked Move must preserve both source names"
+        )
+
+        let hardLinkTrashResult = CleanUpWorker.moveToTrash(
+            [CleanUpPhotoSnapshot(index: 0, item: hardLinkedPair)],
+            journalDirectory: collisionJournals
+        ) { _, _ in }
+        try expect(
+            hardLinkTrashResult.succeeded.isEmpty
+                && hardLinkTrashResult.failedPhotos == 1
+                && hardLinkTrashResult.journalFailure
+                && !hardLinkTrashResult.requiresRecovery,
+            "Clean Up must reject hard-linked source names before Trash"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: collisionSource.path)
+                && FileManager.default.fileExists(
+                    atPath: hardLinkedSource.path
+                ),
+            "rejected hard-linked Clean Up must preserve both source names"
+        )
+
+        let simulatedTrash = collisionRoot.appendingPathComponent(
+            "SimulatedTrash",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: simulatedTrash,
+            withIntermediateDirectories: true
+        )
+        let trashedPrimary = simulatedTrash.appendingPathComponent(
+            "RESTORE-A.JPG"
+        )
+        let trashedPartner = simulatedTrash.appendingPathComponent(
+            "RESTORE-B.JPG"
+        )
+        try Data("trashed hard link".utf8).write(to: trashedPrimary)
+        try FileManager.default.linkItem(
+            at: trashedPrimary,
+            to: trashedPartner
+        )
+        let restorePrimary = collisionRoot.appendingPathComponent(
+            "RESTORE-A.JPG"
+        )
+        let restorePartner = collisionRoot.appendingPathComponent(
+            "RESTORE-B.JPG"
+        )
+        let restorePair = makeItem(
+            id: "RESTORE-A.JPG",
+            primaryURL: restorePrimary,
+            pairedURL: restorePartner,
+            pairedFileSize: 1
+        )
+        let hardLinkRestoreResult = CleanUpWorker.restore(
+            [
+                TrashedPhotoSnapshot(
+                    index: 0,
+                    item: restorePair,
+                    files: [
+                        TrashedFile(
+                            original: restorePrimary,
+                            trash: trashedPrimary
+                        ),
+                        TrashedFile(
+                            original: restorePartner,
+                            trash: trashedPartner
+                        ),
+                    ]
+                ),
+            ],
+            journalDirectory: collisionJournals
+        ) { _, _ in }
+        try expect(
+            hardLinkRestoreResult.restored.isEmpty
+                && hardLinkRestoreResult.lostPhotos == 1
+                && hardLinkRestoreResult.journalFailure
+                && !hardLinkRestoreResult.requiresRecovery,
+            "Trash undo must reject hard-linked entries before moving either"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: trashedPrimary.path)
+                && FileManager.default.fileExists(atPath: trashedPartner.path)
+                && !FileManager.default.fileExists(atPath: restorePrimary.path)
+                && !FileManager.default.fileExists(atPath: restorePartner.path),
+            "rejected hard-linked Trash undo must preserve both Trash names"
+        )
+
+        let aliasedParent = collisionRoot.appendingPathComponent(
+            "ALIASED-PARENT",
+            isDirectory: true
+        )
+        try FileManager.default.createSymbolicLink(
+            at: aliasedParent,
+            withDestinationURL: collisionRoot
+        )
+        do {
+            _ = try FileOperationJournal.start(
+                kind: .exportCopy,
+                seeds: [
+                    .init(
+                        itemID: "SOURCE.JPG",
+                        source: collisionSource,
+                        destination: aliasedParent.appendingPathComponent(
+                            collisionSource.lastPathComponent
+                        )
+                    ),
+                ],
+                directory: collisionJournals
+            )
+            throw CheckFailure(
+                "a symlink-resolved destination alias must be rejected"
+            )
+        } catch FileOperationJournal.JournalError.unsafePlan {
+            // Expected.
+        }
+
+        let secondCollisionSource = collisionRoot.appendingPathComponent(
+            "SECOND-SOURCE.JPG"
+        )
+        try Data("second original".utf8).write(to: secondCollisionSource)
+        do {
+            _ = try FileOperationJournal.start(
+                kind: .exportCopy,
+                seeds: [
+                    .init(
+                        itemID: "SOURCE.JPG",
+                        source: collisionSource,
+                        destination: collisionRoot.appendingPathComponent(
+                            "FIRST-COPY.JPG"
+                        )
+                    ),
+                    .init(
+                        itemID: "SECOND-SOURCE.JPG",
+                        source: secondCollisionSource,
+                        destination: collisionSource
+                    ),
+                ],
+                directory: collisionJournals
+            )
+            throw CheckFailure(
+                "one file's owned path must not alias another file's source"
+            )
+        } catch FileOperationJournal.JournalError.unsafePlan {
+            // Expected.
+        }
+
+        do {
+            _ = try FileOperationJournal.start(
+                kind: .exportCopy,
+                seeds: [
+                    .init(
+                        itemID: "SOURCE.JPG",
+                        source: collisionSource,
+                        destination: collisionSource
+                    ),
+                ],
+                directory: collisionJournals
+            )
+            throw CheckFailure(
+                "journal activation must reject a destination aliasing its source"
+            )
+        } catch FileOperationJournal.JournalError.unsafePlan {
+            // Expected.
+        }
+        do {
+            _ = try FileOperationJournal.start(
+                kind: .exportCopy,
+                seeds: [
+                    .init(
+                        itemID: "SOURCE.JPG",
+                        source: collisionSource,
+                        destination: collisionJournals
+                            .appendingPathComponent("OWNED.JPG")
+                    ),
+                ],
+                directory: collisionJournals
+            )
+            throw CheckFailure(
+                "journal activation must reject paths inside journal storage"
+            )
+        } catch FileOperationJournal.JournalError.unsafePlan {
+            // Expected.
+        }
+
+        let safeDestination = collisionRoot.appendingPathComponent("SAFE.JPG")
+        let collisionWriter = try FileOperationJournal.start(
+            kind: .exportCopy,
+            seeds: [
+                .init(
+                    itemID: "SOURCE.JPG",
+                    source: collisionSource,
+                    destination: safeDestination
+                ),
+            ],
+            directory: collisionJournals
+        )
+        try collisionWriter.mark(
+            .completed,
+            fileAt: 0,
+            identityAt: collisionSource
+        )
+        let originalFile = collisionWriter.plan.files[0]
+        let collidingTemporary = collisionSource
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                ".louppe-\(collisionWriter.plan.operationID)-0.partial"
+            )
+            .standardizedFileURL.path
+        let collidingPlan = FileOperationJournal.Plan(
+            version: collisionWriter.plan.version,
+            operationID: collisionWriter.plan.operationID,
+            kind: collisionWriter.plan.kind,
+            createdAt: collisionWriter.plan.createdAt,
+            files: [
+                FileOperationJournal.PlannedFile(
+                    itemID: originalFile.itemID,
+                    sourcePath: originalFile.sourcePath,
+                    destinationPath: originalFile.sourcePath,
+                    temporaryPath: collidingTemporary,
+                    identity: originalFile.identity
+                )
+            ]
+        )
+        let collisionEncoder = JSONEncoder()
+        collisionEncoder.dateEncodingStrategy = .iso8601
+        collisionEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try collisionEncoder.encode(collidingPlan).write(
+            to: collisionWriter.token.directory.appendingPathComponent(
+                "plan.json"
+            ),
+            options: .atomic
+        )
+        collisionWriter.relinquishOperationLockForCrashSimulation()
+
+        let collisionReport =
+            FileOperationJournal.recoverPendingOperations(
+                directory: collisionJournals
+            )
+        try expect(
+            collisionReport.hasUnresolvedFiles,
+            "a source/owned-path collision must fail closed during recovery"
+        )
+        let collisionSourceContents = try Data(contentsOf: collisionSource)
+        try expect(
+            collisionSourceContents == Data("irreplaceable original".utf8),
+            "malformed Copy recovery must never remove the planned original"
+        )
+        try expect(
+            FileOperationJournal.hasPendingOperations(
+                directory: collisionJournals
+            ),
+            "a malformed colliding plan must remain available for diagnosis"
+        )
     }
 
     private static func operationJournalRefusesSameNamedReplacement() throws {
@@ -1273,6 +2714,7 @@ struct PerformanceChecks {
         try FileManager.default.removeItem(at: destination)
         try FileManager.default.moveItem(at: replacement, to: destination)
 
+        writer.relinquishOperationLockForCrashSimulation()
         let report = FileOperationJournal.recoverPendingOperations(directory: journals)
         try expect(report.unresolvedFiles == 1, "replacement identity should keep recovery unresolved")
         let replacementContents = String(
@@ -1308,10 +2750,55 @@ struct PerformanceChecks {
             identityAt: simulatedTrash
         )
 
+        writer.relinquishOperationLockForCrashSimulation()
         let report = FileOperationJournal.recoverPendingOperations(directory: journals)
         try expect(report.restoredFiles == 1, "interrupted Trash should restore the source")
         try expect(FileManager.default.fileExists(atPath: source.path), "Trash recovery should restore the original path")
         try expect(!FileManager.default.fileExists(atPath: simulatedTrash.path), "recovered Trash location should be empty")
+    }
+
+    private static func operationJournalPreservesTrashWhenSourceIsReplaced() throws {
+        let root = try disposableFolder(named: "JournalTrashReplacedSource")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SOURCE.JPG")
+        let simulatedTrash = root.appendingPathComponent("TRASHED.JPG")
+        let replacement = root.appendingPathComponent("REPLACEMENT.JPG")
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try Data("original".utf8).write(to: source)
+        try Data("replacement".utf8).write(to: replacement)
+
+        let writer = try FileOperationJournal.start(
+            kind: .moveToTrash,
+            seeds: [.init(itemID: "SOURCE.JPG", source: source, destination: nil)],
+            directory: journals
+        )
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(at: source, to: simulatedTrash)
+        try writer.mark(
+            .completed,
+            fileAt: 0,
+            resolvedDestination: simulatedTrash,
+            identityAt: simulatedTrash
+        )
+        try FileManager.default.moveItem(at: replacement, to: source)
+
+        writer.relinquishOperationLockForCrashSimulation()
+        let report = FileOperationJournal.recoverPendingOperations(directory: journals)
+        let sourceContents = try Data(contentsOf: source)
+        let trashContents = try Data(contentsOf: simulatedTrash)
+        try expect(report.unresolvedFiles == 1, "a replaced Trash source should remain unresolved")
+        try expect(
+            sourceContents == Data("replacement".utf8),
+            "Trash recovery must leave the replacement source untouched"
+        )
+        try expect(
+            trashContents == Data("original".utf8),
+            "Trash recovery must preserve the actual original at its resolved location"
+        )
+        try expect(
+            FileOperationJournal.hasPendingOperations(directory: journals),
+            "a replaced Trash source must preserve its retryable journal"
+        )
     }
 
     private static func operationJournalCompletesInterruptedTrashUndo() throws {
@@ -1335,6 +2822,7 @@ struct PerformanceChecks {
         try writer.mark(.started, fileAt: 0)
         try FileManager.default.moveItem(at: simulatedTrash, to: source)
 
+        writer.relinquishOperationLockForCrashSimulation()
         let report = FileOperationJournal.recoverPendingOperations(directory: journals)
         try expect(report.restoredOperations == 1, "interrupted Trash undo should finish cleanly")
         try expect(FileManager.default.fileExists(atPath: source.path), "Trash undo recovery should keep the restored source")
@@ -1830,10 +3318,6 @@ struct PerformanceChecks {
             [.modificationDate: Date(timeIntervalSince1970: 50)],
             ofItemAtPath: newURL.path
         )
-        try fm.setAttributes(
-            [.modificationDate: Date(timeIntervalSince1970: 500)],
-            ofItemAtPath: folder.appendingPathComponent("B.png").path
-        )
 
         store.rescan()
         try await waitForReadySession(store, expectedItems: 4)
@@ -1885,9 +3369,14 @@ struct PerformanceChecks {
         store.openFolder(folder)
         try await waitForReadySession(store, expectedItems: 1)
         try expect(
-            store.items[0].ratingSnapshots.allSatisfy { $0.rating == .yes },
-            "schema 1 paired ratings should migrate onto both physical files"
+            store.isLegacySessionMigrationConfirmationPresented,
+            "a filename-only session must wait for explicit migration approval"
         )
+        try expect(
+            store.items[0].ratingSnapshots.allSatisfy { $0.rating == .yes },
+            "schema 1 paired ratings should be reviewable before migration"
+        )
+        store.confirmLegacySessionMigration()
 
         store.setRawJPEGPairingMode(.separate)
         if case .ready = store.phase {
@@ -1946,12 +3435,14 @@ struct PerformanceChecks {
             }
         )
         try expect(
-            loaded.session?.version == SessionConstants.currentSchemaVersion,
-            "file-level ratings should be saved with sidecar schema 2"
+            loaded.session?.version == SessionConstants.currentSchemaVersion
+                && loaded.session?.fileIDEncoding
+                    == .percentEncodedFileSystemPath,
+            "file-level ratings should use the current exact-ID and physical-identity contract"
         )
         try expect(
             savedRatings["SHOT.NEF"] == .yes && savedRatings["SHOT.JPG"] == .no,
-            "schema 2 should persist both conflicting ratings independently"
+            "the current schema should persist both conflicting ratings independently"
         )
 
         let reopened = SessionStore()
@@ -1959,7 +3450,7 @@ struct PerformanceChecks {
         try await waitForReadySession(reopened, expectedItems: 1)
         try expect(
             reopened.items[0].hasMixedRatings,
-            "reopening schema 2 should restore a Mixed pair without losing either rating"
+            "reopening the current schema should restore a Mixed pair without losing either rating"
         )
         reopened.setRawJPEGPairingMode(.separate)
         try await waitForPairingModeChange(reopened, expectedItems: 2)
@@ -2130,6 +3621,27 @@ struct PerformanceChecks {
             "the current photo must stay in bounds after the removal"
         )
         try expect(!store.canUndo, "a move export is not undoable — the stale undo stack must be cleared")
+
+        let moveAllStore = SessionStore()
+        moveAllStore.items = [
+            makeItem(id: "ONLY.JPG"),
+        ]
+        moveAllStore.sort.ascending = false
+        try expect(
+            moveAllStore.exportWillStart(mode: .move),
+            "move-all should raise the shared operation state"
+        )
+        moveAllStore.finishExport(
+            mode: .move,
+            movedIDs: ["ONLY.JPG"],
+            requiresRecovery: false
+        )
+        try expect(
+            moveAllStore.items.isEmpty
+                && moveAllStore.emptySessionReason == .movedOut
+                && !moveAllStore.canUndo,
+            "an empty session after Move must not claim the files are in Trash or undoable"
+        )
     }
 
     private final class CancellationAfterChecks: @unchecked Sendable {
@@ -2146,6 +3658,100 @@ struct PerformanceChecks {
             defer { lock.unlock() }
             checks += 1
             return checks >= threshold
+        }
+    }
+
+    /// Introduces a deterministic second-member failure only after a worker's
+    /// first progress checkpoint. Unlike a missing source at setup time, this
+    /// proves the journal activated and the first pair member reached the
+    /// filesystem before rollback was exercised.
+    private final class ProgressFileDisplacer: @unchecked Sendable {
+        private let lock = NSLock()
+        private let source: URL
+        private let destination: URL
+        private var attempted = false
+        private var storedFailureDescription: String?
+
+        init(from source: URL, to destination: URL) {
+            self.source = source
+            self.destination = destination
+        }
+
+        func displaceAfterFirstProgress(done: Int) {
+            guard done == 1 else { return }
+            lock.lock()
+            defer { lock.unlock() }
+            guard !attempted else { return }
+            attempted = true
+            do {
+                try FileManager.default.moveItem(
+                    at: source,
+                    to: destination
+                )
+            } catch {
+                storedFailureDescription =
+                    "could not inject the second-file failure: "
+                    + error.localizedDescription
+            }
+        }
+
+        var failureDescription: String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedFailureDescription
+        }
+    }
+
+    /// Creates the exact rollback race Clean Up must treat conservatively:
+    /// after the first pair member reaches Trash, another file occupies its
+    /// original path while the second member disappears from its scanned path.
+    private final class CleanUpRollbackReplacementRace: @unchecked Sendable {
+        private let lock = NSLock()
+        private let pairedSource: URL
+        private let displacedPairedSource: URL
+        private let replacementURL: URL
+        private let replacementData: Data
+        private var attempted = false
+        private var storedFailureDescription: String?
+
+        init(
+            pairedSource: URL,
+            displacedPairedSource: URL,
+            replacementURL: URL,
+            replacementData: Data
+        ) {
+            self.pairedSource = pairedSource
+            self.displacedPairedSource = displacedPairedSource
+            self.replacementURL = replacementURL
+            self.replacementData = replacementData
+        }
+
+        func injectAfterFirstProgress(done: Int) {
+            guard done == 1 else { return }
+            lock.lock()
+            defer { lock.unlock() }
+            guard !attempted else { return }
+            attempted = true
+            do {
+                try FileManager.default.moveItem(
+                    at: pairedSource,
+                    to: displacedPairedSource
+                )
+                try replacementData.write(
+                    to: replacementURL,
+                    options: .withoutOverwriting
+                )
+            } catch {
+                storedFailureDescription =
+                    "could not inject Clean Up rollback replacement: "
+                    + error.localizedDescription
+            }
+        }
+
+        var failureDescription: String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedFailureDescription
         }
     }
 

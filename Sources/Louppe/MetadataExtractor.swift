@@ -25,21 +25,30 @@ enum MetadataExtractor {
         let dateString = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
             ?? (exif?[kCGImagePropertyExifDateTimeDigitized] as? String)
             ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String)
-        let aperture = numericValue(exif?[kCGImagePropertyExifFNumber])
-        let shutterSpeed = numericValue(exif?[kCGImagePropertyExifExposureTime])
-        let iso = firstNumericValue(exif?[kCGImagePropertyExifISOSpeedRatings])
+        let aperture = MediaNumeric.aperture(
+            finiteNumericValue(exif?[kCGImagePropertyExifFNumber])
+        )
+        let shutterSpeed = MediaNumeric.shutterSpeed(
+            finiteNumericValue(exif?[kCGImagePropertyExifExposureTime])
+        )
+        let iso = MediaNumeric.iso(
+            firstNumericValue(exif?[kCGImagePropertyExifISOSpeedRatings])
+        )
         return ScanInfo(
             captureDate: dateString.flatMap { exifDateFormatter.date(from: $0) },
             cameraModel: tiff?[kCGImagePropertyTIFFModel] as? String,
             lensModel: exif?[kCGImagePropertyExifLensModel] as? String,
-            aperture: aperture.flatMap { $0 > 0 ? $0 : nil },
-            shutterSpeed: shutterSpeed.flatMap { $0 > 0 ? $0 : nil },
-            iso: iso.flatMap { $0 > 0 ? $0 : nil }
+            aperture: aperture,
+            shutterSpeed: shutterSpeed,
+            iso: iso
         )
     }
 
     /// Full field list for the metadata panel.
     static func fields(for item: PhotoItem) -> [MetadataField] {
+#if DEBUG
+        MetadataExtractorTestProbe.shared.record(item.contentRevision)
+#endif
         if item.isVideo { return videoFields(for: item) }
         var fields: [MetadataField] = []
         func add(_ label: String, _ value: String?) {
@@ -67,28 +76,45 @@ enum MetadataExtractor {
         add("Camera", tiff[kCGImagePropertyTIFFModel] as? String)
         add("Lens", exif[kCGImagePropertyExifLensModel] as? String)
 
-        if let focal = numericValue(exif[kCGImagePropertyExifFocalLength]) {
+        if let focal = MediaNumeric.focalLength(
+            finiteNumericValue(exif[kCGImagePropertyExifFocalLength])
+        ) {
             add("Focal length", String(format: "%.0f mm", focal))
         }
-        if let fNumber = numericValue(exif[kCGImagePropertyExifFNumber]) {
+        if let fNumber = MediaNumeric.aperture(
+            finiteNumericValue(exif[kCGImagePropertyExifFNumber])
+        ) {
             add("Aperture", String(format: "f/%.1f", fNumber))
         }
-        if let exposure = numericValue(exif[kCGImagePropertyExifExposureTime]) {
+        if let exposure = MediaNumeric.shutterSpeed(
+            finiteNumericValue(exif[kCGImagePropertyExifExposureTime])
+        ) {
             add("Shutter", formatShutter(exposure))
         }
-        if let iso = firstNumericValue(exif[kCGImagePropertyExifISOSpeedRatings]) {
+        if let iso = MediaNumeric.iso(
+            firstNumericValue(exif[kCGImagePropertyExifISOSpeedRatings])
+        ) {
             add("ISO", String(format: "%.0f", iso))
         }
-        if let bias = numericValue(exif[kCGImagePropertyExifExposureBiasValue]), bias != 0 {
-            add("Exposure comp.", String(format: "%+.1f EV", bias))
-        } else if exif[kCGImagePropertyExifExposureBiasValue] != nil {
-            add("Exposure comp.", "0 EV")
+        if let bias = MediaNumeric.exposureCompensation(
+            finiteNumericValue(exif[kCGImagePropertyExifExposureBiasValue])
+        ) {
+            add(
+                "Exposure comp.",
+                bias == 0 ? "0 EV" : String(format: "%+.1f EV", bias)
+            )
         }
         if let wb = exif[kCGImagePropertyExifWhiteBalance] as? Int {
             add("White balance", wb == 0 ? "Auto" : "Manual")
         }
-        if let width = props[kCGImagePropertyPixelWidth] as? Int,
-           let height = props[kCGImagePropertyPixelHeight] as? Int {
+        if let widthValue = finiteNumericValue(
+            props[kCGImagePropertyPixelWidth]
+        ),
+           let heightValue = finiteNumericValue(
+               props[kCGImagePropertyPixelHeight]
+           ),
+           let width = MediaNumeric.pixelDimension(CGFloat(widthValue)),
+           let height = MediaNumeric.pixelDimension(CGFloat(heightValue)) {
             add("Dimensions", "\(width) × \(height)")
         }
         if item.pairedURL != nil {
@@ -100,10 +126,24 @@ enum MetadataExtractor {
         }
         add("Type", item.fileTypeLabel)
 
-        if let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
-           let lon = gps[kCGImagePropertyGPSLongitude] as? Double {
-            let latRef = gps[kCGImagePropertyGPSLatitudeRef] as? String ?? "N"
-            let lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String ?? "E"
+        if let lat = MediaNumeric.latitude(
+            finiteNumericValue(gps[kCGImagePropertyGPSLatitude])
+        ),
+           let lon = MediaNumeric.longitude(
+               finiteNumericValue(gps[kCGImagePropertyGPSLongitude])
+           ) {
+            let requestedLatRef =
+                (gps[kCGImagePropertyGPSLatitudeRef] as? String)?
+                .uppercased()
+            let requestedLonRef =
+                (gps[kCGImagePropertyGPSLongitudeRef] as? String)?
+                .uppercased()
+            let latRef = requestedLatRef.flatMap {
+                ["N", "S"].contains($0) ? $0 : nil
+            } ?? (lat < 0 ? "S" : "N")
+            let lonRef = requestedLonRef.flatMap {
+                ["E", "W"].contains($0) ? $0 : nil
+            } ?? (lon < 0 ? "W" : "E")
             add("GPS", String(format: "%.5f°%@, %.5f°%@", lat, latRef, lon, lonRef))
         }
         return fields
@@ -119,11 +159,15 @@ enum MetadataExtractor {
         }
         if let date = item.captureDate { add("Captured", AppDateFormat.dayAndTime(date)) }
         add("Duration", MediaDurationFormat.display(item.duration))
-        if let size = item.videoDimensions {
-            add("Dimensions", "\(Int(size.width.rounded())) × \(Int(size.height.rounded()))")
+        if let size = item.videoDimensions,
+           let width = MediaNumeric.pixelDimension(size.width),
+           let height = MediaNumeric.pixelDimension(size.height) {
+            add("Dimensions", "\(width) × \(height)")
         }
         add("Codec", item.videoCodec)
-        if let frameRate = item.videoFrameRate {
+        if let frameRate = MediaNumeric.frameRate(
+            item.videoFrameRate
+        ) {
             add("Frame rate", String(format: "%.2f fps", frameRate).replacingOccurrences(of: ".00 ", with: " "))
         }
         add("File size", formattedFileSize(item.fileSize))
@@ -135,27 +179,38 @@ enum MetadataExtractor {
         ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
     }
 
-    private static func formatShutter(_ seconds: Double) -> String {
+    static func formatShutter(_ seconds: Double) -> String {
+        guard let seconds = MediaNumeric.shutterSpeed(seconds) else {
+            return "—"
+        }
         if seconds >= 1 {
             return String(format: "%.1fs", seconds)
         }
-        guard seconds > 0 else { return "—" }
-        return "1/\(Int((1.0 / seconds).rounded()))s"
+        guard let denominator = MediaNumeric.roundedPositiveInt(1 / seconds)
+        else { return "—" }
+        return "1/\(denominator)s"
     }
 
-    private static func numericValue(_ value: Any?) -> Double? {
-        if let number = value as? NSNumber { return number.doubleValue }
-        if let string = value as? String { return Double(string) }
-        return nil
+    static func finiteNumericValue(_ value: Any?) -> Double? {
+        let parsed: Double?
+        if let number = value as? NSNumber {
+            parsed = number.doubleValue
+        } else if let string = value as? String {
+            parsed = Double(string)
+        } else {
+            parsed = nil
+        }
+        guard let parsed, parsed.isFinite else { return nil }
+        return parsed
     }
 
     /// ISO is normally an array in EXIF, but some encoders store a scalar.
     /// Accept both shapes so filtering, sorting, and the Info panel agree.
     private static func firstNumericValue(_ value: Any?) -> Double? {
         if let values = value as? [Any] {
-            return values.lazy.compactMap(numericValue).first
+            return values.lazy.compactMap(finiteNumericValue).first
         }
-        return numericValue(value)
+        return finiteNumericValue(value)
     }
 
     private static let exifDateFormatter: DateFormatter = {
@@ -166,3 +221,28 @@ enum MetadataExtractor {
         return formatter
     }()
 }
+
+#if DEBUG
+/// Counts exact metadata-field reads for unique content revisions in hosted
+/// regression tests. The release app has no probe or counting overhead.
+final class MetadataExtractorTestProbe: @unchecked Sendable {
+    static let shared = MetadataExtractorTestProbe()
+
+    private let lock = NSLock()
+    private var callCounts: [PhotoContentRevision: Int] = [:]
+
+    private init() {}
+
+    func record(_ revision: PhotoContentRevision) {
+        lock.lock()
+        callCounts[revision, default: 0] += 1
+        lock.unlock()
+    }
+
+    func callCount(for revision: PhotoContentRevision) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return callCounts[revision, default: 0]
+    }
+}
+#endif

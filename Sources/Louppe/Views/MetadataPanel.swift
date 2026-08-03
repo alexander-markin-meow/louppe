@@ -11,16 +11,18 @@ struct MetadataPanel: View {
     let item: PhotoItem
 
     @State private var fields: [MetadataField] = []
+    @State private var fieldsRevision: PhotoContentRevision?
     @State private var histogram: HistogramAnalysis?
     @State private var histogramLoadFailed = false
+    @State private var histogramRevision: PhotoContentRevision?
 
     private struct MetadataLoadID: Hashable {
-        let itemID: String
+        let contentRevision: PhotoContentRevision
         let isMultipleSelection: Bool
     }
 
     private struct HistogramLoadID: Hashable {
-        let itemID: String
+        let contentRevision: PhotoContentRevision
         let isEligible: Bool
     }
 
@@ -31,12 +33,24 @@ struct MetadataPanel: View {
         "Focal length", "Exposure comp.", "White balance"
     ]
 
+    private var displayedFields: [MetadataField] {
+        fieldsRevision == item.contentRevision ? fields : []
+    }
+
+    private var displayedHistogram: HistogramAnalysis? {
+        histogramRevision == item.contentRevision ? histogram : nil
+    }
+
+    private var displayedHistogramLoadFailed: Bool {
+        histogramRevision == item.contentRevision && histogramLoadFailed
+    }
+
     private var cameraName: String? {
-        fields.first { $0.label == "Camera" }?.value
+        displayedFields.first { $0.label == "Camera" }?.value
     }
 
     private var lensName: String? {
-        fields.first { $0.label == "Lens" }?.value
+        displayedFields.first { $0.label == "Lens" }?.value
     }
 
     private var primaryShootingFields: [MetadataField] {
@@ -65,11 +79,13 @@ struct MetadataPanel: View {
     }
 
     private func fields(for labels: [String]) -> [MetadataField] {
-        labels.compactMap { label in fields.first { $0.label == label } }
+        labels.compactMap { label in
+            displayedFields.first { $0.label == label }
+        }
     }
 
     private var otherFields: [MetadataField] {
-        fields.filter { !promotedLabels.contains($0.label) }
+        displayedFields.filter { !promotedLabels.contains($0.label) }
     }
 
     private var multiSelectionSummary: PhotoSelectionSummary? {
@@ -83,7 +99,7 @@ struct MetadataPanel: View {
 
     private var metadataLoadID: MetadataLoadID {
         MetadataLoadID(
-            itemID: item.id,
+            contentRevision: item.contentRevision,
             isMultipleSelection: store.selectedIndices.count > 1
         )
     }
@@ -96,7 +112,7 @@ struct MetadataPanel: View {
 
     private var histogramLoadID: HistogramLoadID {
         HistogramLoadID(
-            itemID: item.id,
+            contentRevision: item.contentRevision,
             isEligible: showsHistogram
         )
     }
@@ -114,11 +130,14 @@ struct MetadataPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color.appBackground)
+        .background(SessionRenderMarker(kind: .metadata))
         .task(id: metadataLoadID) {
+            let requestedRevision = metadataLoadID.contentRevision
+            fields = []
+            fieldsRevision = requestedRevision
             guard !metadataLoadID.isMultipleSelection else {
                 // The selection summary uses scan-cached metadata only. Avoid
                 // reopening the current file for fields that are not rendered.
-                fields = []
                 return
             }
             try? await Task.sleep(
@@ -129,13 +148,15 @@ struct MetadataPanel: View {
             let loaded = await Task.detached(priority: .userInitiated) {
                 MetadataExtractor.fields(for: current)
             }.value
-            if !Task.isCancelled {
-                fields = loaded
-            }
+            guard !Task.isCancelled,
+                  fieldsRevision == requestedRevision else { return }
+            fields = loaded
         }
         .task(id: histogramLoadID) {
+            let requestedRevision = histogramLoadID.contentRevision
             histogram = nil
             histogramLoadFailed = false
+            histogramRevision = requestedRevision
             guard histogramLoadID.isEligible else { return }
             try? await Task.sleep(
                 nanoseconds: Self.inspectionDebounceNanoseconds
@@ -146,7 +167,7 @@ struct MetadataPanel: View {
                 for: requestedItem
             )
             guard !Task.isCancelled,
-                  requestedItem.id == item.id else { return }
+                  histogramRevision == requestedRevision else { return }
             histogram = loaded
             histogramLoadFailed = (loaded == nil)
         }
@@ -175,6 +196,7 @@ struct MetadataPanel: View {
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(.plain)
+            .disabled(!store.canRate)
             .accessibilityLabel("Change Rating")
             .accessibilityValue(ratingDescription)
             .help("Change rating")
@@ -182,8 +204,8 @@ struct MetadataPanel: View {
 
         if showsHistogram {
             HistogramSection(
-                analysis: histogram,
-                loadFailed: histogramLoadFailed,
+                analysis: displayedHistogram,
+                loadFailed: displayedHistogramLoadFailed,
                 store: store
             )
 

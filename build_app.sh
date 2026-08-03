@@ -78,6 +78,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>© 2026 Alex Markin</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>

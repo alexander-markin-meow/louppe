@@ -9,6 +9,17 @@ struct CleanUpPhotoSnapshot: Sendable {
 struct TrashedFile: Sendable {
     let original: URL
     let trash: URL
+    let identity: FileOperationJournal.FileIdentity?
+
+    init(
+        original: URL,
+        trash: URL,
+        identity: FileOperationJournal.FileIdentity? = nil
+    ) {
+        self.original = original
+        self.trash = trash
+        self.identity = identity
+    }
 }
 
 struct TrashedPhotoSnapshot: Sendable {
@@ -42,20 +53,37 @@ enum CleanUpWorker {
     static func moveToTrash(
         _ photos: [CleanUpPhotoSnapshot],
         journalDirectory: URL? = nil,
+        fileManager: FileManager = FileManager(),
         progress: @escaping Progress
     ) -> TrashBatchResult {
-        let fm = FileManager()
-        let total = photos.reduce(0) { $0 + $1.item.allURLs.count }
+        let fm = fileManager
+        let total = photos.reduce(0) {
+            $0 + $1.item.individualFiles.count
+        }
+        guard photos.allSatisfy({ photo in
+            photo.item.individualFiles.allSatisfy {
+                $0.scannedIdentity != nil
+            }
+        }) else {
+            return TrashBatchResult(
+                succeeded: [],
+                failedPhotos: photos.count,
+                inconsistentPhotos: 0,
+                journalFailure: true,
+                requiresRecovery: false
+            )
+        }
         let writer: FileOperationJournal.Writer
         do {
             writer = try FileOperationJournal.start(
                 kind: .moveToTrash,
                 seeds: photos.flatMap { photo in
-                    photo.item.allURLs.map {
+                    photo.item.individualFiles.map {
                         FileOperationJournal.Seed(
                             itemID: photo.item.id,
-                            source: $0,
-                            destination: nil
+                            source: $0.url,
+                            destination: nil,
+                            expectedIdentity: $0.scannedIdentity
                         )
                     }
                 },
@@ -67,7 +95,8 @@ enum CleanUpWorker {
                 failedPhotos: photos.count,
                 inconsistentPhotos: 0,
                 journalFailure: true,
-                requiresRecovery: false
+                requiresRecovery:
+                    FileOperationJournal.errorRequiresRecovery(error)
             )
         }
         var reporter = ThrottledProgress(total: total, callback: progress)
@@ -78,7 +107,8 @@ enum CleanUpWorker {
         var globalFileIndex = 0
 
         photoLoop: for (photoOffset, photo) in photos.enumerated() {
-            let urls = photo.item.allURLs
+            let files = photo.item.individualFiles
+            let urls = files.map(\.url)
             let photoFileIndex = globalFileIndex
             globalFileIndex += urls.count
             var trashed: [JournaledTrashedFile] = []
@@ -96,9 +126,47 @@ enum CleanUpWorker {
                 }
                 var trashURL: NSURL?
                 if !failed {
+                    var trashCallAttempted = false
                     do {
+                        try writer.requireUnchangedSource(at: fileIndex)
+                        trashCallAttempted = true
                         try fm.trashItem(at: url, resultingItemURL: &trashURL)
+                        if let landed = trashURL as URL? {
+                            try DurableFileIO.syncRenameDirectories(
+                                from: url,
+                                to: landed,
+                                fullSync: true
+                            )
+                        }
                     } catch {
+                        if let landed = trashURL as URL?,
+                           fm.fileExists(atPath: landed.path),
+                           (try? writer.requirePlannedIdentity(
+                            at: fileIndex,
+                            fileURL: landed
+                           )) != nil,
+                           let landedIdentity = try? FileOperationJournal
+                            .captureIdentity(at: landed) {
+                            trashed.append(JournaledTrashedFile(
+                                file: TrashedFile(
+                                    original: url,
+                                    trash: landed,
+                                    identity: landedIdentity
+                                ),
+                                index: fileIndex
+                            ))
+                        } else if trashCallAttempted {
+                            // A pathname reappearing at the source is not
+                            // proof that Trash had no effect: it may be a
+                            // same-named replacement. The exact planned inode
+                            // must be proved either here or at the returned
+                            // Trash URL before the journal can be retired.
+                            destinationUnknown =
+                                (try? writer.requirePlannedIdentity(
+                                    at: fileIndex,
+                                    fileURL: url
+                                )) == nil
+                        }
                         failed = true
                     }
                 }
@@ -108,11 +176,47 @@ enum CleanUpWorker {
                     // FileManager normally returns the Trash destination. If
                     // it moved the file without returning one, there is no
                     // safe URL from which to roll it back or later undo it.
-                    destinationUnknown = !fm.fileExists(atPath: url.path)
+                    destinationUnknown =
+                        (try? writer.requirePlannedIdentity(
+                            at: fileIndex,
+                            fileURL: url
+                        )) == nil
                     failed = true
                     break
                 }
-                let trashedFile = TrashedFile(original: url, trash: landed)
+                do {
+                    try writer.requirePlannedIdentity(
+                        at: fileIndex,
+                        fileURL: landed
+                    )
+                } catch {
+                    destinationUnknown =
+                        (try? writer.requirePlannedIdentity(
+                            at: fileIndex,
+                            fileURL: url
+                        )) == nil
+                    failed = true
+                    break
+                }
+                let landedIdentity: FileOperationJournal.FileIdentity
+                do {
+                    landedIdentity = try FileOperationJournal.captureIdentity(
+                        at: landed
+                    )
+                } catch {
+                    destinationUnknown =
+                        (try? writer.requirePlannedIdentity(
+                            at: fileIndex,
+                            fileURL: url
+                        )) == nil
+                    failed = true
+                    break
+                }
+                let trashedFile = TrashedFile(
+                    original: url,
+                    trash: landed,
+                    identity: landedIdentity
+                )
                 trashed.append(JournaledTrashedFile(
                     file: trashedFile,
                     index: fileIndex
@@ -122,7 +226,8 @@ enum CleanUpWorker {
                         .completed,
                         fileAt: fileIndex,
                         resolvedDestination: landed,
-                        identityAt: landed
+                        identityAt: landed,
+                        expectedIdentity: landedIdentity
                     )
                 } catch {
                     journalFailure = true
@@ -135,15 +240,20 @@ enum CleanUpWorker {
             if failed {
                 var rollbackFailed = false
                 for entry in trashed.reversed() {
-                    do {
-                        guard !fm.fileExists(atPath: entry.file.original.path) else {
-                            throw CleanUpJournalError.refusesOverwrite
-                        }
-                        try fm.moveItem(
-                            at: entry.file.trash,
-                            to: entry.file.original
+                    if !rollbackTrashedFile(
+                        entry.file,
+                        fileManager: fm
+                    ) {
+                        rollbackFailed = true
+                        continue
+                    }
+                    guard let sourceFile = files.first(where: {
+                        FileOperationJournal.exactPathsEqual(
+                            $0.url,
+                            entry.file.original
                         )
-                    } catch {
+                    }),
+                    (try? sourceFile.refreshScannedIdentityFromDisk()) != nil else {
                         rollbackFailed = true
                         continue
                     }
@@ -155,7 +265,7 @@ enum CleanUpWorker {
                 }
                 failedPhotos += 1
                 if destinationUnknown || rollbackFailed { inconsistentPhotos += 1 }
-                if journalFailure {
+                if destinationUnknown || rollbackFailed || journalFailure {
                     failedPhotos += photos.count - photoOffset - 1
                     break photoLoop
                 }
@@ -192,6 +302,17 @@ enum CleanUpWorker {
         let fm = FileManager()
         let orderedPhotos = photos.sorted(by: { $0.index < $1.index })
         let total = orderedPhotos.reduce(0) { $0 + $1.files.count }
+        guard orderedPhotos.allSatisfy({ photo in
+            photo.files.allSatisfy { $0.identity != nil }
+        }) else {
+            return RestoreBatchResult(
+                restored: [],
+                lostPhotos: photos.count,
+                inconsistentPhotos: 0,
+                journalFailure: true,
+                requiresRecovery: false
+            )
+        }
         let writer: FileOperationJournal.Writer
         do {
             writer = try FileOperationJournal.start(
@@ -202,6 +323,7 @@ enum CleanUpWorker {
                             itemID: photo.item.id,
                             source: $0.original,
                             destination: $0.trash,
+                            expectedIdentity: $0.identity,
                             identityURL: $0.trash
                         )
                     }
@@ -214,7 +336,8 @@ enum CleanUpWorker {
                 lostPhotos: photos.count,
                 inconsistentPhotos: 0,
                 journalFailure: true,
-                requiresRecovery: false
+                requiresRecovery:
+                    FileOperationJournal.errorRequiresRecovery(error)
             )
         }
         var reporter = ThrottledProgress(total: total, callback: progress)
@@ -229,6 +352,7 @@ enum CleanUpWorker {
             globalFileIndex += photo.files.count
             var restoredFiles: [JournaledTrashedFile] = []
             var failed = false
+            var mutationAmbiguous = false
             var attempted = 0
             for (localFileIndex, file) in photo.files.enumerated() {
                 let fileIndex = photoFileIndex + localFileIndex
@@ -241,12 +365,55 @@ enum CleanUpWorker {
                 }
                 if !failed {
                     do {
-                        try fm.moveItem(at: file.trash, to: file.original)
+                        try writer.requirePlannedIdentity(
+                            at: fileIndex,
+                            fileURL: file.trash,
+                            includeStatusChange: true
+                        )
+                        try ExportWorker.atomicExclusiveRename(
+                            from: file.trash,
+                            to: file.original
+                        )
+                        try DurableFileIO.syncRenameDirectories(
+                            from: file.trash,
+                            to: file.original,
+                            fullSync: true
+                        )
+                        try writer.requirePlannedIdentity(
+                            at: fileIndex,
+                            fileURL: file.original
+                        )
+                        guard let sourceFile = photo.item.individualFiles
+                            .first(where: {
+                                FileOperationJournal.exactPathsEqual(
+                                    $0.url,
+                                    file.original
+                                )
+                            }) else {
+                            throw CleanUpWorkerError.missingSourceFile
+                        }
+                        try sourceFile.refreshScannedIdentityFromDisk()
                         restoredFiles.append(JournaledTrashedFile(
                             file: file,
                             index: fileIndex
                         ))
                     } catch {
+                        switch reconcileRestoreMove(
+                            file,
+                            fileIndex: fileIndex,
+                            writer: writer,
+                            fileManager: fm
+                        ) {
+                        case .moved:
+                            restoredFiles.append(JournaledTrashedFile(
+                                file: file,
+                                index: fileIndex
+                            ))
+                        case .unchanged:
+                            break
+                        case .ambiguous:
+                            mutationAmbiguous = true
+                        }
                         failed = true
                     }
                 }
@@ -255,7 +422,12 @@ enum CleanUpWorker {
                         try writer.mark(
                             .completed,
                             fileAt: fileIndex,
-                            identityAt: file.original
+                            identityAt: file.original,
+                            expectedIdentity: file.identity,
+                            // Restoring an inode changes ctime. All other
+                            // stable fields still have to match the exact
+                            // Trash entry captured for this undo.
+                            includeStatusChange: false
                         )
                     } catch {
                         journalFailure = true
@@ -271,15 +443,10 @@ enum CleanUpWorker {
                 // Put a partially restored pair back exactly where it came from.
                 var rollbackFailed = false
                 for entry in restoredFiles.reversed() {
-                    do {
-                        guard !fm.fileExists(atPath: entry.file.trash.path) else {
-                            throw CleanUpJournalError.refusesOverwrite
-                        }
-                        try fm.moveItem(
-                            at: entry.file.original,
-                            to: entry.file.trash
-                        )
-                    } catch {
+                    if !rollbackRestoredFile(
+                        entry.file,
+                        fileManager: fm
+                    ) {
                         rollbackFailed = true
                         continue
                     }
@@ -290,8 +457,10 @@ enum CleanUpWorker {
                     }
                 }
                 lostPhotos += 1
-                if rollbackFailed { inconsistentPhotos += 1 }
-                if journalFailure {
+                if mutationAmbiguous || rollbackFailed {
+                    inconsistentPhotos += 1
+                }
+                if mutationAmbiguous || rollbackFailed || journalFailure {
                     lostPhotos += orderedPhotos.count - photoOffset - 1
                     break photoLoop
                 }
@@ -321,8 +490,120 @@ enum CleanUpWorker {
         let index: Int
     }
 
-    private enum CleanUpJournalError: Error {
-        case refusesOverwrite
+    private enum CleanUpWorkerError: Error {
+        case missingSourceFile
+    }
+
+    private enum RestoreMoveReconciliation {
+        /// The exact trashed file is still at its pre-move path. An occupied
+        /// original path is therefore somebody else's file and is untouched.
+        case unchanged
+        /// The exact trashed file reached the original path. It must be part
+        /// of pair rollback even if another file raced into the Trash path.
+        case moved
+        /// Neither known path contains the expected file. Keep the journal so
+        /// recovery can retry instead of guessing from pathnames alone.
+        case ambiguous
+    }
+
+    /// An exclusive rename either moves the whole file or leaves it in place,
+    /// but an error can be observed after the filesystem result is visible.
+    /// Reconcile using the scan-time identity rather than path existence:
+    /// same-named replacements must never be mistaken for Louppe's file.
+    private static func reconcileRestoreMove(
+        _ file: TrashedFile,
+        fileIndex: Int,
+        writer: FileOperationJournal.Writer,
+        fileManager: FileManager
+    ) -> RestoreMoveReconciliation {
+        let originalMatches = fileManager.fileExists(
+            atPath: file.original.path
+        ) && (try? writer.requirePlannedIdentity(
+            at: fileIndex,
+            fileURL: file.original
+        )) != nil
+        if originalMatches {
+            return .moved
+        }
+
+        // An unmoved Trash file has not crossed a directory boundary, so its
+        // status-change timestamp must still match as well as its inode and
+        // content metadata. A replacement at this path is ambiguous, not a
+        // safe no-op.
+        let trashMatches = fileManager.fileExists(
+            atPath: file.trash.path
+        ) && (try? writer.requirePlannedIdentity(
+            at: fileIndex,
+            fileURL: file.trash,
+            includeStatusChange: true
+        )) != nil
+        return trashMatches ? .unchanged : .ambiguous
+    }
+
+    private static func rollbackTrashedFile(
+        _ file: TrashedFile,
+        fileManager: FileManager
+    ) -> Bool {
+        guard let identity = file.identity,
+              fileManager.fileExists(atPath: file.trash.path),
+              !fileManager.fileExists(atPath: file.original.path),
+              (try? FileOperationJournal.requireIdentity(
+                identity,
+                at: file.trash
+              )) != nil else {
+            return false
+        }
+        do {
+            try ExportWorker.atomicExclusiveRename(
+                from: file.trash,
+                to: file.original
+            )
+            try DurableFileIO.syncRenameDirectories(
+                from: file.trash,
+                to: file.original,
+                fullSync: true
+            )
+            try FileOperationJournal.requireIdentity(
+                identity,
+                at: file.original
+            )
+            return !fileManager.fileExists(atPath: file.trash.path)
+        } catch {
+            return false
+        }
+    }
+
+    private static func rollbackRestoredFile(
+        _ file: TrashedFile,
+        fileManager: FileManager
+    ) -> Bool {
+        guard let identity = file.identity,
+              fileManager.fileExists(atPath: file.original.path),
+              !fileManager.fileExists(atPath: file.trash.path),
+              (try? FileOperationJournal.requireIdentity(
+                identity,
+                at: file.original
+              )) != nil else {
+            return false
+        }
+        do {
+            try ExportWorker.atomicExclusiveRename(
+                from: file.original,
+                to: file.trash
+            )
+            try DurableFileIO.syncRenameDirectories(
+                from: file.original,
+                to: file.trash,
+                fullSync: true
+            )
+            try FileOperationJournal.requireIdentity(
+                identity,
+                at: file.trash
+            )
+            return !fileManager.fileExists(atPath: file.original.path)
+        } catch {
+            return false
+        }
     }
 
     /// Reconstruct the original ordering in one pass. Positions belonging to a

@@ -26,6 +26,12 @@ enum FileOperationKind: Equatable, Sendable {
     case exportMove
 }
 
+enum SessionEmptyReason: Equatable, Sendable {
+    case trashedUndoable
+    case movedOut
+    case unavailableAfterFailedRestore
+}
+
 /// The app's single source of truth: the loaded session (photos + ratings),
 /// navigation, undo, view state, and persistence to the sidecar file.
 @MainActor
@@ -70,10 +76,25 @@ final class SessionStore: ObservableObject {
     /// a small spinner while it's above zero.
     @Published var fullImageLoads = 0
     @Published var scanError: String?
+    @Published private(set) var emptySessionReason: SessionEmptyReason?
     /// A non-blocking warning when ratings are safe only in Louppe's backup,
     /// or are not currently persisted anywhere. A successful sidecar write
     /// clears it automatically.
     @Published private(set) var persistenceWarning: String?
+    private var persistenceRejectedInvalidSnapshot = false
+    /// Filename-only schema 1–3 ratings cannot prove physical-file identity.
+    /// Even when every filename is present, the photographer must explicitly
+    /// accept their one-way schema-4 migration before anything is saved.
+    @Published private(set) var isLegacySessionMigrationConfirmationPresented = false
+    /// Schema-4 ratings whose physical files were absent during the latest
+    /// scan. They remain in subsequent snapshots until the exact file returns
+    /// or Louppe itself explicitly removes that file from a live session.
+    /// This prevents a temporarily disconnected/moved original from losing
+    /// its decision merely because another photo triggered an automatic save.
+    private var retainedMissingSessionEntries: [SessionEntry] = []
+    var canRetryPersistence: Bool {
+        persistenceWarning != nil && !persistenceRejectedInvalidSnapshot
+    }
     @Published var recentFolders: [URL] = []
     let videoPlayback = VideoPlaybackController()
 
@@ -126,22 +147,86 @@ final class SessionStore: ObservableObject {
     private var selectionState = SelectionState()
 
     private(set) var sourceFolder: URL?
-    @Published private(set) var activeFileOperation: FileOperationKind?
+    @Published private(set) var activeFileOperation: FileOperationKind? {
+        didSet { updateFileOperationPowerActivity() }
+    }
     @Published private(set) var isSessionTransitioning = false
-    @Published private(set) var isRecoveringInterruptedOperations = false
+    @Published private(set) var isPreparingForTermination = false
+    @Published private(set) var isRecoveringInterruptedOperations = false {
+        didSet { updateFileOperationPowerActivity() }
+    }
     @Published private(set) var operationRecoveryReport:
         FileOperationJournal.RecoveryReport?
+    /// The worker's concrete reason for entering recovery. Launch recovery
+    /// cannot always know why a previous process stopped, but an in-process
+    /// I/O failure must not be reduced to a generic "interrupted" notice.
+    @Published private(set) var operationRecoveryCause: String?
     @Published private(set) var recoveryNeedsAttention = false
     var isFileOperationRunning: Bool {
         activeFileOperation != nil
             || isSessionTransitioning
+            || isPreparingForTermination
             || isRecoveringInterruptedOperations
             || recoveryNeedsAttention
+    }
+    /// A sheet, popover, confirmation, or recovery alert owns keyboard/menu
+    /// input until it is dismissed. All session command surfaces share this
+    /// definition so one route cannot mutate state behind another.
+    var isSessionCommandPresentationActive: Bool {
+        isExportPresented
+            || isFilterPresented
+            || isSortPresented
+            || isClearAllRatingsConfirmationPresented
+            || isLegacySessionMigrationConfirmationPresented
+            || pendingCleanUp != nil
+            || cleanUpError != nil
+            || isRecoveringInterruptedOperations
+            || recoveryNeedsAttention
+            || operationRecoveryReport != nil
     }
     var isCleaningUp: Bool { activeFileOperation == .cleanUp }
     var isCopyingExport: Bool { activeFileOperation == .exportCopy }
     var isMovingExport: Bool { activeFileOperation == .exportMove }
+    var canRate: Bool {
+        return !items.isEmpty
+            && !isFileOperationRunning
+            && !isLegacySessionMigrationConfirmationPresented
+    }
+    var canExport: Bool {
+        !items.isEmpty
+            && !isFileOperationRunning
+            && !isLegacySessionMigrationConfirmationPresented
+    }
+    var canCleanUp: Bool {
+        !items.isEmpty
+            && !isFileOperationRunning
+            && !isLegacySessionMigrationConfirmationPresented
+    }
     var isExporting: Bool { isCopyingExport || isMovingExport }
+
+    /// Retained for the complete filesystem transaction. This prevents idle
+    /// system sleep while Copy, Move, Trash, restore, or recovery is active.
+    /// macOS still sleeps when a MacBook lid is explicitly closed, so Copy's
+    /// worker separately tolerates a removable source remount after wake.
+    private var fileOperationPowerActivity: NSObjectProtocol?
+    var isPreventingIdleSystemSleep: Bool {
+        fileOperationPowerActivity != nil
+    }
+
+    private func updateFileOperationPowerActivity() {
+        let shouldPreventSleep = activeFileOperation != nil
+            || isRecoveringInterruptedOperations
+        if shouldPreventSleep, fileOperationPowerActivity == nil {
+            fileOperationPowerActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "Louppe is safely transferring media files"
+            )
+        } else if !shouldPreventSleep,
+                  let activity = fileOperationPowerActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            fileOperationPowerActivity = nil
+        }
+    }
 
     /// One undo step can hold several photo changes (e.g. "clear all"),
     /// so a single ⌘Z restores the whole batch.
@@ -167,15 +252,48 @@ final class SessionStore: ObservableObject {
     }
     private var undoStack: [UndoStep] = []
     private var saveDebounce: DispatchWorkItem?
+    private var saveDeadline: DispatchWorkItem?
+    private var saveTrailingGeneration: UInt64 = 0
+    private var saveCycleGeneration: UInt64 = 0
     private var pendingPersistenceTask: Task<SessionPersistence.SaveResult, Never>?
     private var pendingPersistenceRequest: SaveRequest?
     private var retrySaveRequest: SaveRequest?
+    private var activePersistenceSaveCount = 0
+    private var saveRequestedWhilePersistenceBusy = false
+    /// Inspectable by focused concurrency tests; production uses the flag only
+    /// to coalesce repeated maximum-age checkpoints behind one active write.
+    var hasDeferredPersistenceSave: Bool {
+        saveRequestedWhilePersistenceBusy
+    }
+
+    /// Deterministic test barrier for completion observers that run separately
+    /// from a caller awaiting one specific persistence task.
+    @discardableResult
+    func waitForPersistenceIdleForTesting(
+        timeout: Duration = .seconds(5)
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while activePersistenceSaveCount > 0
+            || saveRequestedWhilePersistenceBusy {
+            guard clock.now < deadline else { return false }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        return true
+    }
     private var filterDebounce: DispatchWorkItem?
     private var prefetchDebounce: DispatchWorkItem?
     private var scanTask: Task<Void, Never>?
-    private let persistence = SessionPersistence()
+    private let persistence: any SessionPersistenceClient
+    private let saveTrailingDelay: TimeInterval
+    private let saveMaximumDelay: TimeInterval
+    /// Nil selects the production Application Support journal directory.
+    /// Tests can inject a disposable root and must explicitly opt into launch
+    /// recovery, so constructing a view-model can never touch live user files.
+    private let operationJournalDirectory: URL?
     private var saveSequence: UInt64 = 0
     private var latestReportedSaveSequence: UInt64 = 0
+    private var persistenceAccess: SessionPersistence.AccessContext?
     private var scanGeneration: UInt64 = 0
     private var folderOpenGeneration: UInt64 = 0
     private var cleanUpGeneration: UInt64 = 0
@@ -215,9 +333,25 @@ final class SessionStore: ObservableObject {
 
     nonisolated static let sidecarName = SessionConstants.sidecarName
 
-    init() {
+    init(
+        persistence: any SessionPersistenceClient = SessionPersistence(),
+        saveTrailingDelay: TimeInterval = 0.5,
+        saveMaximumDelay: TimeInterval = 5,
+        operationJournalDirectory: URL? = nil,
+        automaticallyRecoversInterruptedOperations: Bool = false
+    ) {
+        self.persistence = persistence
+        self.saveTrailingDelay = max(0, saveTrailingDelay)
+        // These clocks are independent: production normally uses a longer
+        // maximum dirty age, while tests deliberately put the hard deadline
+        // first to prove it is not just the trailing debounce firing.
+        self.saveMaximumDelay = max(0, saveMaximumDelay)
+        self.operationJournalDirectory = operationJournalDirectory
         loadRecents()
-        if FileOperationJournal.hasPendingOperations() {
+        if automaticallyRecoversInterruptedOperations,
+           FileOperationJournal.hasPendingOperations(
+            directory: operationJournalDirectory
+           ) {
             beginInterruptedOperationRecovery()
         }
     }
@@ -233,6 +367,7 @@ final class SessionStore: ObservableObject {
 
     func dismissOperationRecoveryReport() {
         operationRecoveryReport = nil
+        operationRecoveryCause = nil
     }
 
     private func beginInterruptedOperationRecovery(
@@ -245,8 +380,11 @@ final class SessionStore: ObservableObject {
         recoveryNeedsAttention = false
         isRecoveringInterruptedOperations = true
 
+        let journalDirectory = operationJournalDirectory
         let worker = Task.detached(priority: .userInitiated) {
-            FileOperationJournal.recoverPendingOperations()
+            FileOperationJournal.recoverPendingOperations(
+                directory: journalDirectory
+            )
         }
         Task { @MainActor [weak self] in
             let report = await worker.value
@@ -549,7 +687,12 @@ final class SessionStore: ObservableObject {
         shutterRange = Self.closedRange(minimum: minimumShutter, maximum: maximumShutter)
         isoRange = Self.closedRange(minimum: minimumISO, maximum: maximumISO)
         durationRange = Self.closedRange(minimum: minimumDuration, maximum: maximumDuration)
-        if let activeID = videoPlayback.itemID, !items.contains(where: { $0.id == activeID }) {
+        if let activeID = videoPlayback.itemID,
+           let activeItem = items.first(where: { $0.id == activeID }) {
+            if !videoPlayback.represents(activeItem) {
+                videoPlayback.stop()
+            }
+        } else if videoPlayback.itemID != nil {
             videoPlayback.stop()
         }
         rebuildSortedIndices()
@@ -741,11 +884,8 @@ final class SessionStore: ObservableObject {
         folderOpenGeneration &+= 1
         let openGeneration = folderOpenGeneration
         if let currentFolder = sourceFolder,
-           currentFolder.standardizedFileURL != url.standardizedFileURL,
-           case .ready = phase,
-           !items.isEmpty {
-            saveDebounce?.cancel()
-            saveDebounce = nil
+           case .ready = phase {
+            cancelScheduledSave()
             guard let request = makeSaveRequest() else {
                 beginOpeningFolder(url)
                 return
@@ -767,6 +907,8 @@ final class SessionStore: ObservableObject {
     }
 
     private func beginOpeningFolder(_ url: URL) {
+        cancelScheduledSave()
+        isLegacySessionMigrationConfirmationPresented = false
         videoPlayback.stop()
         let isSameFolder =
             sourceFolder?.standardizedFileURL == url.standardizedFileURL
@@ -786,7 +928,10 @@ final class SessionStore: ObservableObject {
         }
         if !isSameFolder {
             persistenceWarning = nil
+            persistenceRejectedInvalidSnapshot = false
             retrySaveRequest = nil
+            retainedMissingSessionEntries = []
+            persistenceAccess = nil
         }
         scanTask?.cancel()
         scanGeneration &+= 1
@@ -804,6 +949,7 @@ final class SessionStore: ObservableObject {
         prefetchDebounce = nil
         setSelectionIndices([])
         items = []
+        emptySessionReason = nil
         resetDerivedData()
         if !preservesCurrentFilter {
             filter = PhotoFilter()
@@ -818,6 +964,8 @@ final class SessionStore: ObservableObject {
         scanTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do {
+                let folderIdentity = try SessionPersistence.SourceFolderIdentity
+                    .capture(at: url)
                 // The scan polls cancellation from parallel metadata workers
                 // on GCD threads, where `Task.isCancelled` has no task context
                 // and silently reads false. Bridge this task's cancellation
@@ -842,7 +990,17 @@ final class SessionStore: ObservableObject {
                     cancelFlag.set()
                 }
                 try Task.checkCancellation()
-                let savedSession = await self.persistence.read(for: url)
+                guard folderIdentity.matches(folder: url) else {
+                    throw FolderScanner.ScanError.filesChangedDuringScan
+                }
+                let savedSession = await self.persistence.read(
+                    for: url,
+                    folderIdentity: folderIdentity
+                )
+                try FolderScanner.validateScannedIdentities(scanned)
+                guard folderIdentity.matches(folder: url) else {
+                    throw FolderScanner.ScanError.filesChangedDuringScan
+                }
                 try Task.checkCancellation()
                 await MainActor.run {
                     guard self.scanGeneration == generation else { return }
@@ -936,6 +1094,7 @@ final class SessionStore: ObservableObject {
 
         setSelectionIndices([])
         items = projection.items
+        emptySessionReason = nil
         rebuildDerivedData()
         let currentItemID = currentFileID.flatMap {
             projection.itemIDByFileID[$0]
@@ -972,6 +1131,7 @@ final class SessionStore: ObservableObject {
         guard sourceFolder == url, scanGeneration == generation else { return }
         if let blockingMessage = persistenceResult.blockingMessage {
             scanResumeIdentity = nil
+            retainedMissingSessionEntries = []
             items = []
             resetDerivedData()
             visibleIndices = []
@@ -984,36 +1144,122 @@ final class SessionStore: ObservableObject {
         }
         scanResumeIdentity = nil
         persistenceWarning = persistenceResult.recoveryMessage
+        persistenceRejectedInvalidSnapshot = false
+        guard let access = persistenceResult.access else {
+            items = []
+            resetDerivedData()
+            visibleIndices = []
+            phase = .welcome
+            scanError = "Louppe couldn't establish a safe session-writing context for this folder. Nothing was saved; open it again."
+            return
+        }
+        persistenceAccess = access
         let loaded = scanned
         // Restore prior ratings from the sidecar file, if present.
+        var pendingIdentityConflicts: [(
+            persistedFileIDBytes: Data,
+            displayName: String
+        )] = []
+        var consumedPersistedFileIDs = Set<Data>()
+        var relocatedSessionNeedsIdentityProof = false
+        var unmatchedLegacyPhysicalFileCount = 0
+        var legacySessionNeedsConfirmation = false
         if let session = persistenceResult.session {
-            var ratingByFilename: [String: (Rating, Date?)] = [:]
-            for entry in session.entries {
-                let rating = (Rating(rawValue: entry.rating) ?? .undecided, entry.ratedAt)
-                ratingByFilename[entry.filename] = rating
-                if let pairedFilename = entry.pairedFilename {
-                    let parent = (entry.filename as NSString).deletingLastPathComponent
-                    let pairedID = parent.isEmpty ? pairedFilename : "\(parent)/\(pairedFilename)"
-                    // When a previously paired item is split, both files
-                    // inherit the existing decision instead of losing it.
-                    ratingByFilename[pairedID] = rating
-                }
-            }
+            legacySessionNeedsConfirmation = session.version < 4
+            let ratingIndex = SessionRatingIndex(session: session)
             for i in loaded.indices {
                 for file in loaded[i].individualFiles {
-                    if let (rating, ratedAt) = ratingByFilename[file.id] {
+                    switch ratingIndex.lookup(for: file) {
+                    case .match(let match):
+                        consumedPersistedFileIDs.insert(
+                            match.persistedFileIDBytes
+                        )
                         loaded[i].restoreRating(
                             PhotoFileRatingSnapshot(
                                 fileID: file.id,
-                                rating: rating,
-                                ratedAt: ratedAt
+                                rating: match.value.rating,
+                                ratedAt: match.value.ratedAt
                             )
                         )
+                    case .identityConflict(let conflict):
+                        pendingIdentityConflicts.append((
+                            persistedFileIDBytes:
+                                conflict.persistedFileIDBytes,
+                            displayName: file.displayName
+                        ))
+                    case .absent:
+                        break
                     }
                 }
             }
+            if session.version >= 4,
+               session.fileIDEncoding == .percentEncodedFileSystemPath {
+                retainedMissingSessionEntries = session.entries.filter {
+                    !consumedPersistedFileIDs.contains(
+                        Data($0.filename.utf8)
+                    )
+                }
+            } else {
+                retainedMissingSessionEntries = []
+                unmatchedLegacyPhysicalFileCount = ratingIndex
+                    .persistedPhysicalFileIDBytes
+                    .subtracting(consumedPersistedFileIDs)
+                    .count
+            }
+            let recordedFolder = URL(fileURLWithPath: session.sourcePath)
+                .resolvingSymlinksInPath().standardizedFileURL
+            let openedFolder = url.resolvingSymlinksInPath()
+                .standardizedFileURL
+            relocatedSessionNeedsIdentityProof =
+                (recordedFolder.path != openedFolder.path
+                    || (persistenceResult.requiresPhysicalIdentityProof
+                        && session.version >= 4))
+                && !session.entries.isEmpty
+                && consumedPersistedFileIDs.isEmpty
+        } else {
+            retainedMissingSessionEntries = []
+        }
+        let identityConflicts = pendingIdentityConflicts.compactMap {
+            consumedPersistedFileIDs.contains($0.persistedFileIDBytes)
+                ? nil
+                : $0.displayName
+        }
+        if !identityConflicts.isEmpty {
+            items = []
+            resetDerivedData()
+            visibleIndices = []
+            phase = .welcome
+            let count = identityConflicts.count
+            let examples = identityConflicts.prefix(3).joined(separator: ", ")
+            let exampleText = examples.isEmpty ? "" : " (\(examples))"
+            scanError = "Louppe found \(count) photo"
+                + (count == 1 ? " or video" : "s or videos")
+                + " with the same name as saved session entries, but not the same physical file"
+                + exampleText + ". The existing ratings were left untouched. Restore the original "
+                + (count == 1 ? "file" : "files")
+                + ", or rename the replacement so it no longer uses the original filename, then open the folder again. Louppe will retain the saved decision for the missing original."
+            return
+        }
+        if unmatchedLegacyPhysicalFileCount > 0 {
+            items = []
+            resetDerivedData()
+            visibleIndices = []
+            phase = .welcome
+            scanError = "This older Louppe session has saved ratings for \(unmatchedLegacyPhysicalFileCount) photo"
+                + (unmatchedLegacyPhysicalFileCount == 1 ? " or video" : "s or videos")
+                + " that are not currently in the folder. The original session and backup were left untouched. Restore the missing files, then open the folder again to migrate safely."
+            return
+        }
+        if relocatedSessionNeedsIdentityProof {
+            items = []
+            resetDerivedData()
+            visibleIndices = []
+            phase = .welcome
+            scanError = "This folder contains a session from another location, but Louppe couldn't verify any of its exact original files here. The ratings were left untouched so they cannot be applied to a copied or unrelated folder."
+            return
         }
         items = loaded
+        emptySessionReason = nil
         rebuildDerivedData()
         let firstUndecided =
             loaded.firstIndex(where: { $0.rating == .undecided }) ?? 0
@@ -1035,17 +1281,45 @@ final class SessionStore: ObservableObject {
         phase = loaded.isEmpty ? .welcome : .ready
         if loaded.isEmpty {
             scanError = "No recognised photos or videos were found in that folder."
+        } else if legacySessionNeedsConfirmation {
+            isLegacySessionMigrationConfirmationPresented = true
         } else {
             saveSession()
         }
     }
+
+    /// Accept the exact filename matches from a legacy snapshot and persist
+    /// their first physical-identity-bound schema-4 checkpoint.
+    func confirmLegacySessionMigration() {
+        guard isLegacySessionMigrationConfirmationPresented,
+              case .ready = phase,
+              sourceFolder != nil else { return }
+        isLegacySessionMigrationConfirmationPresented = false
+        saveSession()
+    }
+
+    /// Leave the legacy sidecar and backup byte-for-byte untouched.
+    func closeLegacySessionWithoutMigrating() {
+        guard isLegacySessionMigrationConfirmationPresented else { return }
+        isLegacySessionMigrationConfirmationPresented = false
+        finishClosingSession()
+    }
+
+#if DEBUG
+    /// Focused key-routing tests use an ordinary in-memory ready session and
+    /// need to exercise the same modal command gate as the real scan flow.
+    func presentLegacySessionMigrationConfirmationForTesting() {
+        guard case .ready = phase else { return }
+        isLegacySessionMigrationConfirmationPresented = true
+    }
+#endif
 
     /// Re-scan the current folder to pick up newly added photos.
     /// Existing ratings survive: they're saved to the sidecar first,
     /// and the scan restores them by filename.
     func rescan() {
         guard !isFileOperationRunning, let folder = sourceFolder else { return }
-        saveDebounce?.cancel()
+        cancelScheduledSave()
         guard let request = makeSaveRequest() else {
             openFolder(folder)
             return
@@ -1081,11 +1355,15 @@ final class SessionStore: ObservableObject {
     /// Routes a thumbnail click by modifier key — shared by the Browser and
     /// Grid views so both respond identically. `plainClick` runs when no
     /// modifier is held; both views use it to make the clicked photo current.
-    func handleThumbnailClick(at index: Int, plainClick: () -> Void) {
+    func handleThumbnailClick(
+        at index: Int,
+        modifiers: NSEvent.ModifierFlags = NSEvent.modifierFlags,
+        plainClick: () -> Void
+    ) {
         guard !isFileOperationRunning else { return }
-        if NSEvent.modifierFlags.contains(.shift) {
+        if modifiers.contains(.shift) {
             selectRange(to: index)
-        } else if NSEvent.modifierFlags.contains(.command) {
+        } else if modifiers.contains(.command) {
             toggleSelection(of: index)
         } else {
             plainClick()
@@ -1187,7 +1465,7 @@ final class SessionStore: ObservableObject {
     /// selected photo at once (one ⌘Z reverts the whole batch) — then jumps
     /// to the next undecided photo.
     func rate(_ rating: Rating) {
-        guard !isFileOperationRunning else { return }
+        guard canRate else { return }
         applyRating(rating, to: effectiveSelection.sorted())
         setSelectionIndices([])
         advanceToNextUndecided()
@@ -1198,7 +1476,7 @@ final class SessionStore: ObservableObject {
     /// selection the clicked photo's next rating in one undoable step; the
     /// selection stays so the user can keep cycling.
     func toggleRating(at index: Int) {
-        guard !isFileOperationRunning else { return }
+        guard canRate else { return }
         guard items.indices.contains(index) else { return }
         let next: Rating
         switch items[index].rating {
@@ -1220,7 +1498,7 @@ final class SessionStore: ObservableObject {
     /// multi-selection, the action follows Grid click behavior and rates the
     /// whole selection in one undoable step.
     func rate(_ rating: Rating, at index: Int) {
-        guard !isFileOperationRunning else { return }
+        guard canRate else { return }
         guard items.indices.contains(index) else { return }
         if selectedIndices.count > 1, selectedIndices.contains(index) {
             applyRating(rating, to: selectedIndices.sorted())
@@ -1506,11 +1784,17 @@ final class SessionStore: ObservableObject {
         return count > 1 ? "Move \(count) Selected to Trash…" : "Move Selected to Trash…"
     }
 
+    func presentExport() {
+        guard canExport else { return }
+        isExportPresented = true
+    }
+
     /// Flushes a pending search debounce before presenting counts, ensuring
     /// the confirmation describes the exact set that will be moved.
     func requestCleanUp(_ mode: CleanUpMode) {
-        guard !isFileOperationRunning else { return }
+        guard canCleanUp else { return }
         flushPendingFilter()
+        guard hasCleanUpTargets(for: mode) else { return }
         pendingCleanUp = mode
     }
 
@@ -1535,6 +1819,7 @@ final class SessionStore: ObservableObject {
         let generation = cleanUpGeneration
         pendingCleanUp = nil
         setSelectionIndices([])
+        videoPlayback.stop()
         activeFileOperation = .cleanUp
         let total = snapshots.reduce(0) { $0 + $1.item.allURLs.count }
         cleanUpProgress = CleanUpProgress(action: .movingToTrash, done: 0, total: total)
@@ -1570,6 +1855,7 @@ final class SessionStore: ObservableObject {
         if !removed.isEmpty {
             let removedIndices = Set(removed.map(\.index))
             items = items.enumerated().filter { !removedIndices.contains($0.offset) }.map(\.element)
+            emptySessionReason = items.isEmpty ? .trashedUndoable : nil
             let removedBefore = removed.filter { $0.index < previousIndex }.count
             rebuildDerivedData()
             restoreCurrentItem(
@@ -1582,7 +1868,6 @@ final class SessionStore: ObservableObject {
                 previousIndex: previousIndex
             ))
             if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
-            saveDebounce?.cancel()
             saveSession()
         }
         activeFileOperation = nil
@@ -1598,7 +1883,7 @@ final class SessionStore: ObservableObject {
                     : "\(result.failedPhotos) items couldn't be moved to the Trash and stayed in the folder."
             }
             if result.journalFailure {
-                message += " Louppe stopped before another file was touched because its safety checkpoint couldn't be saved."
+                message += " Louppe's file-safety checks stopped the operation before another file was touched."
             }
             cleanUpError = message
         }
@@ -1618,6 +1903,7 @@ final class SessionStore: ObservableObject {
         }
         cleanUpGeneration &+= 1
         let generation = cleanUpGeneration
+        videoPlayback.stop()
         activeFileOperation = .cleanUp
         let total = snapshots.reduce(0) { $0 + $1.files.count }
         cleanUpProgress = CleanUpProgress(action: .restoring, done: 0, total: total)
@@ -1666,6 +1952,9 @@ final class SessionStore: ObservableObject {
             allRemovedIndices: allRemovedIndices,
             restored: result.restored
         )
+        emptySessionReason = items.isEmpty
+            ? .unavailableAfterFailedRestore
+            : nil
         if result.lostPhotos > 0 {
             // Some photos are gone for good (Trash emptied?). Older undo steps'
             // indices no longer line up with `items`, so drop them rather than
@@ -1678,7 +1967,7 @@ final class SessionStore: ObservableObject {
                 cleanUpError? += " For \(result.inconsistentPhotos), rollback also failed; check both the source folder and Trash."
             }
             if result.journalFailure {
-                cleanUpError? += " Louppe stopped before another file was touched because its safety checkpoint couldn't be saved."
+                cleanUpError? += " Louppe's file-safety checks stopped the operation before another file was touched."
             }
         }
         rebuildDerivedData()
@@ -1687,7 +1976,6 @@ final class SessionStore: ObservableObject {
             fallbackIndex: previousIndex
         )
         if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
-        saveDebounce?.cancel()
         saveSession()
         activeFileOperation = nil
         cleanUpProgress = nil
@@ -1705,6 +1993,8 @@ final class SessionStore: ObservableObject {
     /// protection as operations that move originals.
     func exportWillStart(mode: ExportMode) -> Bool {
         guard !isFileOperationRunning else { return false }
+        videoPlayback.stop()
+        operationRecoveryCause = nil
         activeFileOperation = mode == .copy ? .exportCopy : .exportMove
         activeExportFolder = sourceFolder
         return true
@@ -1716,7 +2006,8 @@ final class SessionStore: ObservableObject {
     func finishExport(
         mode: ExportMode,
         movedIDs: [String],
-        requiresRecovery: Bool
+        requiresRecovery: Bool,
+        interruptionMessage: String? = nil
     ) {
         let expectedOperation: FileOperationKind = mode == .copy ? .exportCopy : .exportMove
         guard activeFileOperation == expectedOperation else { return }
@@ -1724,6 +2015,7 @@ final class SessionStore: ObservableObject {
         activeExportFolder = nil
         activeFileOperation = nil
         if requiresRecovery {
+            operationRecoveryCause = interruptionMessage
             beginInterruptedOperationRecovery(rescanOnSuccess: true)
             return
         }
@@ -1740,6 +2032,7 @@ final class SessionStore: ObservableObject {
         let removedBefore = items.prefix(min(previousIndex, items.count)).filter { ids.contains($0.id) }.count
         setSelectionIndices([])
         items = items.filter { !ids.contains($0.id) }
+        emptySessionReason = items.isEmpty ? .movedOut : nil
         undoStack.removeAll()
         rebuildDerivedData()
         restoreCurrentItem(
@@ -1747,7 +2040,6 @@ final class SessionStore: ObservableObject {
             fallbackIndex: previousIndex - removedBefore
         )
         if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
-        saveDebounce?.cancel()
         saveSession()
     }
 
@@ -1921,15 +2213,70 @@ final class SessionStore: ObservableObject {
 
     private func scheduleSave() {
         saveDebounce?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            Task { @MainActor in self?.saveSession() }
+        saveTrailingGeneration &+= 1
+        let trailingGeneration = saveTrailingGeneration
+        let trailingWork = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self,
+                      self.saveTrailingGeneration == trailingGeneration,
+                      self.saveDebounce != nil else { return }
+                self.performScheduledSave()
+            }
         }
-        saveDebounce = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        saveDebounce = trailingWork
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + saveTrailingDelay,
+            execute: trailingWork
+        )
+
+        // A trailing debounce alone can postpone persistence forever while a
+        // photographer rates continuously. Arm one fixed deadline for this
+        // dirty cycle; later ratings replace only the trailing save.
+        if saveDeadline == nil {
+            saveCycleGeneration &+= 1
+            let cycleGeneration = saveCycleGeneration
+            let deadlineWork = DispatchWorkItem { [weak self] in
+                Task { @MainActor in
+                    guard let self,
+                          self.saveCycleGeneration == cycleGeneration,
+                          self.saveDeadline != nil else { return }
+                    self.performScheduledSave()
+                }
+            }
+            saveDeadline = deadlineWork
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + saveMaximumDelay,
+                execute: deadlineWork
+            )
+        }
+    }
+
+    private func cancelScheduledSave() {
+        saveDebounce?.cancel()
+        saveDeadline?.cancel()
+        saveDebounce = nil
+        saveDeadline = nil
+        saveTrailingGeneration &+= 1
+        saveCycleGeneration &+= 1
+    }
+
+    private func performScheduledSave() {
+        cancelScheduledSave()
+        guard activePersistenceSaveCount == 0 else {
+            // Keep only the fact that a newer snapshot is needed. When slow or
+            // removable storage finishes the current write, capture one fresh
+            // latest snapshot instead of queueing an unbounded series of
+            // intermediate 100,000-item payloads.
+            saveRequestedWhilePersistenceBusy = true
+            return
+        }
+        saveSession()
     }
 
     func saveSession() {
+        cancelScheduledSave()
         guard let request = makeSaveRequest() else { return }
+        saveRequestedWhilePersistenceBusy = false
         enqueuePersistenceSave(request)
     }
 
@@ -1938,8 +2285,12 @@ final class SessionStore: ObservableObject {
     /// delegate uses this with AppKit's asynchronous termination handshake,
     /// so the main thread never blocks while a last-second rating is saved.
     func saveSessionForTermination() async -> SessionPersistence.SaveResult? {
-        saveDebounce?.cancel()
-        saveDebounce = nil
+        cancelScheduledSave()
+        // Quitting while the legacy decision is visible is equivalent to
+        // Close Folder: preserve the old snapshot and write nothing.
+        guard !isLegacySessionMigrationConfirmationPresented else {
+            return nil
+        }
         if let request = makeSaveRequest() {
             let result = await enqueuePersistenceSave(request).value
             applyPersistenceResult(result, request: request)
@@ -1953,6 +2304,7 @@ final class SessionStore: ObservableObject {
             let result = await task.value
             applyPersistenceResult(result, request: request)
             if result.canDiscardInMemoryState { return result }
+            if result == .rejectedInvalidSnapshot { return result }
             let retry = refreshedSaveRequest(from: request)
             let retried = await enqueuePersistenceSave(retry).value
             applyPersistenceResult(retried, request: retry)
@@ -1968,11 +2320,23 @@ final class SessionStore: ObservableObject {
         return nil
     }
 
+    /// AppKit remains interactive while `.terminateLater` awaits persistence.
+    /// Hold this barrier before the final snapshot so no rating can arrive
+    /// after the snapshot that authorizes Quit.
+    func beginTerminationPreparation() {
+        isPreparingForTermination = true
+    }
+
+    /// Called only when the photographer cancels Quit after a failed save.
+    func cancelTerminationPreparation() {
+        isPreparingForTermination = false
+    }
+
     /// Retry the newest live snapshot, or the exact snapshot retained after a
     /// failed Close Session. Success clears the warning automatically.
     func retryPersistence() {
-        saveDebounce?.cancel()
-        saveDebounce = nil
+        guard canRetryPersistence else { return }
+        cancelScheduledSave()
         if let request = makeSaveRequest() {
             enqueuePersistenceSave(request)
         } else if let request = retrySaveRequest {
@@ -1984,26 +2348,49 @@ final class SessionStore: ObservableObject {
         let folder: URL
         let session: SessionFile
         let sequence: UInt64
+        let access: SessionPersistence.AccessContext
     }
 
     @discardableResult
     private func enqueuePersistenceSave(
         _ request: SaveRequest
     ) -> Task<SessionPersistence.SaveResult, Never> {
+        // Any explicitly enqueued snapshot is at least as fresh as the
+        // coalesced request from the live store. It therefore satisfies that
+        // marker; leaving it set could start an unawaited redundant write
+        // after Open, Close, or Quit has already crossed its save barrier.
+        saveRequestedWhilePersistenceBusy = false
+        activePersistenceSaveCount += 1
         let task = Task.detached { [persistence] in
             await persistence.save(
                 request.session,
                 for: request.folder,
-                sequence: request.sequence
+                sequence: request.sequence,
+                access: request.access
             )
         }
         pendingPersistenceTask = task
         pendingPersistenceRequest = request
         Task { @MainActor [weak self] in
             let result = await task.value
-            self?.applyPersistenceResult(result, request: request)
+            self?.persistenceSaveDidComplete(
+                result,
+                request: request
+            )
         }
         return task
+    }
+
+    private func persistenceSaveDidComplete(
+        _ result: SessionPersistence.SaveResult,
+        request: SaveRequest
+    ) {
+        activePersistenceSaveCount = max(0, activePersistenceSaveCount - 1)
+        applyPersistenceResult(result, request: request)
+        guard activePersistenceSaveCount == 0,
+              saveRequestedWhilePersistenceBusy else { return }
+        saveRequestedWhilePersistenceBusy = false
+        saveSession()
     }
 
     private func applyPersistenceResult(
@@ -2022,8 +2409,10 @@ final class SessionStore: ObservableObject {
         case .savedToSidecar:
             retrySaveRequest = nil
             persistenceWarning = nil
+            persistenceRejectedInvalidSnapshot = false
         case .savedToBackup(let sidecarFailure):
             retrySaveRequest = request
+            persistenceRejectedInvalidSnapshot = false
             switch sidecarFailure {
             case .permissionDenied:
                 persistenceWarning = "This folder is read-only. Your ratings are safe in Louppe's backup, "
@@ -2040,6 +2429,7 @@ final class SessionStore: ObservableObject {
             }
         case .failed(let failure):
             retrySaveRequest = request
+            persistenceRejectedInvalidSnapshot = false
             if failure.sidecar == .outOfSpace || failure.backup == .outOfSpace {
                 persistenceWarning = "Your latest ratings are not saved because the disk is full. "
                     + "Free some space and retry before closing Louppe."
@@ -2054,6 +2444,19 @@ final class SessionStore: ObservableObject {
             } else {
                 persistenceWarning = "Your latest ratings are not saved. Retry before closing Louppe."
             }
+        case .rejectedInvalidSnapshot:
+            retrySaveRequest = nil
+            persistenceRejectedInvalidSnapshot = true
+            persistenceWarning = "Louppe stopped an internally inconsistent session snapshot before it could "
+                + "replace either saved copy. Keep this session open and report the problem."
+        case .sourceFolderChanged:
+            retrySaveRequest = request
+            persistenceRejectedInvalidSnapshot = false
+            persistenceWarning = "The opened folder or card changed before Louppe could save. Neither session copy was touched. Reconnect the original folder, then retry saving."
+        case .sidecarChanged:
+            retrySaveRequest = request
+            persistenceRejectedInvalidSnapshot = false
+            persistenceWarning = "This folder's session file changed outside Louppe after it was opened. Louppe left both versions untouched. Restore the version you want to keep, then retry saving."
         case .superseded:
             break
         }
@@ -2066,32 +2469,48 @@ final class SessionStore: ObservableObject {
         return SaveRequest(
             folder: request.folder,
             session: session,
-            sequence: saveSequence
+            sequence: saveSequence,
+            access: request.access
         )
     }
 
     /// Capture value-semantic session data on the main actor, then let the
     /// persistence actor perform the expensive encoding and file I/O.
     private func makeSaveRequest() -> SaveRequest? {
-        guard let folder = sourceFolder, case .ready = phase else { return nil }
+        guard let folder = sourceFolder,
+              let access = persistenceAccess,
+              !isLegacySessionMigrationConfirmationPresented,
+              case .ready = phase else { return nil }
+        let currentEntries = items.flatMap { item in
+            item.individualFiles.map { file in
+                let rating = file.ratingSnapshot
+                return SessionEntry(
+                    filename: file.id,
+                    pairedFilename: nil,
+                    rating: rating.rating.rawValue,
+                    ratedAt: rating.ratedAt,
+                    fileIdentity: file.scannedIdentity
+                )
+            }
+        }
+        let currentFileIDs = Set(currentEntries.map(\.filename))
+        let retainedEntries = retainedMissingSessionEntries.filter {
+            !currentFileIDs.contains($0.filename)
+        }
         let session = SessionFile(
             version: SessionConstants.currentSchemaVersion,
             sourcePath: folder.path,
             scannedAt: Date(),
-            entries: items.flatMap { item in
-                item.individualFiles.map { file in
-                    let rating = file.ratingSnapshot
-                    return SessionEntry(
-                        filename: file.id,
-                        pairedFilename: nil,
-                        rating: rating.rating.rawValue,
-                        ratedAt: rating.ratedAt
-                    )
-                }
-            }
+            entries: currentEntries + retainedEntries,
+            fileIDEncoding: .percentEncodedFileSystemPath
         )
         saveSequence &+= 1
-        return SaveRequest(folder: folder, session: session, sequence: saveSequence)
+        return SaveRequest(
+            folder: folder,
+            session: session,
+            sequence: saveSequence,
+            access: access
+        )
     }
 
     // MARK: - Recent folders
@@ -2115,8 +2534,11 @@ final class SessionStore: ObservableObject {
 
     func closeSession() {
         guard !isFileOperationRunning else { return }
-        saveDebounce?.cancel()
-        saveDebounce = nil
+        if isLegacySessionMigrationConfirmationPresented {
+            closeLegacySessionWithoutMigrating()
+            return
+        }
+        cancelScheduledSave()
         if let request = makeSaveRequest() {
             isSessionTransitioning = true
             let task = enqueuePersistenceSave(request)
@@ -2133,6 +2555,7 @@ final class SessionStore: ObservableObject {
     }
 
     private func finishClosingSession() {
+        cancelScheduledSave()
         videoPlayback.stop()
         zoomMode = .fit
         showClippingWarnings = false
@@ -2146,7 +2569,11 @@ final class SessionStore: ObservableObject {
         prefetchDebounce?.cancel()
         prefetchDebounce = nil
         scanResumeIdentity = nil
+        retainedMissingSessionEntries = []
+        persistenceAccess = nil
+        isLegacySessionMigrationConfirmationPresented = false
         items = []
+        emptySessionReason = nil
         resetDerivedData()
         sourceFolder = nil
         undoStack = []

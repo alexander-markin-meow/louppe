@@ -5,6 +5,13 @@ import UniformTypeIdentifiers
 /// pairs RAW+JPEG shots, reads capture dates, and sorts chronologically.
 /// Pure file-system work with no UI state — safe to run on any thread.
 enum FolderScanner {
+    enum ScanError: LocalizedError {
+        case filesChangedDuringScan
+
+        var errorDescription: String? {
+            "A photo or video changed while Louppe was scanning. Nothing was saved; scan the folder again."
+        }
+    }
     /// Camera RAW formats macOS's ImageIO can decode (verified against
     /// CGImageSourceCopyTypeIdentifiers on this machine).
     static let rawExtensions: Set<String> = [
@@ -76,6 +83,7 @@ enum FolderScanner {
         let size: Int64
         let creationDate: Date?
         let modificationDate: Date?
+        let identity: FileOperationJournal.FileIdentity
     }
 
     /// Thread-safe cancellation signal for a scan. `Task.isCancelled` only
@@ -110,6 +118,76 @@ enum FolderScanner {
         let enrichedFileCount: Int
     }
 
+    /// Filename equality used only for RAW+JPEG pairing.
+    ///
+    /// A case-insensitive volume may equate `SHOT` and `shot`, but it does not
+    /// equate genuinely different accented names such as `cafe` and `café`.
+    /// Unknown volume capabilities deliberately use case-sensitive matching:
+    /// failing to form a real pair is safer than grouping unrelated originals.
+    struct PairingFilenamePolicy: Equatable, Sendable {
+        let caseSensitiveNames: Bool
+
+        fileprivate struct Key: Hashable, Comparable {
+            /// Keep directory identity exact. Applying filename folding to the
+            /// whole path can collapse two independently named directories.
+            let parentBytes: Data
+            /// Conservative stem equality: exact bytes on case-sensitive or
+            /// unknown volumes, ASCII case folding only when the volume
+            /// explicitly reports case-insensitive names.
+            let stemBytes: Data
+
+            static func < (lhs: Key, rhs: Key) -> Bool {
+                if lhs.parentBytes != rhs.parentBytes {
+                    return lhs.parentBytes.lexicographicallyPrecedes(
+                        rhs.parentBytes
+                    )
+                }
+                return lhs.stemBytes.lexicographicallyPrecedes(rhs.stemBytes)
+            }
+        }
+
+        init(caseSensitiveNames: Bool) {
+            self.caseSensitiveNames = caseSensitiveNames
+        }
+
+        init(volumeSupportsCaseSensitiveNames: Bool?) {
+            caseSensitiveNames = volumeSupportsCaseSensitiveNames ?? true
+        }
+
+        fileprivate func key(for url: URL) -> Key {
+            let path = Self.fileSystemBytes(for: url)
+            let separator = path.lastIndex(of: 47)
+            let filenameStart = separator.map { $0 + 1 } ?? path.startIndex
+            let extensionSeparator = path[filenameStart...]
+                .lastIndex(of: 46)
+            let stemEnd = extensionSeparator ?? path.endIndex
+            let parentEnd = separator ?? path.startIndex
+            let stem = Array(path[filenameStart..<stemEnd])
+            return Key(
+                parentBytes: Data(path[..<parentEnd]),
+                stemBytes: caseSensitiveNames
+                    ? Data(stem)
+                    : Data(stem.map(Self.foldASCIICase))
+            )
+        }
+
+        private static func fileSystemBytes(for url: URL) -> [UInt8] {
+            url.withUnsafeFileSystemRepresentation { pointer in
+                guard let pointer else {
+                    return Array(url.path(percentEncoded: true).utf8)
+                }
+                var count = 0
+                while pointer[count] != 0 { count += 1 }
+                return UnsafeBufferPointer(start: pointer, count: count)
+                    .map(UInt8.init(bitPattern:))
+            }
+        }
+
+        private static func foldASCIICase(_ byte: UInt8) -> UInt8 {
+            (65...90).contains(byte) ? byte + 32 : byte
+        }
+    }
+
     /// `progress` is called periodically with the running file count. The
     /// cancellation hook lets a superseded scan stop before it walks or opens
     /// the rest of a large card; it is polled from concurrent metadata
@@ -118,6 +196,7 @@ enum FolderScanner {
         _ root: URL,
         pairingMode: RawJPEGPairingMode = .together,
         isCancelled: @Sendable () -> Bool = { false },
+        beforeFinalIdentityValidation: () throws -> Void = {},
         progress: (Int) -> Void
     ) throws -> [PhotoItem] {
         let fm = FileManager.default
@@ -130,6 +209,8 @@ enum FolderScanner {
                 .fileSizeKey,
                 .creationDateKey,
                 .contentModificationDateKey,
+                .volumeURLKey,
+                .volumeUUIDStringKey,
             ],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
@@ -156,40 +237,73 @@ enum FolderScanner {
             // These keys were prefetched by the enumerator above. Keep their
             // values now instead of issuing separate attributes/resource calls
             // for every primary photo later in the scan.
-            let values = try? url.resourceValues(forKeys: [
-                .isRegularFileKey,
-                .fileSizeKey,
-                .creationDateKey,
-                .contentModificationDateKey,
-            ])
-            guard values?.isRegularFile == true else { continue }
+            guard let values = try? url.resourceValues(forKeys: [
+                    .isRegularFileKey,
+                    .fileSizeKey,
+                    .creationDateKey,
+                    .contentModificationDateKey,
+                    .volumeURLKey,
+                    .volumeUUIDStringKey,
+                  ]) else {
+                throw ScanError.filesChangedDuringScan
+            }
+            guard values.isRegularFile == true else { continue }
+            guard let identity = try? FileOperationJournal.captureIdentity(
+                    at: url,
+                    volumeRoot: values.volume,
+                    volumeUUIDString: values.volumeUUIDString
+                  ) else {
+                throw ScanError.filesChangedDuringScan
+            }
             files.append(url)
             factsByURL[url] = FileFacts(
-                size: Int64(values?.fileSize ?? 0),
-                creationDate: values?.creationDate,
-                modificationDate: values?.contentModificationDate
+                size: Int64(values.fileSize ?? 0),
+                creationDate: values.creationDate,
+                modificationDate: values.contentModificationDate,
+                identity: identity
             )
             if files.count % 25 == 0 { progress(files.count) }
         }
 
-        let volumeIsCaseSensitive = caseSensitiveNames(at: root)
+        let filenamePolicy = pairingFilenamePolicy(at: root)
 
         // Pair building is cheap; collect every (primary, paired) pair first
         // so the expensive per-file metadata reads can run in parallel below.
         let pairs = pairFiles(
             files,
             pairingMode: pairingMode,
-            caseSensitiveNames: volumeIsCaseSensitive
+            filenamePolicy: filenamePolicy
         )
         if isCancelled() { throw CancellationError() }
 
         let result = try makeItems(
             for: pairs,
             factsByURL: factsByURL,
-            rootPath: root.standardizedFileURL.path,
+            root: root,
             isCancelled: isCancelled
         )
+        try beforeFinalIdentityValidation()
+        try validateScannedIdentities(result)
         return sortItems(result)
+    }
+
+    /// Metadata decoding can take seconds for a large card. Re-stat every
+    /// pathname after that work so an atomic replacement cannot combine old
+    /// identity/rating state with newly substituted bytes.
+    static func validateScannedIdentities(_ items: [PhotoItem]) throws {
+        for file in items.flatMap(\.individualFiles) {
+            guard let expected = file.scannedIdentity,
+                  let current = try? FileOperationJournal.captureIdentity(
+                    at: file.url
+                  ),
+                  FileOperationJournal.identitiesMatch(
+                    expected: expected,
+                    actual: current,
+                    includeStatusChange: true
+                  ) else {
+                throw ScanError.filesChangedDuringScan
+            }
+        }
     }
 
     /// Deterministic RAW+JPEG pairing independent of filesystem enumerator and
@@ -200,15 +314,23 @@ enum FolderScanner {
         pairingMode: RawJPEGPairingMode,
         caseSensitiveNames: Bool
     ) -> [(primary: URL, paired: URL?)] {
-        var groups: [String: [URL]] = [:]
+        pairFiles(
+            files,
+            pairingMode: pairingMode,
+            filenamePolicy: PairingFilenamePolicy(
+                caseSensitiveNames: caseSensitiveNames
+            )
+        )
+    }
+
+    static func pairFiles(
+        _ files: [URL],
+        pairingMode: RawJPEGPairingMode,
+        filenamePolicy: PairingFilenamePolicy
+    ) -> [(primary: URL, paired: URL?)] {
+        var groups: [PairingFilenamePolicy.Key: [URL]] = [:]
         for url in files.sorted(by: stableURLOrder) {
-            let basePath = url.deletingPathExtension().standardizedFileURL.path
-            let key = caseSensitiveNames
-                ? basePath
-                : basePath.folding(
-                    options: [.caseInsensitive, .diacriticInsensitive],
-                    locale: Locale(identifier: "en_US_POSIX")
-                )
+            let key = filenamePolicy.key(for: url)
             groups[key, default: []].append(url)
         }
 
@@ -238,11 +360,16 @@ enum FolderScanner {
                 ["jpg", "jpeg"].contains($0.pathExtension.lowercased())
             }
 
-            if pairingMode == .together, let raw = raws.first, let jpeg = jpegs.first {
+            // A shared stem is not enough evidence when more than one file
+            // could fill either side. Never let sort order arbitrarily decide
+            // which original owns a JPEG: ambiguous groups stay independent.
+            if pairingMode == .together,
+               raws.count == 1,
+               jpegs.count == 1,
+               let raw = raws.first,
+               let jpeg = jpegs.first {
                 pairs.append((raw, jpeg))
-                // Rare leftovers (e.g., two RAWs or JPEGs with the same base
-                // name) become separate items without duplicating either side
-                // of the one real pair.
+                // Other image formats sharing the stem remain independent.
                 for extra in images where extra != raw && extra != jpeg {
                     pairs.append((extra, nil))
                 }
@@ -265,7 +392,7 @@ enum FolderScanner {
         var fileByPath: [String: PhotoFile] = [:]
         for item in items {
             for file in item.individualFiles {
-                fileByPath[file.url.standardizedFileURL.path] = file
+                fileByPath[fileSystemIdentityPath(for: file.url)] = file
             }
         }
         var files = fileByPath.values.sorted { stableURLOrder($0.url, $1.url) }
@@ -280,23 +407,25 @@ enum FolderScanner {
 
         let filesByPath = Dictionary(
             uniqueKeysWithValues: files.map {
-                ($0.url.standardizedFileURL.path, $0)
+                (fileSystemIdentityPath(for: $0.url), $0)
             }
         )
         let pairs = pairFiles(
             files.map(\.url),
             pairingMode: pairingMode,
-            caseSensitiveNames: caseSensitiveNames(at: root)
+            filenamePolicy: pairingFilenamePolicy(at: root)
         )
         var projected: [PhotoItem] = []
         projected.reserveCapacity(pairs.count)
         var itemIDByFileID: [String: String] = [:]
         for pair in pairs {
-            guard let primary = filesByPath[pair.primary.standardizedFileURL.path] else {
+            guard let primary = filesByPath[
+                fileSystemIdentityPath(for: pair.primary)
+            ] else {
                 continue
             }
             let paired = pair.paired.flatMap {
-                filesByPath[$0.standardizedFileURL.path]
+                filesByPath[fileSystemIdentityPath(for: $0)]
             }
             let item = PhotoItem(primaryFile: primary, pairedFile: paired)
             projected.append(item)
@@ -312,13 +441,19 @@ enum FolderScanner {
     }
 
     private static func stableURLOrder(_ lhs: URL, _ rhs: URL) -> Bool {
-        lhs.standardizedFileURL.path < rhs.standardizedFileURL.path
+        fileSystemIdentityPath(for: lhs)
+            < fileSystemIdentityPath(for: rhs)
     }
 
-    private static func caseSensitiveNames(at root: URL) -> Bool {
-        (try? root.resourceValues(
+    private static func pairingFilenamePolicy(
+        at root: URL
+    ) -> PairingFilenamePolicy {
+        let capability = try? root.resourceValues(
             forKeys: [.volumeSupportsCaseSensitiveNamesKey]
-        ).volumeSupportsCaseSensitiveNames) ?? false
+        ).volumeSupportsCaseSensitiveNames
+        return PairingFilenamePolicy(
+            volumeSupportsCaseSensitiveNames: capability
+        )
     }
 
     /// `PreparedSessionIndex` reuses this physical order for `PhotoSort()`.
@@ -343,7 +478,7 @@ enum FolderScanner {
     private static func makeItems(
         for pairs: [(primary: URL, paired: URL?)],
         factsByURL: [URL: FileFacts],
-        rootPath: String,
+        root: URL,
         isCancelled: @Sendable () -> Bool
     ) throws -> [PhotoItem] {
         guard !pairs.isEmpty else { return [] }
@@ -362,13 +497,13 @@ enum FolderScanner {
                 let primaryFile = scannedFile(
                     at: primary,
                     facts: factsByURL[primary],
-                    rootPath: rootPath
+                    root: root
                 )
                 let pairedFile = paired.map {
                     lightweightFile(
                         at: $0,
                         facts: factsByURL[$0],
-                        rootPath: rootPath
+                        root: root
                     )
                 }
                 items.append(
@@ -384,7 +519,7 @@ enum FolderScanner {
     private static func scannedFile(
         at url: URL,
         facts: FileFacts?,
-        rootPath: String
+        root: URL
     ) -> PhotoFile {
         let isVideo = isVideoExtension(url.pathExtension)
         let info = isVideo
@@ -392,8 +527,9 @@ enum FolderScanner {
             : MetadataExtractor.scanInfo(for: url)
         let videoInfo = isVideo ? VideoMetadataExtractor.scanInfo(for: url) : nil
         return PhotoFile(
-            id: relativePath(of: url, under: rootPath),
+            id: relativeFileIdentity(of: url, under: root),
             url: url,
+            displayRelativePath: relativeDisplayPath(of: url, under: root),
             captureDate: info.captureDate ?? facts?.creationDate,
             cameraModel: info.cameraModel,
             lensModel: info.lensModel,
@@ -407,7 +543,8 @@ enum FolderScanner {
             videoFrameRate: videoInfo?.frameRate,
             videoIsPlayable: videoInfo?.isPlayable ?? false,
             modificationDate: facts?.modificationDate,
-            fileSize: facts?.size ?? 0
+            fileSize: facts?.size ?? 0,
+            scannedIdentity: facts?.identity
         )
     }
 
@@ -417,16 +554,18 @@ enum FolderScanner {
     private static func lightweightFile(
         at url: URL,
         facts: FileFacts?,
-        rootPath: String
+        root: URL
     ) -> PhotoFile {
         PhotoFile(
-            id: relativePath(of: url, under: rootPath),
+            id: relativeFileIdentity(of: url, under: root),
             url: url,
+            displayRelativePath: relativeDisplayPath(of: url, under: root),
             captureDate: facts?.creationDate,
             cameraModel: nil,
             lensModel: nil,
             modificationDate: facts?.modificationDate,
             fileSize: facts?.size ?? 0,
+            scannedIdentity: facts?.identity,
             metadataIsLoaded: false
         )
     }
@@ -473,6 +612,7 @@ enum FolderScanner {
         return PhotoFile(
             id: file.id,
             url: file.url,
+            displayRelativePath: file.legacyPersistenceID,
             captureDate: info.captureDate ?? file.captureDate,
             cameraModel: info.cameraModel,
             lensModel: info.lensModel,
@@ -487,6 +627,7 @@ enum FolderScanner {
             videoIsPlayable: videoInfo?.isPlayable ?? false,
             modificationDate: file.modificationDate,
             fileSize: file.fileSize,
+            scannedIdentity: file.scannedIdentity,
             metadataIsLoaded: true,
             rating: rating.rating,
             ratedAt: rating.ratedAt
@@ -540,8 +681,38 @@ enum FolderScanner {
         }
     }
 
-    private static func relativePath(of url: URL, under rootPath: String) -> String {
-        let path = url.standardizedFileURL.path
+    /// Lossless, persistence-friendly path identity. Foundation `String`
+    /// equality treats canonically equivalent Unicode spellings as equal,
+    /// while a normalization-sensitive filesystem can store both. Percent-
+    /// encoded URL paths remain ASCII and retain their exact filesystem bytes.
+    static func fileSystemIdentityPath(for url: URL) -> String {
+        url.path(percentEncoded: true)
+    }
+
+    static func relativeFileIdentity(of url: URL, under root: URL) -> String {
+        let path = fileSystemIdentityPath(for: url)
+        let rootPath = fileSystemIdentityPath(for: root)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let rootedPrefix = rootPath.isEmpty ? "/" : "/\(rootPath)/"
+        if path.hasPrefix(rootedPrefix) {
+            return String(path.dropFirst(rootedPrefix.count))
+        }
+        let absoluteRoot = rootPath.isEmpty ? "/" : "/\(rootPath)"
+        if path.hasPrefix(absoluteRoot + "/") {
+            return String(path.dropFirst(absoluteRoot.count + 1))
+        }
+        return path.split(separator: "/", omittingEmptySubsequences: true)
+            .last
+            .map(String.init)
+            ?? path
+    }
+
+    private static func relativeDisplayPath(
+        of url: URL,
+        under root: URL
+    ) -> String {
+        let path = url.path
+        let rootPath = root.path
         if path.hasPrefix(rootPath + "/") {
             return String(path.dropFirst(rootPath.count + 1))
         }

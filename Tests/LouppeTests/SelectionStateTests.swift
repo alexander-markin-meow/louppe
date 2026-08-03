@@ -1,9 +1,23 @@
-import AppKit
 import XCTest
 @testable import Louppe
 
 @MainActor
 final class SelectionStateTests: XCTestCase {
+    func testFileOperationPreventsIdleSystemSleepUntilCompletion() {
+        let store = readyStore()
+        XCTAssertFalse(store.isPreventingIdleSystemSleep)
+
+        XCTAssertTrue(store.exportWillStart(mode: .copy))
+        XCTAssertTrue(store.isPreventingIdleSystemSleep)
+
+        store.finishExport(
+            mode: .copy,
+            movedIDs: [],
+            requiresRecovery: false
+        )
+        XCTAssertFalse(store.isPreventingIdleSystemSleep)
+    }
+
     func testRangeSelectionDropsMembersHiddenByFilter() {
         let store = readyStore()
         store.setIndex(1)
@@ -68,28 +82,100 @@ final class SelectionStateTests: XCTestCase {
         let store = readyStore()
         let actions = GridCellActions(store: store, index: 2)
 
-        actions.cycleRating(currentEvent: nil)
+        actions.cycleRating()
         XCTAssertEqual(store.items[2].rating, .yes)
         XCTAssertEqual(store.currentIndex, 2)
 
-        actions.cycleRating(currentEvent: nil)
+        actions.cycleRating()
         XCTAssertEqual(store.items[2].rating, .no)
         XCTAssertEqual(store.currentIndex, 2)
 
-        actions.cycleRating(currentEvent: nil)
+        actions.cycleRating()
         XCTAssertEqual(store.items[2].rating, .undecided)
         XCTAssertEqual(store.currentIndex, 2)
     }
 
-    func testGridRatingControlIgnoresSecondActionFromDoubleClick() throws {
+    func testGridRatingControlCountsEveryRapidActivation() {
         let store = readyStore()
         let actions = GridCellActions(store: store, index: 2)
 
-        actions.cycleRating(currentEvent: try mouseEvent(clickCount: 1))
-        actions.cycleRating(currentEvent: try mouseEvent(clickCount: 2))
+        actions.cycleRating()
+        actions.cycleRating()
 
-        XCTAssertEqual(store.items[2].rating, .yes)
+        XCTAssertEqual(store.items[2].rating, .no)
         XCTAssertEqual(store.currentIndex, 2)
+    }
+
+    func testGridRatingControlDoesNotMutateWhileRatingIsUnavailable() {
+        let store = readyStore()
+        let actions = GridCellActions(store: store, index: 2)
+        XCTAssertTrue(store.exportWillStart(mode: .copy))
+        defer {
+            store.finishExport(
+                mode: .copy,
+                movedIDs: [],
+                requiresRecovery: false
+            )
+        }
+
+        XCTAssertFalse(store.canRate)
+        actions.cycleRating()
+
+        XCTAssertEqual(store.items[2].rating, .undecided)
+        XCTAssertEqual(store.currentIndex, 0)
+    }
+
+    func testGridRubberBandDefersToRatingAndPlayableVideoControls() {
+        let tileFrame = CGRect(x: 10, y: 20, width: 170, height: 190)
+        let frames = [3: tileFrame]
+
+        XCTAssertFalse(
+            GridRubberBandHitTest.shouldTrackCanvasDrag(
+                startingAt: CGPoint(x: 170, y: 30),
+                tileFrames: frames,
+                playableVideoIndices: []
+            ),
+            "the top-trailing rating target must own its drag"
+        )
+        XCTAssertFalse(
+            GridRubberBandHitTest.shouldTrackCanvasDrag(
+                startingAt: CGPoint(x: 95, y: 105),
+                tileFrames: frames,
+                playableVideoIndices: [3]
+            ),
+            "a playable video's centered Play control must own its drag"
+        )
+        XCTAssertTrue(
+            GridRubberBandHitTest.shouldTrackCanvasDrag(
+                startingAt: CGPoint(x: 95, y: 105),
+                tileFrames: frames,
+                playableVideoIndices: []
+            ),
+            "the same center point remains selection canvas on a photo"
+        )
+        XCTAssertTrue(
+            GridRubberBandHitTest.shouldTrackCanvasDrag(
+                startingAt: CGPoint(x: 30, y: 90),
+                tileFrames: frames,
+                playableVideoIndices: [3]
+            )
+        )
+        XCTAssertTrue(
+            GridRubberBandHitTest.shouldTrackCanvasDrag(
+                startingAt: CGPoint(x: 30, y: 195),
+                tileFrames: frames,
+                playableVideoIndices: [3]
+            ),
+            "the filename below the square media region remains selectable"
+        )
+        XCTAssertTrue(
+            GridRubberBandHitTest.shouldTrackCanvasDrag(
+                startingAt: CGPoint(x: 200, y: 30),
+                tileFrames: frames,
+                playableVideoIndices: [3]
+            ),
+            "gaps between tiles remain valid selection origins"
+        )
     }
 
     func testGridPhotoClickSignalsBeforeChangingCurrentPhoto() {
@@ -120,8 +206,8 @@ final class SelectionStateTests: XCTestCase {
             }
         )
 
-        actions.cycleRating(currentEvent: nil)
-        actions.cycleRating(currentEvent: nil)
+        actions.cycleRating()
+        actions.cycleRating()
 
         XCTAssertEqual(signalCount, 1)
         XCTAssertEqual(store.currentIndex, 2)
@@ -140,7 +226,7 @@ final class SelectionStateTests: XCTestCase {
             }
         )
 
-        actions.cycleRating(currentEvent: nil)
+        actions.cycleRating()
 
         XCTAssertEqual(signalCount, 0)
         XCTAssertEqual(store.currentIndex, 0)
@@ -151,9 +237,7 @@ final class SelectionStateTests: XCTestCase {
         let store = readyStore()
         store.selectRange(to: 2)
 
-        GridCellActions(store: store, index: 1).cycleRating(
-            currentEvent: nil
-        )
+        GridCellActions(store: store, index: 1).cycleRating()
 
         XCTAssertEqual(store.items.prefix(3).map(\.rating), [.yes, .yes, .yes])
         XCTAssertEqual(store.selectedIndices, [0, 1, 2])
@@ -197,19 +281,4 @@ final class SelectionStateTests: XCTestCase {
         )
     }
 
-    private func mouseEvent(clickCount: Int) throws -> NSEvent {
-        try XCTUnwrap(
-            NSEvent.mouseEvent(
-                with: .leftMouseUp,
-                location: .zero,
-                modifierFlags: [],
-                timestamp: 0,
-                windowNumber: 0,
-                context: nil,
-                eventNumber: clickCount,
-                clickCount: clickCount,
-                pressure: 0
-            )
-        )
-    }
 }

@@ -54,7 +54,7 @@ enum VideoMetadataExtractor {
             async let loadedPlayable = asset.load(.isPlayable)
             let tracks = try await asset.loadTracks(withMediaType: .video)
             let durationSeconds = try await loadedDuration.seconds
-            let duration = durationSeconds.isFinite && durationSeconds >= 0 ? durationSeconds : nil
+            let duration = sanitizedDuration(durationSeconds)
             guard let track = tracks.first else {
                 return VideoScanInfo(
                     duration: duration,
@@ -74,9 +74,14 @@ enum VideoMetadataExtractor {
             let transformed = size.applying(preferredTransform)
             let width = abs(transformed.width)
             let height = abs(transformed.height)
-            let dimensions = width > 0 && height > 0 ? CGSize(width: width, height: height) : nil
+            let dimensions = sanitizedDimensions(
+                width: width,
+                height: height
+            )
             let frameRateValue = try await track.load(.nominalFrameRate)
-            let frameRate = frameRateValue > 0 ? Double(frameRateValue) : nil
+            let frameRate = MediaNumeric.frameRate(
+                Double(frameRateValue)
+            )
             let formatDescriptions = try await track.load(.formatDescriptions)
             let codec = formatDescriptions.first.map(codecLabel)
 
@@ -90,6 +95,21 @@ enum VideoMetadataExtractor {
         } catch {
             return unavailable
         }
+    }
+
+    static func sanitizedDuration(
+        _ seconds: TimeInterval
+    ) -> TimeInterval? {
+        MediaNumeric.duration(seconds)
+    }
+
+    static func sanitizedDimensions(
+        width: CGFloat,
+        height: CGFloat
+    ) -> CGSize? {
+        guard MediaNumeric.pixelDimension(width) != nil,
+              MediaNumeric.pixelDimension(height) != nil else { return nil }
+        return CGSize(width: width, height: height)
     }
 
     private static let unavailable = VideoScanInfo(
@@ -126,20 +146,21 @@ enum VideoMetadataExtractor {
 
 enum MediaDurationFormat {
     static func display(_ seconds: TimeInterval?) -> String {
-        guard let seconds, seconds.isFinite, seconds >= 0 else { return "--:--" }
-        let rounded = Int(seconds.rounded())
+        guard let rounded = MediaNumeric.roundedNonnegativeInt(seconds)
+        else { return "--:--" }
         let hours = rounded / 3600
         let minutes = (rounded % 3600) / 60
         let remaining = rounded % 60
         if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
+            return "\(hours):"
+                + String(format: "%02d:%02d", minutes, remaining)
         }
         return String(format: "%d:%02d", minutes, remaining)
     }
 
     static func accessibility(_ seconds: TimeInterval?) -> String {
-        guard let seconds, seconds.isFinite, seconds >= 0 else { return "Unknown duration" }
-        let rounded = Int(seconds.rounded())
+        guard let rounded = MediaNumeric.roundedNonnegativeInt(seconds)
+        else { return "Unknown duration" }
         let hours = rounded / 3600
         let minutes = (rounded % 3600) / 60
         let remaining = rounded % 60

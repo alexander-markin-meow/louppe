@@ -67,21 +67,64 @@ final class ImagePipeline: @unchecked Sendable {
     }
     private let inFlightLock = NSLock()
     private var inFlight: [DecodeRequest: PendingDecode] = [:]
+    private static let lastDiskPruneDefaultsKey =
+        "LouppeThumbnailCacheLastPrune"
 
     static let thumbPixelSize: CGFloat = 320
     static let fullPixelSize: CGFloat = 4096
 
-    private init() {
+    private convenience init() {
+        let caches = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        self.init(
+            diskCacheRoot: caches.appendingPathComponent(
+                "Louppe/Thumbnails",
+                isDirectory: true
+            ),
+            schedulesMaintenance: true
+        )
+    }
+
+    /// Isolated cache instance for focused tests. Production code always uses
+    /// `shared`; this initializer deliberately skips UserDefaults and pruning.
+    convenience init(testingDiskCacheRoot: URL) {
+        self.init(
+            diskCacheRoot: testingDiskCacheRoot,
+            schedulesMaintenance: false
+        )
+    }
+
+    private init(
+        diskCacheRoot: URL,
+        schedulesMaintenance: Bool
+    ) {
+        self.diskCacheRoot = diskCacheRoot
         thumbCache.countLimit = 1200
         thumbCache.totalCostLimit = 256 * 1024 * 1024
         fullCache.countLimit = 8
         fullCache.totalCostLimit = 384 * 1024 * 1024
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        diskCacheRoot = caches.appendingPathComponent("Louppe/Thumbnails", isDirectory: true)
         try? FileManager.default.createDirectory(at: diskCacheRoot, withIntermediateDirectories: true)
-        diskQueue.async { [diskCacheRoot] in
-            Self.pruneDiskCache(at: diskCacheRoot)
+        guard schedulesMaintenance else { return }
+        let lastPrunedAt = UserDefaults.standard.object(
+            forKey: Self.lastDiskPruneDefaultsKey
+        ) as? Date
+        if Self.shouldPruneDiskCache(
+            lastPrunedAt: lastPrunedAt,
+            now: Date()
+        ) {
+            // Cache maintenance can stat thousands of files. Give launch,
+            // Gallery rendering, and the first Grid switch uncontested I/O;
+            // one delayed daily pass is sufficient for a 90-day cache.
+            diskQueue.asyncAfter(deadline: .now() + 30) { [diskCacheRoot] in
+                if Self.pruneDiskCache(at: diskCacheRoot) {
+                    UserDefaults.standard.set(
+                        Date(),
+                        forKey: Self.lastDiskPruneDefaultsKey
+                    )
+                }
+            }
         }
     }
 
@@ -97,6 +140,15 @@ final class ImagePipeline: @unchecked Sendable {
 
     func cachedThumbnail(for item: PhotoItem) -> NSImage? {
         thumbCache.object(forKey: Self.cacheKey(for: item) as NSString)
+    }
+
+    /// Test synchronization boundary for best-effort cache promotions/writes.
+    func waitForPendingDiskWrites() async {
+        await withCheckedContinuation { continuation in
+            diskQueue.async {
+                continuation.resume()
+            }
+        }
     }
 
     func thumbnail(for item: PhotoItem) async -> NSImage? {
@@ -210,10 +262,52 @@ final class ImagePipeline: @unchecked Sendable {
         if let cached = thumbCache.object(forKey: key as NSString) { return cached }
 
         // Try the on-disk thumbnail cache first.
-        let diskURL = diskCacheRoot.appendingPathComponent(diskFileName(for: key))
+        let diskURL = diskCacheRoot.appendingPathComponent(
+            Self.diskFileName(for: key)
+        )
         if let cgImage = Self.decodeImage(url: diskURL, maxPixel: Self.thumbPixelSize) {
             let image = NSImage(cgImage: cgImage, size: .zero)
             thumbCache.setObject(image, forKey: key as NSString, cost: Self.cost(of: cgImage))
+            return image
+        }
+
+        // v5 binds the cache to scan-time physical identity. Identity-less
+        // v4/v3 thumbnails are only candidates for synthetic/legacy items
+        // that have no scanned identity of their own. Once identity is known,
+        // no timestamp comparison can prove which inode produced old cache
+        // bytes on every supported filesystem, so production scans take the
+        // one-time cold migration and fail closed.
+        for legacyKey in Self.compatibilityThumbnailCacheKeys(for: item) {
+            let legacyURL = diskCacheRoot.appendingPathComponent(
+                Self.diskFileName(for: legacyKey)
+            )
+            guard Self.compatibilityThumbnailIsSafe(
+                at: legacyURL,
+                for: item
+            ), let cgImage = Self.decodeImage(
+                url: legacyURL,
+                maxPixel: Self.thumbPixelSize
+            ) else { continue }
+
+            let image = NSImage(cgImage: cgImage, size: .zero)
+            thumbCache.setObject(
+                image,
+                forKey: key as NSString,
+                cost: Self.cost(of: cgImage)
+            )
+            // Re-encode the image ImageIO already validated. Atomic write
+            // replaces a corrupt v5 destination as well as creating a missing
+            // one, without trusting compatibility bytes a second time after a
+            // possible prune or another process's cache mutation.
+            diskQueue.async {
+                let rep = NSBitmapImageRep(cgImage: cgImage)
+                if let jpeg = rep.representation(
+                    using: .jpeg,
+                    properties: [.compressionFactor: 0.8]
+                ) {
+                    try? jpeg.write(to: diskURL, options: .atomic)
+                }
+            }
             return image
         }
 
@@ -313,12 +407,60 @@ final class ImagePipeline: @unchecked Sendable {
     /// Internal so the performance checks can enforce that cache lookup stays
     /// independent of the live filesystem after scanning.
     static func cacheKey(for item: PhotoItem) -> String {
-        let mtime = item.primaryModificationDate?.timeIntervalSince1970 ?? 0
-        // v3 adds video first-frame thumbnails to the shared cache.
-        return "\(item.primaryURL.path)|\(mtime)|\(item.mediaKind.rawValue)|v3"
+        // Relative IDs repeat across folders and survive same-folder rescans.
+        // v5 adds the scan-time physical identity to byte-exact path, content
+        // timestamps, size, and kind so a replacement cannot share pixels.
+        "\(item.contentRevision.cacheIdentity)|v5"
     }
 
-    private func diskFileName(for key: String) -> String {
+    /// Immediately previous key. It is only a compatibility candidate after
+    /// its cache-file creation date proves it cannot predate the scanned file.
+    static func previousThumbnailCacheKey(for item: PhotoItem) -> String {
+        let mtime = item.primaryModificationDate?.timeIntervalSince1970 ?? 0
+        let absoluteIdentity = FolderScanner.fileSystemIdentityPath(
+            for: item.primaryURL
+        )
+        return "\(absoluteIdentity)|\(mtime)|\(item.mediaKind.rawValue)|v4"
+    }
+
+    /// Previous thumbnail key, used only as a one-way compatibility read for
+    /// ASCII filesystem paths where decoded and byte identity cannot diverge.
+    static func legacyThumbnailCacheKey(for item: PhotoItem) -> String? {
+        let path = item.primaryURL.path
+        guard path.unicodeScalars.allSatisfy(\.isASCII) else { return nil }
+        let mtime = item.primaryModificationDate?.timeIntervalSince1970 ?? 0
+        return "\(path)|\(mtime)|\(item.mediaKind.rawValue)|v3"
+    }
+
+    private static func compatibilityThumbnailCacheKeys(
+        for item: PhotoItem
+    ) -> [String] {
+        var keys = [previousThumbnailCacheKey(for: item)]
+        if let v3 = legacyThumbnailCacheKey(for: item) {
+            keys.append(v3)
+        }
+        return keys
+    }
+
+    static func compatibilityThumbnailIsSafe(
+        at cacheURL: URL,
+        for item: PhotoItem
+    ) -> Bool {
+        let revision = item.contentRevision
+        guard revision.stableFileIdentity == nil,
+              let sourceFloor = revision.compatibilityCacheFloorDate,
+              let values = try? cacheURL.resourceValues(
+                forKeys: [.isRegularFileKey, .contentModificationDateKey]
+              ),
+              values.isRegularFile == true,
+              let cacheDate = values.contentModificationDate
+        else {
+            return false
+        }
+        return cacheDate >= sourceFloor
+    }
+
+    static func diskFileName(for key: String) -> String {
         // Stable, filesystem-safe name derived from the cache key.
         var hash: UInt64 = 14695981039346656037
         for byte in key.utf8 {
@@ -332,12 +474,26 @@ final class ImagePipeline: @unchecked Sendable {
         image.bytesPerRow * image.height
     }
 
-    /// Keep the persistent cache useful but bounded. Pruning runs once at app
-    /// startup on the disk queue and never delays view construction.
-    private static func pruneDiskCache(at root: URL) {
+    static func shouldPruneDiskCache(
+        lastPrunedAt: Date?,
+        now: Date
+    ) -> Bool {
+        guard let lastPrunedAt else { return true }
+        let elapsed = now.timeIntervalSince(lastPrunedAt)
+        // A clock correction or corrupt future timestamp must not suppress
+        // maintenance until wall time eventually catches up.
+        guard elapsed >= 0 else { return true }
+        return elapsed >= 24 * 60 * 60
+    }
+
+    /// Keep the persistent cache useful but bounded. The caller schedules at
+    /// most one delayed pass per day so launch and view construction stay free
+    /// of this directory-wide metadata walk.
+    @discardableResult
+    static func pruneDiskCache(at root: URL) -> Bool {
         let fm = FileManager()
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
-        guard let urls = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: Array(keys)) else { return }
+        guard let urls = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: Array(keys)) else { return false }
         let cutoff = Date().addingTimeInterval(-90 * 24 * 60 * 60)
         var files: [(url: URL, size: Int64, date: Date)] = []
         for url in urls {
@@ -352,11 +508,12 @@ final class ImagePipeline: @unchecked Sendable {
 
         let limit: Int64 = 512 * 1024 * 1024
         var total = files.reduce(Int64(0)) { $0 + $1.size }
-        guard total > limit else { return }
+        guard total > limit else { return true }
         for file in files.sorted(by: { $0.date < $1.date }) where total > limit {
             if (try? fm.removeItem(at: file.url)) != nil {
                 total -= file.size
             }
         }
+        return true
     }
 }

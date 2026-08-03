@@ -15,6 +15,7 @@ struct ThumbnailView: View {
     var videoPlayback: VideoPlaybackController?
 
     @State private var image: NSImage?
+    @State private var imageRevision: PhotoContentRevision
 
     init(
         item: PhotoItem,
@@ -28,6 +29,8 @@ struct ThumbnailView: View {
         self.isSelected = isSelected
         self.showsRatingBadge = showsRatingBadge
         self.videoPlayback = videoPlayback
+        let revision = item.contentRevision
+        self._imageRevision = State(initialValue: revision)
         // Reappearing lazy cells should render their memory-cached image on
         // their first frame instead of flashing a placeholder and scheduling
         // an otherwise unnecessary state update.
@@ -39,12 +42,16 @@ struct ThumbnailView: View {
     }
 
     var body: some View {
+        let revision = item.contentRevision
+        let displayedImage = imageRevision == revision
+            ? image
+            : ImagePipeline.shared.cachedThumbnail(for: item)
         ZStack {
             Group {
                 if !item.isSupported {
                     UnsupportedThumbnail(item: item)
-                } else if let image {
-                    Image(nsImage: image)
+                } else if let displayedImage {
+                    Image(nsImage: displayedImage)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .clipShape(
@@ -86,9 +93,21 @@ struct ThumbnailView: View {
                     .padding(4)
             }
         }
-        .task(id: item.id) {
-            guard item.isSupported, image == nil else { return }
-            image = await ImagePipeline.shared.thumbnail(for: item)
+        .task(id: revision) {
+            let requestedItem = item
+            let requestedRevision = requestedItem.contentRevision
+            let cached = requestedItem.isSupported
+                ? ImagePipeline.shared.cachedThumbnail(for: requestedItem)
+                : nil
+            image = cached
+            imageRevision = requestedRevision
+            guard requestedItem.isSupported, cached == nil else { return }
+            let loaded = await ImagePipeline.shared.thumbnail(
+                for: requestedItem
+            )
+            guard !Task.isCancelled,
+                  imageRevision == requestedRevision else { return }
+            image = loaded
         }
     }
 

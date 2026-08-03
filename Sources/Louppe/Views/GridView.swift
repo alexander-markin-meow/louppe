@@ -42,24 +42,23 @@ struct GridView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            grid
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if store.showMetadataPanel, let item = store.currentItem {
-                Divider()
-                MetadataPanel(store: store, item: item)
-                    .frame(width: 280)
-                    .transition(.move(edge: .trailing))
-            }
-        }
+        grid
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(SessionRenderMarker(kind: .grid))
     }
 
     private var grid: some View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView {
-                    if store.visibleIndices.isEmpty && store.filter.isActive {
+                    if store.items.isEmpty {
+                        SessionEmptyView(
+                            reason: store.emptySessionReason,
+                            canUndo: store.canUndo
+                        )
+                        .padding(.top, 80)
+                    } else if store.visibleIndices.isEmpty
+                                && store.filter.isActive {
                         ContentUnavailableView(
                             "No items match the filter",
                             systemImage: "line.3.horizontal.decrease.circle",
@@ -203,6 +202,12 @@ struct GridView: View {
     private var rubberBandGesture: some Gesture {
         DragGesture(minimumDistance: 8, coordinateSpace: .named(Self.gridSpace))
             .onChanged { value in
+                guard rubberBandShouldTrackCanvas(
+                    startingAt: value.startLocation
+                ) else {
+                    rubberBand = nil
+                    return
+                }
                 let rect = CGRect(
                     x: min(value.startLocation.x, value.location.x),
                     y: min(value.startLocation.y, value.location.y),
@@ -212,10 +217,30 @@ struct GridView: View {
                 rubberBand = rect
                 store.setSelection(Set(tileFrames.frames.filter { $0.value.intersects(rect) }.map(\.key)))
             }
-            .onEnded { _ in
-                rubberBand = nil
+            .onEnded { value in
+                defer { rubberBand = nil }
+                guard rubberBandShouldTrackCanvas(
+                    startingAt: value.startLocation
+                ) else { return }
                 store.commitSelectionAnchor()
             }
+    }
+
+    private func rubberBandShouldTrackCanvas(
+        startingAt point: CGPoint
+    ) -> Bool {
+        let playableVideoIndices = Set(
+            tileFrames.frames.keys.filter { index in
+                store.items.indices.contains(index)
+                    && store.items[index].isVideo
+                    && store.items[index].videoIsPlayable
+            }
+        )
+        return GridRubberBandHitTest.shouldTrackCanvasDrag(
+            startingAt: point,
+            tileFrames: tileFrames.frames,
+            playableVideoIndices: playableVideoIndices
+        )
     }
 
     @ViewBuilder
@@ -266,9 +291,10 @@ private struct GridCell: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
 
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .gesture(cellTapGesture)
+                    GridImmediateClickSurface(
+                        onSingleClick: actions.selectPhoto,
+                        onDoubleClick: actions.openInGallery
+                    )
                         .mediaTileAccessibility(
                             item: item,
                             isCurrent: index == store.currentIndex,
@@ -280,6 +306,7 @@ private struct GridCell: View {
                             open: {
                                 actions.openInGallery()
                             },
+                            canRate: store.canRate,
                             rate: { rating in
                                 store.rate(rating, at: index)
                             },
@@ -329,6 +356,7 @@ private struct GridCell: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .disabled(!store.canRate)
                     .padding(2)
                     .help("Change rating")
                     .accessibilityLabel("Change rating for \(item.displayName)")
@@ -340,32 +368,111 @@ private struct GridCell: View {
                 }
                 .aspectRatio(1, contentMode: .fit)
 
-                Text(item.displayName)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .contentShape(Rectangle())
-                    .gesture(cellTapGesture)
+                ZStack {
+                    Text(item.displayName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .accessibilityHidden(true)
+
+                    GridImmediateClickSurface(
+                        onSingleClick: actions.selectPhoto,
+                        onDoubleClick: actions.openInGallery
+                    )
                     .accessibilityHidden(true)
+                }
             }
         }
     }
+}
 
-    /// The play and rating buttons are separate hit targets above this gesture.
-    /// A plain photo click now selects; modifier selection and double-click
-    /// retain their existing behavior.
-    private var cellTapGesture: some Gesture {
-        TapGesture(count: 2).onEnded {
-            GridCellActions(store: store, index: index).openInGallery()
+/// A native pointer surface that commits a single click on mouse-up without
+/// waiting for AppKit's double-click interval. The former exclusive pair of
+/// SwiftUI TapGestures deliberately delayed selection until the double-click
+/// recognizer failed. Here the first click selects immediately; a second click
+/// arrives with `clickCount == 2` and opens the already-selected item.
+struct GridImmediateClickSurface: NSViewRepresentable {
+    let onSingleClick: (NSEvent.ModifierFlags) -> Void
+    let onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> ClickView {
+        ClickView(
+            onSingleClick: onSingleClick,
+            onDoubleClick: onDoubleClick
+        )
+    }
+
+    func updateNSView(_ nsView: ClickView, context: Context) {
+        nsView.onSingleClick = onSingleClick
+        nsView.onDoubleClick = onDoubleClick
+    }
+
+    final class ClickView: NSView {
+        private static let dragThresholdSquared: CGFloat = 8 * 8
+
+        var onSingleClick: (NSEvent.ModifierFlags) -> Void
+        var onDoubleClick: () -> Void
+        private var mouseDownLocation: CGPoint?
+        private var exceededDragThreshold = false
+
+        init(
+            onSingleClick: @escaping (NSEvent.ModifierFlags) -> Void,
+            onDoubleClick: @escaping () -> Void
+        ) {
+            self.onSingleClick = onSingleClick
+            self.onDoubleClick = onDoubleClick
+            super.init(frame: .zero)
         }
-        .exclusively(before: TapGesture(count: 1).onEnded {
-            GridCellActions(
-                store: store,
-                index: index,
-                onPointerCurrentChange: onPointerCurrentChange
-            ).selectPhoto()
-        })
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override var acceptsFirstResponder: Bool { false }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            // A photo click returns keyboard navigation to the session instead
+            // of leaving Space/arrows owned by the last toolbar control.
+            window?.makeFirstResponder(nil)
+            mouseDownLocation = convert(event.locationInWindow, from: nil)
+            exceededDragThreshold = false
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let start = mouseDownLocation else { return }
+            let current = convert(event.locationInWindow, from: nil)
+            let dx = current.x - start.x
+            let dy = current.y - start.y
+            if dx * dx + dy * dy >= Self.dragThresholdSquared {
+                exceededDragThreshold = true
+            }
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            defer {
+                mouseDownLocation = nil
+                exceededDragThreshold = false
+            }
+            guard let start = mouseDownLocation else { return }
+            let end = convert(event.locationInWindow, from: nil)
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            guard !exceededDragThreshold,
+                  dx * dx + dy * dy < Self.dragThresholdSquared else {
+                return
+            }
+            if event.clickCount >= 2 {
+                onDoubleClick()
+            } else {
+                onSingleClick(event.modifierFlags)
+            }
+        }
     }
 }
 
@@ -382,8 +489,10 @@ struct GridCellActions {
         store.setIndex(index)
     }
 
-    func selectPhoto() {
-        store.handleThumbnailClick(at: index) {
+    func selectPhoto(
+        modifiers: NSEvent.ModifierFlags = NSEvent.modifierFlags
+    ) {
+        store.handleThumbnailClick(at: index, modifiers: modifiers) {
             if index != store.currentIndex {
                 onPointerCurrentChange()
             }
@@ -396,15 +505,11 @@ struct GridCellActions {
         store.viewMode = .gallery
     }
 
-    /// SwiftUI's native Button action fires for both clicks in a double-click.
-    /// Honor the first activation and ignore later clicks in that same mouse
-    /// sequence. Keyboard and accessibility activations have no mouse event
-    /// and continue to use the normal native Button path.
-    func cycleRating(currentEvent: NSEvent? = NSApp.currentEvent) {
-        guard GridRatingActivation.shouldActivate(for: currentEvent) else {
-            return
-        }
-        guard !store.isFileOperationRunning,
+    /// One native Button activation always advances the rating exactly once.
+    /// AppKit's click count is deliberately irrelevant: photographers often
+    /// cycle rapidly, and a second/third click is still an intentional input.
+    func cycleRating() {
+        guard store.canRate,
               store.items.indices.contains(index)
         else {
             return
@@ -416,17 +521,6 @@ struct GridCellActions {
             onPointerCurrentChange()
         }
         store.toggleRating(at: index)
-    }
-}
-
-private enum GridRatingActivation {
-    static func shouldActivate(for event: NSEvent?) -> Bool {
-        guard let event,
-              event.type == .leftMouseDown || event.type == .leftMouseUp
-        else {
-            return true
-        }
-        return event.clickCount < 2
     }
 }
 
@@ -444,4 +538,61 @@ private struct TileFrameKey: PreferenceKey {
 /// frames feed the drag gesture only, never the rendered output.
 private final class TileFrameStore {
     var frames: [Int: CGRect] = [:]
+}
+
+/// Classifies the starting point of a Grid drag from the tile geometry already
+/// needed for selection. Control locations are deterministic within each
+/// square media tile, so this avoids one GeometryReader and preference value
+/// per rendered control while keeping native Button drags out of rubber-band
+/// selection.
+enum GridRubberBandHitTest {
+    /// The 40-point rating target plus its two-point outer padding on each side.
+    private static let ratingControlRegionSize: CGFloat = 44
+    /// Conservatively covers the native large circular Play button without
+    /// making the surrounding photo difficult to use as a drag origin.
+    private static let playbackControlRegionSize: CGFloat = 48
+
+    static func shouldTrackCanvasDrag(
+        startingAt point: CGPoint,
+        tileFrames: [Int: CGRect],
+        playableVideoIndices: Set<Int>
+    ) -> Bool {
+        guard let (index, tileFrame) = tileFrames.first(where: {
+            $0.value.contains(point)
+        }) else {
+            // Gaps and padding are intentional selection-canvas origins.
+            return true
+        }
+
+        // GridCell's media area is a square at the top of the cell; the
+        // filename beneath it remains an ordinary selection-canvas target.
+        let mediaFrame = CGRect(
+            x: tileFrame.minX,
+            y: tileFrame.minY,
+            width: tileFrame.width,
+            height: tileFrame.width
+        )
+        guard mediaFrame.contains(point) else { return true }
+
+        let ratingFrame = CGRect(
+            x: mediaFrame.maxX - ratingControlRegionSize,
+            y: mediaFrame.minY,
+            width: ratingControlRegionSize,
+            height: ratingControlRegionSize
+        )
+        if ratingFrame.contains(point) { return false }
+
+        if playableVideoIndices.contains(index) {
+            let halfPlaybackSize = playbackControlRegionSize / 2
+            let playbackFrame = CGRect(
+                x: mediaFrame.midX - halfPlaybackSize,
+                y: mediaFrame.midY - halfPlaybackSize,
+                width: playbackControlRegionSize,
+                height: playbackControlRegionSize
+            )
+            if playbackFrame.contains(point) { return false }
+        }
+
+        return true
+    }
 }

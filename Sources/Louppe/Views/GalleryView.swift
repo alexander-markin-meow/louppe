@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// The one-photo-at-a-time Gallery view:
-/// Browser column · large photo pane · info panel.
+/// The one-photo-at-a-time Gallery view: Browser column and large photo pane.
+/// SessionView owns the shared trailing Info panel so switching modes does not
+/// restart its metadata and histogram work.
 struct GalleryView: View {
     @ObservedObject var store: SessionStore
 
@@ -17,12 +18,9 @@ struct GalleryView: View {
             ZStack {
                 Color.appBackground
                 if store.items.isEmpty {
-                    // Only reachable when Clean Up emptied the whole session
-                    // (an empty scan goes back to the welcome screen instead).
-                    ContentUnavailableView(
-                        "No media left in this folder",
-                        systemImage: "trash",
-                        description: Text("Everything was moved to the Trash. Press ⌘Z to put the items back.")
+                    SessionEmptyView(
+                        reason: store.emptySessionReason,
+                        canUndo: store.canUndo
                     )
                 } else if store.visibleIndices.isEmpty && store.filter.isActive {
                     ContentUnavailableView(
@@ -54,13 +52,7 @@ struct GalleryView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if store.showMetadataPanel, let item = store.currentItem {
-                Divider()
-                MetadataPanel(store: store, item: item)
-                    .frame(width: 280)
-                    .transition(.move(edge: .trailing))
-            }
         }
+        .background(SessionRenderMarker(kind: .gallery))
     }
 }

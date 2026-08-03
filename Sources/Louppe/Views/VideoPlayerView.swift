@@ -11,7 +11,8 @@ struct GalleryVideoPlayerView: View {
         Group {
             if !item.videoIsPlayable {
                 unsupportedView
-            } else if let error = playback.errorMessage, playback.itemID == item.id {
+            } else if let error = playback.errorMessage,
+                      playback.represents(item) {
                 ContentUnavailableView(
                     "Can't play this video",
                     systemImage: "exclamationmark.triangle",
@@ -23,7 +24,7 @@ struct GalleryVideoPlayerView: View {
             }
         }
         .onAppear { playback.prepare(item) }
-        .onChange(of: item.id) { playback.prepare(item) }
+        .onChange(of: item.contentRevision) { playback.prepare(item) }
     }
 
     private var unsupportedView: some View {

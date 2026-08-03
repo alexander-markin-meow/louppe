@@ -42,7 +42,7 @@ struct WelcomeView: View {
             Text("Louppe")
                 .font(.largeTitle.bold())
                 .foregroundStyle(Color.louppeAccent)
-            Text("Pick a folder of photos and videos, mark each one Yes or No,\nthen export the keepers. Originals are never changed.")
+            Text("Pick a folder of photos and videos, mark each one Yes or No,\nthen export the keepers. Export copies by default. Originals move only when you explicitly choose Move or Trash.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
 

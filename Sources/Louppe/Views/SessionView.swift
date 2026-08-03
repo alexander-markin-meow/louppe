@@ -17,12 +17,19 @@ import AppKit
 struct SessionView: View {
     @ObservedObject var store: SessionStore
     @State private var keyMonitor: Any?
+    @State private var sessionWindowReference = SessionWindowReference()
 
     var body: some View {
         mainContent
             .overlay { cleanUpProgressOverlay }
             .toolbar { toolbarContent }
             .navigationTitle("")
+            .focusedSceneValue(\.louppeSessionStore, store)
+            .background {
+                SessionWindowReader { window in
+                    sessionWindowReference.window = window
+                }
+            }
             .sheet(isPresented: $store.isExportPresented) {
                 ExportView(store: store)
             }
@@ -34,6 +41,25 @@ struct SessionView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text(clearAllRatingsMessage)
+            }
+            .alert(
+                "Use Saved Ratings?",
+                isPresented: legacyMigrationConfirmationPresented
+            ) {
+                Button("Use Saved Ratings") {
+                    store.confirmLegacySessionMigration()
+                }
+                .keyboardShortcut(.defaultAction)
+                Button("Close Folder", role: .cancel) {
+                    store.closeLegacySessionWithoutMigrating()
+                }
+            } message: {
+                Text(
+                    "This folder contains ratings saved by an older version of Louppe. "
+                        + "Every saved filename is present, but the older session cannot prove that the files are the exact originals. "
+                        + "Use Saved Ratings upgrades the session and binds each rating to its physical file. "
+                        + "Close Folder leaves the existing session untouched."
+                )
             }
             .confirmationDialog(
                 cleanUpTitle,
@@ -72,6 +98,16 @@ struct SessionView: View {
         )
     }
 
+    private var legacyMigrationConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: {
+                store.isLegacySessionMigrationConfirmationPresented
+            },
+            // Only the two explicit alert actions may resolve this gate.
+            set: { _ in }
+        )
+    }
+
     private var isCleanUpErrorPresented: Binding<Bool> {
         Binding(
             get: { store.cleanUpError != nil },
@@ -96,7 +132,9 @@ struct SessionView: View {
         let counts = store.cleanUpCounts(for: mode)
         let files = counts.files == 1 ? "1 file" : "\(counts.files) files"
         let space = ByteCountFormatter.string(fromByteCount: counts.bytes, countStyle: .file)
-        var parts = ["\(files) will be moved to Trash (RAW+JPEG pair counts as two), freeing \(space) of space."]
+        var parts = [
+            "\(files) will be moved to the Trash (a RAW+JPEG pair counts as two), totaling about \(space). Immediately afterward, you can undo during this open session while the files remain in the Trash. Emptying the Trash permanently deletes them and may reclaim approximately that space."
+        ]
         switch mode {
         case .selection:
             parts.append("Only the selected items will leave the folder; everything else stays.")
@@ -178,12 +216,25 @@ struct SessionView: View {
     }
 
     private var mainContent: some View {
-        Group {
-            switch store.viewMode {
-            case .gallery:
-                GalleryView(store: store)
-            case .grid:
-                GridView(store: store)
+        HStack(spacing: 0) {
+            Group {
+                switch store.viewMode {
+                case .gallery:
+                    GalleryView(store: store)
+                case .grid:
+                    GridView(store: store)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // The Info panel is shared by both modes. Keeping it outside the
+            // mode switch preserves its metadata/histogram tasks instead of
+            // tearing them down and reopening the RAW on every toggle.
+            if store.showMetadataPanel, let item = store.currentItem {
+                Divider()
+                MetadataPanel(store: store, item: item)
+                    .frame(width: 280)
+                    .transition(.move(edge: .trailing))
             }
         }
     }
@@ -350,15 +401,16 @@ struct SessionView: View {
     @ToolbarContentBuilder
     private var cleanUpAndExportToolbarContent: some ToolbarContent {
         // Clean Up sits in its own capsule between inspection controls and
-        // Export. The menu body is shared with the File menu; it is the only
-        // feature that can move originals, and only ever to the macOS Trash.
+        // Export. The menu body is shared with the File menu. Clean Up is the
+        // app's only Trash path; Export's explicit Move mode can instead move
+        // originals to a photographer-chosen destination.
         ToolbarItem {
             Menu {
                 CleanUpMenuItems(store: store)
             } label: {
                 Image(systemName: "trash")
             }
-            .disabled(store.isFileOperationRunning)
+            .disabled(!store.canCleanUp)
             .menuIndicator(.hidden)
             .tint(Color.primary)
             .accessibilityLabel("Clean Up")
@@ -374,13 +426,13 @@ struct SessionView: View {
         // of being nudged aside by reserved label space.
         ToolbarItem {
             Button {
-                store.isExportPresented = true
+                store.presentExport()
             } label: {
                 Image(systemName: "square.and.arrow.up")
                     // Nudge up a touch to visually center the share glyph.
                     .offset(y: -1)
             }
-            .disabled(store.isFileOperationRunning)
+            .disabled(!store.canExport)
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .tint(Color.louppeAccent)
@@ -393,58 +445,141 @@ struct SessionView: View {
 
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if handleKey(event) { return nil }
-            return event
-        }
+        guard let monitor = NSEvent.addLocalMonitorForEvents(
+            matching: .keyDown,
+            handler: { event in
+                let context = liveKeyRoutingContext(for: event)
+                if handleKey(event, context: context) { return nil }
+                return event
+            }
+        ) else { return }
+        keyMonitor = monitor
+#if DEBUG
+        SessionKeyMonitorTestProbe.didInstall()
+#endif
     }
 
     private func removeKeyMonitor() {
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
+#if DEBUG
+            SessionKeyMonitorTestProbe.didRemove()
+#endif
         }
+        sessionWindowReference.window = nil
     }
 
-    /// Internal so the key-routing boundary can be regression tested with
-    /// synthetic NSEvents without requiring macOS Accessibility permission.
+    /// Internal compatibility entry point for focused logic tests that use
+    /// synthetic events without an AppKit window. The installed event monitor
+    /// always calls the context-aware overload below.
     func handleKey(_ event: NSEvent) -> Bool {
-        // Leave command shortcuts (⌘Z, ⌘E…) to the menu bar, and don't steal
-        // keys while the export sheet or a panel is up or the user is typing.
-        guard case .ready = store.phase else { return false }
+        handleKey(event, context: .focusedSession)
+    }
+
+    /// Routes one event only after its window, presentation, and focus context
+    /// has proved that the active session owns keyboard input.
+    func handleKey(
+        _ event: NSEvent,
+        context: SessionKeyRoutingContext
+    ) -> Bool {
+        guard context.sessionOwnsEvent,
+              !context.hasModalPresentation,
+              !store.isSessionCommandPresentationActive,
+              case .ready = store.phase
+        else {
+            return false
+        }
+
+        var modifiers = normalizedShortcutModifiers(for: event)
+        // Caps Lock is harmless capitalization during ordinary culling, but
+        // it can also be VoiceOver's command modifier. When VoiceOver is
+        // running, preserve that ownership instead of interpreting the chord.
+        if !context.isVoiceOverEnabled {
+            modifiers.remove(.capsLock)
+        }
+        let unsupportedReviewModifiers: NSEvent.ModifierFlags = [
+            .command,
+            .option,
+            .control,
+            .function,
+            .help,
+            .numericPad,
+            .capsLock,
+        ]
+        let acceptsReviewModifiers = modifiers
+            .intersection(unsupportedReviewModifiers)
+            .isEmpty
+        // Shift is accepted for letter shortcuts so an uppercase F/D/G still
+        // works, but Shift-Tab and Shift-arrow belong to native focus and
+        // selection navigation rather than changing the photo session.
+        let acceptsNavigationModifiers =
+            acceptsReviewModifiers && !modifiers.contains(.shift)
+
         if store.isFileOperationRunning {
-            // Command shortcuts continue to the menu bar, whose mutating
-            // actions are disabled/guarded. Keep only view controls live.
-            if event.modifierFlags.contains(.command) { return false }
-            if event.keyCode == 48 { store.toggleViewMode(); return true }
+            // Only unmodified, explicitly safe view controls stay live. Every
+            // other key passes through to AppKit, including VoiceOver chords
+            // and unsupported Command combinations.
+            guard context.acceptsReviewShortcuts else { return false }
+            if event.keyCode == 48 {
+                guard context.acceptsNavigationShortcuts,
+                      acceptsNavigationModifiers else { return false }
+                store.toggleViewMode()
+                return true
+            }
+            guard acceptsReviewModifiers else { return false }
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "q": withAnimation { store.toggleBrowser() }; return true
             case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
             case "x": return store.toggleClippingWarnings()
             case "g": store.toggleViewMode(); return true
-            default: return true
+            default: return false
             }
         }
-        if store.isExportPresented { return false }
-        // Don't steal letters while the filter popover is up (search typing),
-        // nor while the sort popover is open.
-        if store.isFilterPresented || store.isSortPresented { return false }
-        // Nor while a confirmation or error alert is up.
-        if store.isClearAllRatingsConfirmationPresented ||
-            store.pendingCleanUp != nil || store.cleanUpError != nil { return false }
+
+        // App commands remain available when a Button, Picker, or Slider has
+        // keyboard focus. A live text editor keeps every standard macOS
+        // command instead (notably Undo, Select All, and Use Selection for
+        // Find).
+        let acceptsAppCommand = context.acceptsReviewShortcuts
 
         // ⌘+ / ⌘− resize the Grid view.
-        if event.modifierFlags.contains(.command), store.viewMode == .grid {
+        if acceptsAppCommand,
+           modifiers == [.command],
+           store.viewMode == .grid {
             switch event.charactersIgnoringModifiers {
             case "=", "+": store.zoomGrid(larger: true); return true
             case "-": store.zoomGrid(larger: false); return true
             default: break
             }
         }
+        if acceptsAppCommand,
+           modifiers == [.command, .shift],
+           store.viewMode == .grid,
+           event.characters == "+" {
+            store.zoomGrid(larger: true)
+            return true
+        }
+
+        // These menu-equivalent actions stay here rather than on global menu
+        // key equivalents so another window or a focused editor owns its keys.
+        if acceptsAppCommand, modifiers == [.command] {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "e":
+                guard store.canExport else { return false }
+                store.presentExport()
+                return true
+            case "r":
+                store.rescan()
+                return true
+            default:
+                break
+            }
+        }
 
         // ⌘Z — undo the last rating (or a whole "clear all" / clean-up).
-        if event.modifierFlags.contains(.command),
-           !event.modifierFlags.contains(.shift),
+        if acceptsAppCommand,
+           modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "z" {
             store.undo()
             return true
@@ -452,13 +587,20 @@ struct SessionView: View {
 
         // ⌘⌫ — move the selected photo(s) straight to the Trash, no dialog
         // (deliberate Finder parallel; ⌘Z brings everything back).
-        if event.modifierFlags.contains(.command), event.keyCode == 51 {
+        if context.acceptsReviewShortcuts,
+           modifiers == [.command],
+           event.keyCode == 51 {
+            guard store.canCleanUp,
+                  store.hasCleanUpTargets(for: .selection) else {
+                return false
+            }
             store.performCleanUp(.selection)
             return true
         }
 
         // ⌘⇧← / ⌘⇧→ — select everything up to the first / last photo.
-        if event.modifierFlags.contains(.command), event.modifierFlags.contains(.shift) {
+        if context.acceptsNavigationShortcuts,
+           modifiers == [.command, .shift] {
             switch event.keyCode {
             case 123: store.selectToEdge(forward: false); return true   // ⌘⇧←
             case 124: store.selectToEdge(forward: true); return true    // ⌘⇧→
@@ -467,19 +609,28 @@ struct SessionView: View {
         }
 
         // ⌘A — select all photos that pass the filter.
-        if event.modifierFlags.contains(.command),
-           !event.modifierFlags.contains(.shift),
+        if acceptsAppCommand,
+           modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "a" {
             store.selectAllVisible()
             return true
         }
 
-        if event.modifierFlags.intersection([.command, .option, .control]) != [] { return false }
-        if NSApp.keyWindow?.firstResponder is NSTextView { return false }
+        guard context.acceptsReviewShortcuts else { return false }
         switch event.keyCode {
-        case 123: store.goPrevious(); return true            // ←
-        case 124: store.goNext(); return true                // →
+        case 123:
+            guard context.acceptsNavigationShortcuts,
+                  acceptsNavigationModifiers else { return false }
+            store.goPrevious()
+            return true                                      // ←
+        case 124:
+            guard context.acceptsNavigationShortcuts,
+                  acceptsNavigationModifiers else { return false }
+            store.goNext()
+            return true                                      // →
         case 126:                                             // ↑
+            guard context.acceptsNavigationShortcuts,
+                  acceptsNavigationModifiers else { return false }
             // Grid: same column, one row up. Gallery: previous photo, matching
             // the vertical Browser strip where the photo above is the previous one.
             if store.viewMode == .grid {
@@ -489,14 +640,22 @@ struct SessionView: View {
             }
             return true
         case 125:                                             // ↓
+            guard context.acceptsNavigationShortcuts,
+                  acceptsNavigationModifiers else { return false }
             if store.viewMode == .grid {
                 store.goVertical(1)
             } else {
                 store.goNext()
             }
             return true
-        case 48:  store.toggleViewMode(); return true        // Tab
+        case 48:
+            guard context.acceptsNavigationShortcuts,
+                  acceptsNavigationModifiers else { return false }
+            store.toggleViewMode()
+            return true                                      // Tab
         case 49:                                             // Space
+            guard context.acceptsNavigationShortcuts,
+                  acceptsNavigationModifiers else { return false }
             if let item = store.currentItem, item.isVideo {
                 store.videoPlayback.toggle(item)
             } else {
@@ -504,12 +663,18 @@ struct SessionView: View {
             }
             return true
         case 53:                                             // Esc: drop the selection
+            guard context.acceptsNavigationShortcuts,
+                  acceptsNavigationModifiers else { return false }
             guard !store.selectedIndices.isEmpty else { return false }
             store.clearSelection()
             return true
         default: break
         }
 
+        // The remaining shortcuts are letters. Shift and ordinary Caps Lock
+        // may change their glyph but not their Louppe meaning; every other
+        // modifier, including Fn/Globe and Help, remains native.
+        guard acceptsReviewModifiers else { return false }
         switch event.charactersIgnoringModifiers?.lowercased() {
         case "f": store.rate(.yes); return true
         case "d": store.rate(.no); return true
@@ -517,7 +682,10 @@ struct SessionView: View {
         case "w": withAnimation { store.showMetadataPanel.toggle() }; return true
         case "x": return store.toggleClippingWarnings()
         case "g": store.toggleViewMode(); return true
-        case "e": store.isExportPresented = true; return true
+        case "e":
+            guard store.canExport else { return false }
+            store.presentExport()
+            return true
         case "r": store.requestClearAllRatings(); return true
         case "z": store.undo(); return true                  // bare Z = ⌘Z
         case "s":
@@ -537,6 +705,281 @@ struct SessionView: View {
         }
     }
 
+    private func normalizedShortcutModifiers(
+        for event: NSEvent
+    ) -> NSEvent.ModifierFlags {
+        // Compare only documented, device-independent modifier meanings. Raw
+        // event flags can contain unrelated bits, while AppKit marks ordinary
+        // arrow-key events as both Numeric Pad and Function.
+        let meaningfulMask: NSEvent.ModifierFlags = [
+            .capsLock,
+            .shift,
+            .control,
+            .option,
+            .command,
+            .numericPad,
+            .help,
+            .function,
+        ]
+        var modifiers = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection(meaningfulMask)
+        if 123...126 ~= event.keyCode {
+            modifiers.subtract([.numericPad, .function])
+        }
+        return modifiers
+    }
+
+    private func liveKeyRoutingContext(
+        for event: NSEvent
+    ) -> SessionKeyRoutingContext {
+#if DEBUG
+        let keyWindow =
+            SessionKeyMonitorTestProbe.keyWindowOverride ?? NSApp.keyWindow
+#else
+        let keyWindow = NSApp.keyWindow
+#endif
+        return SessionKeyRoutingContext(
+            eventWindow: event.window,
+            eventWindowNumber: event.windowNumber,
+            sessionWindow: sessionWindowReference.window,
+            keyWindow: keyWindow,
+            modalWindow: NSApp.modalWindow
+        )
+    }
+
+}
+
+/// Inputs that must be true before a session-wide keyboard shortcut is even
+/// interpreted. Keeping this value pure makes the dangerous boundary directly
+/// regression-testable without synthesizing system-wide accessibility events.
+struct SessionKeyRoutingContext: Equatable {
+    let sessionOwnsEvent: Bool
+    let hasModalPresentation: Bool
+    let focusedResponderOwnsText: Bool
+    let focusedResponderOwnsNavigation: Bool
+    let isVoiceOverEnabled: Bool
+
+    init(
+        sessionOwnsEvent: Bool,
+        hasModalPresentation: Bool,
+        focusedResponderOwnsText: Bool = false,
+        focusedResponderOwnsNavigation: Bool = false,
+        isVoiceOverEnabled: Bool = false
+    ) {
+        self.sessionOwnsEvent = sessionOwnsEvent
+        self.hasModalPresentation = hasModalPresentation
+        self.focusedResponderOwnsText = focusedResponderOwnsText
+        self.focusedResponderOwnsNavigation =
+            focusedResponderOwnsNavigation
+        self.isVoiceOverEnabled = isVoiceOverEnabled
+    }
+
+    var acceptsReviewShortcuts: Bool {
+        sessionOwnsEvent
+            && !hasModalPresentation
+            && !focusedResponderOwnsText
+    }
+
+    var acceptsNavigationShortcuts: Bool {
+        acceptsReviewShortcuts && !focusedResponderOwnsNavigation
+    }
+
+    static let focusedSession = SessionKeyRoutingContext(
+        sessionOwnsEvent: true,
+        hasModalPresentation: false,
+        focusedResponderOwnsText: false,
+        focusedResponderOwnsNavigation: false,
+        isVoiceOverEnabled: false
+    )
+
+    static let blocked = SessionKeyRoutingContext(
+        sessionOwnsEvent: false,
+        hasModalPresentation: false,
+        focusedResponderOwnsText: false,
+        focusedResponderOwnsNavigation: false,
+        isVoiceOverEnabled: false
+    )
+
+    @MainActor
+    init(
+        eventWindow: NSWindow?,
+        eventWindowNumber: Int,
+        sessionWindow: NSWindow?,
+        keyWindow: NSWindow?,
+        modalWindow: NSWindow?
+    ) {
+        guard let sessionWindow else {
+            self = .blocked
+            return
+        }
+
+        let eventBelongsToSession =
+            eventWindow === sessionWindow
+            || (
+                eventWindow == nil
+                    && eventWindowNumber != 0
+                    && eventWindowNumber == sessionWindow.windowNumber
+            )
+        let firstResponder = sessionWindow.firstResponder
+        self.init(
+            sessionOwnsEvent:
+                eventBelongsToSession && keyWindow === sessionWindow,
+            hasModalPresentation:
+                modalWindow != nil || sessionWindow.attachedSheet != nil,
+            focusedResponderOwnsText:
+                Self.responderOwnsText(firstResponder),
+            focusedResponderOwnsNavigation:
+                Self.responderOwnsNavigation(firstResponder),
+            isVoiceOverEnabled: NSWorkspace.shared.isVoiceOverEnabled
+        )
+    }
+
+    @MainActor
+    static func responderOwnsText(
+        _ responder: NSResponder?
+    ) -> Bool {
+        if responder is NSTextView { return true }
+        if let control = responder as? NSControl {
+            if control.currentEditor() != nil { return true }
+            if let field = control as? NSTextField {
+                return field.isEditable || field.isSelectable
+            }
+        }
+        guard let view = responder as? NSView else { return false }
+        return viewContainsTextOwner(view)
+    }
+
+    @MainActor
+    static func responderOwnsNavigation(
+        _ responder: NSResponder?
+    ) -> Bool {
+        guard let responder else { return false }
+        return !(responder is NSWindow)
+    }
+
+    /// SwiftUI selectable `Text` keeps a private hosting proxy first
+    /// responder while its public `NSTextField` selection surface is nested
+    /// below it. Inspecting public descendant types avoids depending on that
+    /// private proxy's class name while preserving native Copy/Select All,
+    /// Find-selection, Undo, and deletion commands.
+    @MainActor
+    private static func viewContainsTextOwner(_ view: NSView) -> Bool {
+        if let textView = view as? NSTextView,
+           textView.isEditable || textView.isSelectable {
+            return true
+        }
+        if let textField = view as? NSTextField,
+           textField.isEditable || textField.isSelectable {
+            return true
+        }
+        return view.subviews.contains(where: viewContainsTextOwner)
+    }
+}
+
+#if DEBUG
+/// Debug-only lifecycle accounting for the in-process event-monitor regression
+/// test. Release builds carry no counter or synchronization work.
+@MainActor
+enum SessionKeyMonitorTestProbe {
+    private(set) static var activeMonitorCount = 0
+    private(set) static var keyWindowOverride: NSWindow?
+
+    static func didInstall() {
+        activeMonitorCount += 1
+    }
+
+    static func didRemove() {
+        precondition(activeMonitorCount > 0)
+        activeMonitorCount -= 1
+    }
+
+    static func overrideKeyWindow(with window: NSWindow?) {
+        keyWindowOverride = window
+    }
+}
+#endif
+
+/// An inert AppKit marker that lets hosted-view tests distinguish Gallery,
+/// Grid, and the shared Info panel without relying on implementation details
+/// such as how many ScrollViews SwiftUI happens to create. It is excluded from
+/// accessibility and pointer hit testing; the identifier is available to UI
+/// diagnostics without changing the rendered app.
+struct SessionRenderMarker: NSViewRepresentable {
+    enum Kind: String {
+        case gallery = "com.alexandermarkin.louppe.render.gallery"
+        case grid = "com.alexandermarkin.louppe.render.grid"
+        case metadata = "com.alexandermarkin.louppe.render.metadata"
+    }
+
+    let kind: Kind
+
+    func makeNSView(context: Context) -> MarkerView {
+        MarkerView(kind: kind)
+    }
+
+    func updateNSView(_ nsView: MarkerView, context: Context) {
+        nsView.kind = kind
+    }
+
+    final class MarkerView: NSView {
+        var kind: Kind {
+            didSet { setAccessibilityIdentifier(kind.rawValue) }
+        }
+
+        init(kind: Kind) {
+            self.kind = kind
+            super.init(frame: .zero)
+            setAccessibilityElement(false)
+            setAccessibilityIdentifier(kind.rawValue)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+    }
+}
+
+/// Resolves the exact NSWindow that hosts this SessionView. The event monitor
+/// keeps only a weak reference, so it cannot extend the window's lifetime.
+private struct SessionWindowReader: NSViewRepresentable {
+    let onWindowChange: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> WindowReaderView {
+        let view = WindowReaderView()
+        view.onWindowChange = onWindowChange
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowReaderView, context: Context) {
+        nsView.onWindowChange = onWindowChange
+        nsView.reportWindowIfNeeded()
+    }
+
+    final class WindowReaderView: NSView {
+        var onWindowChange: (NSWindow?) -> Void = { _ in }
+        private weak var reportedWindow: NSWindow?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            reportWindowIfNeeded()
+        }
+
+        func reportWindowIfNeeded() {
+            guard reportedWindow !== window else { return }
+            reportedWindow = window
+            onWindowChange(window)
+        }
+    }
+}
+
+private final class SessionWindowReference {
+    weak var window: NSWindow?
 }
 
 /// The Clean Up menu body — the three trash actions plus the inline scope —

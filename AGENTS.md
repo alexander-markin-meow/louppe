@@ -1,9 +1,10 @@
 # Louppe — guidance for AI assistants
 
 Native macOS photo-culling app. Swift/SwiftUI, plain SwiftPM executable —
-**no Xcode project**. Apple Command Line Tools 26.6 are selected; full Xcode
-26.6 is also installed but is not required. Both currently expose Swift 6.3.3
-and the macOS 26.5 SDK.
+**no Xcode project**. Apple Command Line Tools 26.6 are selected and are
+sufficient to build/package the app. The XCTest target requires full Xcode
+26.6 because the Command Line Tools installation does not include XCTest.
+Both toolchains currently expose Swift 6.3.3 and the macOS 26.5 SDK.
 
 The owner is a photographer, not a programmer: do the technical work for him,
 explain results in plain language, and always verify the app actually launches
@@ -17,6 +18,8 @@ cp -R dist/Louppe.app /Applications/    # install (remove old copy first)
 xattr -cr /Applications/Louppe.app      # copy can attach Finder metadata
 codesign --verify --deep --strict /Applications/Louppe.app
 swift build --disable-keychain          # quick debug check; public dependencies need no login
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift test --disable-keychain         # XCTest is supplied by full Xcode
 ```
 
 `build_app.sh` bundles the binary + icon + Info.plist in `/private/tmp`, strips
@@ -80,7 +83,8 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/SessionStore.swift` | Main-actor session state: ratings/cached counts, undo, navigation, selection, prepared filtering + cached sort/day groups, clean-up orchestration, persistence snapshots, recents |
 | `Sources/Louppe/PreparedSessionIndex.swift` | Pure item-ID/sort/filter/group/header/location maps projected by `SessionStore`; owns stable Grid group identity and performance signposts |
 | `Sources/Louppe/SelectionState.swift` | Pure stable-ID/index selection authority: range, edge, toggle, rubber-band, filter intersection, and generation remapping; projected by `SessionStore` |
-| `Sources/Louppe/SessionPersistence.swift` | Actor that serializes typed sidecar/backup outcomes, newest-valid reads, schema validation, and atomic writes off-main |
+| `Sources/Louppe/SessionPersistence.swift` | Actor that binds an open folder to stable directory identity, serializes typed sidecar/identity-keyed-backup outcomes, cross-process lineage locking, raw-byte CAS, monotonic generations, schema validation, and durable atomic writes off-main |
+| `Sources/Louppe/DurableFileIO.swift` | POSIX write/sync/rename/directory-sync boundary shared by sessions and file-operation journals |
 | `Sources/Louppe/FileOperationJournal.swift` | Per-file durable Copy/Move/Trash/undo checkpoints, stable file identity, and launch recovery |
 | `Sources/Louppe/CleanUpWorker.swift` | Background Trash/restore file loops, progress throttling, pair rollback, O(n+k) restoration merge |
 | `Sources/Louppe/FolderScanner.swift` | Recursive scan, deterministic volume-aware RAW+JPEG pairing, lazy partner-JPEG metadata enrichment, in-memory pairing projection, chronological sort |
@@ -97,9 +101,9 @@ truth, created in `LouppeApp` and passed to every view.
 | `Sources/Louppe/Models.swift` | Physical `PhotoFile` records, projected `PhotoItem` groups, ratings/filter models, sidecar codables |
 | `Sources/Louppe/Views/RootView.swift` | Phase switch (welcome/scanning/session), `Color.appBackground` |
 | `Sources/Louppe/Views/WelcomeView.swift` | Start screen + cancellable scanning progress |
-| `Sources/Louppe/Views/SessionView.swift` | Toolbar (incl. sort menu), export sheet, **all single-key hotkeys** (`handleKey`) |
+| `Sources/Louppe/Views/SessionView.swift` | Toolbar (incl. sort menu), export sheet, shared trailing Info panel, **all single-key hotkeys** (`handleKey`) |
 | `Sources/Louppe/Views/FilterView.swift` | Toolbar filter popover: metadata search, date range, subfolder / file-type / camera / lens toggles |
-| `Sources/Louppe/Views/GalleryView.swift` | Gallery layout: Browser / photo / info panel |
+| `Sources/Louppe/Views/GalleryView.swift` | Gallery media layout: Browser / photo |
 | `Sources/Louppe/Views/BrowserView.swift` | Optional vertical thumbnail Browser with day separators |
 | `Sources/Louppe/Views/GridView.swift` | Grid view, day-grouped rows, click-to-rate, rubber-band selection |
 | `Sources/Louppe/Views/MetadataPanel.swift` | Info panel (filename header, photo histogram, camera, exposure row, fields) |
@@ -139,8 +143,28 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   `FileOperationJournal` before their first filesystem change. Recovery must
   verify stable file identity, never overwrite an existing path, never infer
   ownership from a filename alone, and keep unresolved journals retryable.
+  New plan-v3 paths use exact raw filesystem bytes; never normalize them
+  through Swift strings. Export validation and target construction must carry
+  the exact selected destination bytes into the worker. Keep v1/v2 recovery
+  compatibility. Copy's staged checkpoint means the duplicate was fully
+  written, flushed, and source-verified: recovery must preserve staged and
+  completed copies without requiring the source volume to remain mounted, and
+  may publish an identity-verified staged temporary only with an exclusive
+  rename to its exact planned destination. macOS can change a new copy's ctime
+  when it attaches provenance metadata, so operation-created copy identity
+  checks use volume/inode/birth/size/mtime but not ctime; exact source checks
+  still include ctime. A thrown `copyItem` may leave a partial: checkpoint its
+  exact identity before removing it, and never delete an unrecorded partial by
+  pathname. A complete pre-staged temporary may be published only after the
+  exact planned source is revalidated and every byte compares equal.
 - The hotkey map lives in `SessionView.handleKey` and is documented in
   README's shortcut table — keep the two in sync when changing keys.
+- `SessionView`'s local monitor is the sole owner of session Command shortcuts;
+  do not add duplicate menu `.keyboardShortcut` equivalents that bypass its
+  window/focus gates. Review letters remain active after ordinary controls,
+  but keyboard-focused controls keep Space, Tab, Escape, and arrows; editing or
+  selecting text and modal UI keep every key. Preserve VoiceOver, Fn/Globe,
+  Help, and unsupported modifier chords.
 - One background gray everywhere: `Color.appBackground`. Don't introduce
   other panel shades; use `Divider()` lines to separate regions.
 - One accent color everywhere: `Color.louppeAccent`, the brand purple
@@ -170,6 +194,22 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   `ImagePipeline.decodeImage` asks for the fast embedded path first and falls back
   to a full decode when the result is undersized — removing that fallback
   brings back blurry/pixelated previews.
+- **Presentation ID is not content identity**: same-folder rescans deliberately
+  preserve `PhotoItem.id`, and replacements can preserve filenames and mtimes.
+  Media caches and asynchronous thumbnail/full/metadata/histogram/100%-tile/
+  video state must follow `PhotoItem.contentRevision`. The v5 disk cache binds
+  pixels to scan-time physical identity. Identity-bound production items never
+  trust v4/v3 cache bytes; compatibility is limited to items without scanned
+  identity and still requires the cache timestamp to postdate the captured
+  source timestamp.
+- **Grid control drags are not selection drags**: rubber-band hit testing uses
+  the existing tile frames and fixed Rating/Play control regions. Do not add a
+  `GeometryReader` per control, and do not reject native multi-click Button
+  activations—every activation must cycle the rating exactly once.
+- **Grid photo selection must be immediate**: `GridImmediateClickSurface`
+  commits the first mouse-up synchronously and treats only the second click as
+  double-click-to-open. Do not replace it with exclusive single/double SwiftUI
+  tap gestures; they delay selection for the system double-click interval.
 - **100% view identity is persistent**: `GalleryView` must not add
   `.id(item.id)` back to `FullImageView`. The AppKit actual-size viewport stays
   alive across current-item changes so its normalized inspection position can
@@ -188,13 +228,25 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   only missing JPEG metadata off-main; later toggles must reuse it without a
   folder rescan. Different RAW/JPEG ratings form a Mixed item (conservatively
   treated as undecided and protected from rating-based Clean Up) until rating
-  the pair writes one decision to both files. Schema 2 persists one entry per
-  physical file; schema 1 combined entries remain readable.
+  the pair writes one decision to both files. Schema 2 introduced one entry
+  per physical file; current schema 4 also binds each entry to scan-time file
+  identity, while schema 1 combined entries remain readable.
 - **Persistence failures are visible**: a folder sidecar save may fall back to
   the current Application Support snapshot, but failure of both destinations
   must keep the session open and show Retry Saving. Folder/session transitions
   and Quit await a safe result asynchronously. Never restore silent `try?`
   persistence or a main-thread semaphore.
+- **Persistence is bound to one folder and one sidecar lineage**: capture
+  `SourceFolderIdentity` before scanning, recheck it after scanning/read, carry
+  the returned `AccessContext` through every save, and compare the exact raw
+  sidecar revision immediately before replacement. Backups are keyed by stable
+  directory identity and current snapshots use actor-assigned monotonic
+  generations; never fall back to path or `scannedAt` as the current authority.
+  One stable-folder advisory lock must span sidecar and backup revision checks,
+  replacement/fallback, and lineage update; do not split that transaction.
+  The obsolete path-keyed backup is read only when both current locations are
+  absent. Schema 1–3 filename-only ratings require the explicit migration
+  confirmation and must not autosave, close-save, or quit-save before it.
 - **Clean Up has a three-phase boundary**: snapshot on `SessionStore`, file I/O
   in `CleanUpWorker`, apply on `SessionStore`. Do not put `trashItem`/`moveItem`
   loops back on the main actor. While `isCleaningUp`, keep item-index mutations
@@ -203,7 +255,13 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   `activeFileOperation` covers Clean Up, Copy, and Move; it blocks folder
   switching, rescan, undo, update checks/installation, and Quit until the
   worker completes or Copy cancels after rolling back its in-progress pair.
-  Do not add a second independent in-flight flag.
+  That authority also retains the idle-system-sleep assertion; recovery owns
+  it while reconciling. Keep display sleep enabled. Lid-close sleep cannot be
+  blocked, so Copy must retain its bounded same-identity remount wait and may
+  retry only when the operation temporary path is absent. Never retry over or
+  delete an identity-ambiguous partial artifact. An identity-recorded partial
+  may be removed through the journal's two reserved paths. Do not add a second
+  independent in-flight flag.
 - `RootView` owns the persistent window's phase-aware content layout through
   `WindowContentLayout`: Welcome/Scanning use `.fullSizeContentView`, while
   Ready removes it so photos cannot scroll behind the liquid-glass toolbar.
@@ -225,6 +283,9 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
 - If the app ever launches with no window visible, suspect corrupted window
   restoration state: `defaults delete com.alexandermarkin.louppe` and
   `rm -rf ~/Library/Saved\ Application\ State/com.alexandermarkin.louppe.savedState`.
+- Release verification must validate the loose and archived app independently
+  and compare their complete `Contents/` trees; checking only the executable
+  and Info.plist can miss a stale or altered embedded framework/resource.
 
 ## Repo conventions
 

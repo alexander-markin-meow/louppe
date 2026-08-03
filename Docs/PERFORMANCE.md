@@ -11,13 +11,27 @@ snapshots and apply completed results, but potentially slow encoding and file
 operations belong elsewhere:
 
 - `SessionPersistence` is an actor. It serializes JSON encoding, typed
-  sidecar/backup outcomes, schema validation, newest-valid reads, and atomic
-  writes. Save sequence numbers prevent a late older task from replacing a
-  newer snapshot. Folder switching, rescan, and Close Session await a safe
-  result before discarding the live item array. Pairing-mode changes never
+  sidecar/backup outcomes, schema validation, newest-valid reads, and durable
+  atomic writes. `DurableFileIO` flushes each new snapshot, atomically
+  replaces its destination, and flushes the parent directory. Each open
+  session carries a stable volume/inode/birth identity for its source folder
+  plus the SHA-256 revision of the exact raw sidecar bytes that were read.
+  Both are rechecked at the final replacement boundary. Backups and a
+  cross-process advisory lock are keyed by that stable folder identity. The
+  lock spans exact sidecar and backup revision checks, replacement or fallback
+  writing, and local lineage update, so two Louppe processes cannot advance
+  from the same snapshot. Actor-assigned snapshot generations—not wall time—
+  order current sidecar and backup copies. Save sequence numbers prevent a
+  late older task from replacing a newer snapshot. Folder switching, rescan,
+  and Close Session await a safe result before discarding the live item array.
+  Pairing-mode changes never
   discard it: they reproject the discovered physical-file records in memory.
   App termination uses AppKit's asynchronous terminate-later reply, so it can
-  retry/refuse an unsafe Quit without blocking the main actor.
+  retry/refuse an unsafe Quit without blocking the main actor; a dedicated
+  termination barrier rejects mutations after the final snapshot boundary.
+  Rating saves use a 500 ms trailing delay plus a five-second maximum dirty
+  age. While one actor write is slow, repeated maximum-age checkpoints
+  coalesce into one replaceable request for the newest live snapshot.
 - `CleanUpWorker` receives immutable snapshots and uses a fresh `FileManager`
   inside its detached task. Trash and restore roll back RAW+JPEG pairs after a
   partial failure and explicitly warn if rollback itself fails. `SessionStore`
@@ -115,12 +129,23 @@ coalesce into a single update transaction.
 - Actual-size tiles: 128 MiB decoded cost across 1,024 × 1,024 source-pixel
   tiles, including both normal and clipping-warning variants. The lazy source
   recipe is not a whole decoded bitmap.
-- Disk thumbnails: 512 MiB maximum and 90-day maximum age, pruned on the utility
-  queue at startup.
+- Disk thumbnails: 512 MiB maximum and 90-day maximum age. Maintenance runs at
+  most daily on the utility queue after a launch delay, so enumerating a large
+  cache cannot compete with the first Gallery/Grid switch.
 
 Decoded cost is `bytesPerRow × height`. Thumbnail JPEG encoding/writing happens
 after the image is returned to the view. Keep the undersized-embedded-preview
 fallback in `ImagePipeline.decodeImage`; it prevents pixelated JPEG previews.
+An item with scan-time physical identity never reads identity-less v4 or v3
+cache bytes: timestamps alone cannot prove which inode produced them on every
+supported filesystem. The one-time cold v5 migration is intentional, happens
+on the bounded decode queue, and must not block the Grid's first frame. Only an
+older/synthetic item without scanned identity may use the byte-exact v4 cache
+or, for unambiguous ASCII paths, v3; even then its cache timestamp must be at
+least the captured source timestamp. The validated result is atomically
+promoted. A corrupt v5 entry is replaced after a fresh source decode. Keep this
+fail-closed boundary: a same-path replacement must never inherit old pixels,
+even though a cold RAW decode is much slower than a cached JPEG read.
 Neighbour prefetch is debounced by 60 ms, and a new full-image view waits 40 ms
 before enqueuing a decode so key repeat does not flood the bounded queue with
 views that have already disappeared. Fit/phone-size clipping previews share
@@ -151,8 +176,12 @@ warning mode, so toggling never constructs a whole source-resolution bitmap.
 Changing photos or warning mode advances the viewport generation before stale
 tile results can display.
 
-Thumbnail cache keys use each file's modification date captured by
-`FolderScanner`. Do not put a filesystem metadata lookup back in
+Thumbnail cache keys use `PhotoItem.contentRevision`: byte-exact absolute path,
+media kind, size, scan-time physical identity, and captured file timestamps.
+Async thumbnail, full-preview, metadata, histogram, 100% tile, and video state
+must also follow that revision rather than presentation ID alone. A same-folder
+rescan deliberately preserves item IDs, so item ID cannot prove that the bytes
+are unchanged. Do not put a filesystem metadata lookup back in
 `ImagePipeline.cacheKey`: lazy grid cells can be recreated during scrolling,
 and synchronous `stat` calls there block the UI thread. Reappearing thumbnail
 cells also seed directly from the memory cache to avoid placeholder churn.
@@ -170,12 +199,31 @@ the folder nor reopen metadata.
 
 ## Grid scrolling
 
+`SessionView` owns the trailing `MetadataPanel` outside the Gallery/Grid mode
+switch. Both modes therefore share one stable panel, and toggling the view does
+not restart its debounced EXIF and histogram tasks. Keep secondary inspection
+work outside the mutually exclusive media canvases.
+
+`ViewSwitchTests` mounts the real session UI with 106 actual image files,
+multiple day groups, and the current item at the lazy Grid's distant tail. It
+waits for the Grid scroll view and tail thumbnail, then exercises five warm
+Gallery/Grid cycles. Keep those render barriers: timing only a state-enum write
+does not protect the user-visible transition.
+
 The day-grouped Grid view uses sections inside one `LazyVGrid`. Do not nest a
 separate lazy grid for each day inside a `LazyVStack`: off-screen day heights
 become estimates that SwiftUI corrects during upward scrolling and after tile
 resizing, which makes the viewport jump. `gridColumnCount` is deliberately not
 published because it is navigation-only state; publishing it causes a second
 full grid redraw after each layout change.
+
+Grid photo clicks use `GridImmediateClickSurface`, which commits the first
+mouse-up synchronously and interprets `clickCount == 2` only on the second
+click. Do not restore an exclusive single/double SwiftUI `TapGesture` pair:
+the single recognizer waits for the system double-click interval before it can
+update selection. The native surface also forwards the exact event modifiers,
+rejects drags beyond the Grid's eight-point threshold, and returns keyboard
+navigation ownership to the session.
 
 The Browser and Grid install the shared `PersistentVerticalScroller` inside
 their SwiftUI scroll content. It forces AppKit's `.legacy` vertical-scroller
@@ -242,10 +290,47 @@ the session after the user has left the scanning view.
   pairing projections without choosing the RAW rating or losing the JPEG
   rating.
 
-`FolderScanner.pairFiles` sorts file paths and group keys before choosing a
-RAW/JPEG pair, so filesystem enumeration and Dictionary order cannot change
-pair choice between rescans. It folds basename case only on case-insensitive
-volumes; case-sensitive volumes keep case-only names as distinct photos.
+`FolderScanner.pairFiles` sorts byte-exact paths and group keys before
+projection, so filesystem enumeration and Dictionary order cannot change the
+result between rescans. A pair forms only when exactly one RAW and one JPEG
+share the key; every ambiguous group stays separate. Pair keys preserve the
+parent directory and stem as exact filesystem bytes. Only ASCII case is
+folded, and only when the volume explicitly reports case-insensitive names;
+unknown behavior fails closed. Accents, composed/decomposed Unicode spellings,
+non-ASCII case mappings, and separately named parent directories therefore
+cannot collapse into one pair.
+
+Physical file IDs are ASCII percent-encoded relative filesystem paths, not
+decoded Swift paths. That lossless identity continues through projection
+maps, selection, rating sidecars, and image-cache keys. Schema 3 requires the
+`percentEncodedFileSystemPath` marker. Both the reader and writer require each
+schema-3 ID to be the canonical ASCII encoding of a valid filesystem path and
+require every primary and hidden paired-file ID to be globally unique.
+Schema-1/2 entries are read only through a raw UTF-8 legacy index, so
+canonically equivalent Unicode byte spellings remain independent during
+migration; the marker prevents legacy alias fallback from colliding with a
+new literal-percent filename.
+
+Schema 4 additionally stores one stable identity per physical file: volume
+UUID (with a conservative mount/device fallback), inode, size, birth time, and
+nanosecond modification time. A same-path replacement cannot inherit the old
+rating or trigger an automatic overwrite of the saved session. Verified file
+and folder renames retain ratings, missing originals retain dormant entries
+across later saves, and a returning exact file recovers its decision. ctime is
+excluded only from persistence matching because Louppe-owned rename/rollback
+changes it without changing the photographed content; live transaction plans
+refresh and then enforce ctime during each operation. The source directory is
+captured before the walk and rechecked after metadata extraction, after the
+session read, and immediately before the scan is applied. Every scanned file
+is likewise restated after metadata work and once more after persistence I/O.
+
+Schema 1–3 cannot prove that a present filename is still the same physical
+file. If every legacy entry is present, the session is shown behind a modal
+one-time confirmation and no save, close, or quit path may migrate it until
+the photographer chooses **Use Saved Ratings**. Any missing legacy entry still
+blocks migration. Obsolete path-keyed backups are considered only when both
+the sidecar and identity-keyed backup are absent; legacy entries use the same
+confirmation, and schema-4 entries still require a physical identity match.
 Folder traversal has no arbitrary depth cutoff; symbolic-link directories and
 package descendants are skipped explicitly, so deep archives remain complete
 without following loops.
@@ -277,7 +362,7 @@ Restoration uses `mergeRestoredItems` rather than repeated array insertion. It
 is O(n+k), retains survivor ordering, and omits only photos whose Trash files
 could not be restored.
 
-## Durable file-operation journal
+## Process-crash file-operation journal
 
 Copy, Move, Trash, and Trash undo create an immutable plan in
 `~/Library/Application Support/Louppe/Operations/` before their first
@@ -286,11 +371,51 @@ Each file then owns an independent checkpoint under `steps/`; advancing file
 9,000 rewrites only that small record, so journal work remains O(1) per file
 and O(n) for the complete batch.
 
-Every plan captures source/destination paths plus stable volume/device/inode
-identity. Staged and completed checkpoints capture the resulting file's
-identity too. Recovery validates identity before removing or moving anything,
-never overwrites an existing path, and leaves an unresolved journal retryable
-when a volume is disconnected or a same-named replacement is present.
+One exclusive advisory lock covers the Operations root for the full lifetime
+of every worker or recovery pass. A second process cannot inspect or start a
+transaction while the owner is alive; the OS releases the lock on process
+exit. The release bundle also prohibits ordinary multiple app instances, but
+the lock—not that UI declaration—is the correctness boundary. Under that same
+lock, transaction start refuses any older active journal; recovery must finish
+before another worker can begin.
+
+Plan v3 stores the exact filesystem bytes for every source, destination,
+temporary, and resolved Trash path. Recovery reconstructs those bytes without
+normalizing through a Swift string; malformed, relative, noncanonical, or
+mismatched raw paths keep the journal retryable. Plan v1 and v2 remain readable
+for crash recovery. Export preflight resolves symlinks through the same raw
+POSIX boundary and passes that exact selected directory unchanged to Copy or
+Move; target construction must not use Foundation path standardization. Plans
+are decoded fail closed: every path must be absolute and canonical;
+source, destination, and temporary paths must be globally disjoint by exact
+bytes and resolved aliases; no destination/temporary inode may alias a source
+or another operation-owned path; no manipulated path may enter journal
+storage; destination/temporary contracts must match the operation kind; and
+temporary names must belong to the recorded operation and step. Distinct
+source names may intentionally refer to one hard-linked file during Copy. Move,
+Clean Up, and Trash undo reject such a batch before mutation because renaming
+one link changes shared inode metadata and would make its sibling's recovery
+checkpoint ambiguous. An operation-owned path may never exploit any inode
+alias. Mutating operations also reject a single source whose link count is
+greater than one, because a pre-checkpoint Trash destination would not identify
+one unique directory entry. Committed journals are accepted only when their record repeats
+the operation ID and a SHA-256 digest of the immutable raw `plan.json` bytes.
+The exact legacy plan-v1 marker, including an authentic empty committed v1
+plan, remains readable after the stricter plan validation. A listing or
+inspection error is reported as unresolved recovery, never mistaken for an
+empty journal root.
+
+Every plan captures source/destination paths plus stable volume/device/inode,
+size, birth, modification, and status-change identity. Staged and completed
+checkpoints capture the resulting file's identity too. Recovery validates the
+relevant identity before removing or moving anything, never overwrites an
+existing path, and leaves an unresolved journal retryable when a volume is
+disconnected or a source was replaced or rewritten in place. A stable volume
+UUID supersedes remount-sensitive mount paths and device numbers. Exact source
+checks include status-change time. Operation-created copies deliberately do
+not: macOS may attach provenance or other metadata asynchronously after
+`copyItem` returns, changing only ctime while the volume, inode, birth time,
+size, modification time, and file bytes remain the same.
 
 Export files move through operation-owned `.louppe-<operation>-<index>.partial`
 paths before their final rename. This makes both crash positions recoverable:
@@ -301,11 +426,44 @@ checkpoint is written before `trashItem`; if termination happens before the
 returned URL can be recorded, recovery searches the correct volume's Trash by
 device/inode rather than guessing from the filename.
 
+Move currently accepts only destinations on the same known storage volume,
+revalidates the planned source immediately before touching it, and performs
+both transitions with `renamex_np(..., RENAME_EXCL)`. That syscall either
+performs an inode-preserving, non-overwriting rename or fails (including
+`EEXIST`/`EXDEV`); it never silently copies and deletes. Copy remains the path
+for another drive or card.
+Do not re-enable cross-volume Move until it is an explicit
+copy/flush/verify/checkpoint/delete transaction with recovery tests.
+
+`DurableFileIO` enforces the power-loss order: write and sync the immutable
+plan before activation; sync operation-created copies and every affected
+rename/removal directory before advancing a step; then fully sync the
+operation-bound commit record before retiring the journal. A cross-directory
+rename flushes the destination directory before the source directory so a
+power cut prefers two recoverable names over none. A completed journal leaves
+the active namespace through an exclusive `.retired` rename and full root sync
+before bounded housekeeping can recursively remove it. Journal checkpoints
+recapture and compare the exact worker-proven identity before accepting a
+path as operation-owned. Copy/Move duplicate cleanup transfers the candidate
+to the other plan-owned path, repeats byte comparison under fresh ctime-bound
+identities, and only then performs a nonrecursive unlink. Session sidecars
+and backups use the same write -> sync -> atomic replace -> directory-sync
+boundary. If any flush fails after a filesystem side effect, the worker keeps
+the journal and enters conservative recovery instead of claiming success.
+
 `SessionStore` runs recovery off-main before honoring a launch folder request.
 File operations, folder/session mutation, updater installation, and Quit stay
 blocked while it runs. A missing volume or identity conflict keeps the files
 untouched and exposes Retry Recovery. After recovery of an operation that may
-have moved source files, the current folder is rescanned.
+have moved source files, the current folder is rescanned. Copy recovery never
+returns to a destructive pre-export state: identity-verified staged and
+completed copies are kept, and a staged temporary is durably published under
+its planned destination name without requiring the source drive to remain
+mounted.
+Only the real `LouppeApp` entry point opts into automatic launch recovery.
+Test stores default to no automatic recovery and can inject a disposable
+journal directory, preventing test execution from ever reconciling a live
+photographer operation.
 
 ## Export lifecycle
 
@@ -315,21 +473,42 @@ off-main (reusing `ThrottledProgress`), and the main actor applies one result.
 `ExportWorker.makePlan` reserves every destination name first and chooses one
 collision suffix per photo, keeping RAW+JPEG basenames matched. Copy rolls back
 members of a partially failed or cancelled pair; photos completed before a
-cancel remain at the destination. Move uses the same plan and retains its
-source rollback.
+cancel remain at the destination. Once a Copy has been flushed and staged, a
+later source-drive disconnect cannot invalidate it; recovery preserves that
+copy instead of deleting completed work. Move uses the same plan and retains
+its source rollback.
 
 `SessionStore.activeFileOperation` is the only in-flight authority for Clean
 Up, Copy, and Move. It blocks folder switching, rescan, rating/selection
 mutation, undo, Clear All Ratings, conflicting operations, updater
-installation, and Quit. `finishExport` clears it for both modes; after Move it
+installation, and Quit. The same state retains one `ProcessInfo` activity with
+`idleSystemSleepDisabled` for the complete transaction (recovery owns it too),
+so automatic system sleep cannot strand removable-media I/O; display sleep is
+still allowed. Explicit MacBook lid-close sleep cannot be overridden. After
+wake, Copy treats transient missing-device/I/O errors as a remount window: it
+waits up to 60 awake seconds for the exact journal-bound source identity and
+retries once only when no temporary artifact exists. If `copyItem` leaves a
+partial artifact, the worker checkpoints its exact physical identity before
+rollback and removes only that inode through the two reserved plan paths. A
+crash after a complete copy but before the staged checkpoint is reconciled by
+rechecking the planned source identity and comparing every byte; it is then
+published instead of discarded. A legacy partial with no recorded identity
+remains untouched. `finishExport` clears the in-flight state for both modes; after Move it
 also drops fully moved photos by id, clears the now-index-stale undo stack,
 rebuilds derived data, re-applies the filter, and snapshots a save. The modal
 sheet keeps rating and navigation keys away while export runs.
 
 Before the worker starts, `ExportDestinationValidator` rejects the source
 folder and its descendants after resolving symlinks, checks destination write
-permission, and checks available capacity for Copy or a cross-volume Move.
-Same-volume Move is a rename and does not need the full media size free.
+permission, and checks available capacity for Copy. Same-volume Move is a
+rename and does not need the full media size free. Validation returns the
+resolved directory that the worker actually receives, so retargeting the
+folder-picker symlink cannot redirect a later export. The remaining hardening
+step is descriptor-relative source/destination I/O, which would also close the
+smaller race where the resolved directory itself is replaced after preflight.
+The important-usage capacity API's transient zero is treated as ambiguous and
+cross-checked with `statfs`, preventing File Provider-managed destinations from
+being falsely reported as full.
 
 ## Prepared session index
 
@@ -384,8 +563,8 @@ Run after performance-sensitive changes:
 
 1. `./Tests/run_performance_checks.sh` (uses disposable files for a real
    Trash/restore pair round trip and rollback check). In a restricted sandbox,
-   `LOUPPE_SKIP_REAL_TRASH=1` runs the other 55 checks; this is not a substitute
-   for the full 57-check verification before installing a build.
+   `LOUPPE_SKIP_REAL_TRASH=1` runs the other 68 checks; this is not a substitute
+   for the full 71-check verification before installing a build.
 2. `swift build`
 3. `./build_app.sh`
 4. Replace `/Applications/Louppe.app` with `dist/Louppe.app`.

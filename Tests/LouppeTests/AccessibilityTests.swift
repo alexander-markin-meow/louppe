@@ -16,6 +16,24 @@ final class AccessibilityTests: XCTestCase {
         )
     }
 
+    func testUnavailableRatingActionsAreOmittedFromVoiceOver() {
+        XCTAssertEqual(
+            MediaTileAccessibility.ratingActions(canRate: true),
+            [.yes, .no, .clear]
+        )
+        XCTAssertTrue(
+            MediaTileAccessibility.ratingActions(canRate: false).isEmpty
+        )
+        XCTAssertTrue(
+            MediaTileAccessibility.actionHint(canRate: true)
+                .contains("rate")
+        )
+        XCTAssertFalse(
+            MediaTileAccessibility.actionHint(canRate: false)
+                .contains("rate")
+        )
+    }
+
     func testExplicitTileRatingUpdatesPairAndUndoRestoresConflict() {
         let store = SessionStore()
         store.items = [mixedPair()]

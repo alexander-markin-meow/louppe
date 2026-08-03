@@ -9,6 +9,7 @@ mkdir -p .build/performance-checks/module-cache
 swiftc \
     -sdk "$SDK" \
     -module-cache-path .build/performance-checks/module-cache \
+    -D LOUPPE_TESTING \
     -parse-as-library \
     Sources/Louppe/Models.swift \
     Sources/Louppe/PreparedSessionIndex.swift \
@@ -22,6 +23,7 @@ swiftc \
     Sources/Louppe/HighResolutionImagePipeline.swift \
     Sources/Louppe/ZoomViewport.swift \
     Sources/Louppe/VideoPlaybackController.swift \
+    Sources/Louppe/DurableFileIO.swift \
     Sources/Louppe/FileOperationJournal.swift \
     Sources/Louppe/CleanUpWorker.swift \
     Sources/Louppe/ExportWorker.swift \

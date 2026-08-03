@@ -5,7 +5,201 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-07-30
+## 1.7.0 (9) — 2026-08-03
+
+- Simplified the Copy/Move progress dialog by removing the persistent display
+  and MacBook-lid instruction.
+
+- Fixed Copy exports from removable HDDs. A drive disconnect after a file had
+  already copied, flushed, and passed source verification no longer turns that
+  success into a batch-wide rollback. Interrupted Copy recovery now preserves
+  identity-verified staged and completed files—even while the source drive is
+  offline—and durably publishes verified temporary copies at their planned
+  destination. Destination preflight also cross-checks macOS's ambiguous
+  “Zero KB available” result against the underlying filesystem, eliminating
+  false disk-full failures for File Provider-managed folders. Test stores are
+  now isolated from the live Application Support recovery journal by default.
+  Active filesystem transactions prevent automatic system sleep (while still
+  allowing the display to turn off). If a closed MacBook lid forces sleep,
+  Copy now gives the exact same source drive/file up to one minute to remount
+  after wake and retries one untouched file instead of immediately abandoning
+  the batch. Normal macOS metadata such as provenance no longer makes Louppe
+  reject a completed copy after the bytes have arrived. If the completed-copy
+  checkpoint itself was interrupted, recovery verifies the temporary copy
+  byte-for-byte and keeps it; if the copy call genuinely leaves a partial,
+  Louppe records that exact file identity and removes only its own artifact
+  without trapping the app in repeated recovery. Export and recovery notices
+  retain the concrete first I/O failure instead of reducing it to a generic
+  interruption.
+
+- Closed the audit's stop-ship recovery bug. Interrupted Move recovery now
+  verifies the original at its source path before removing any staged file;
+  Copy preserves every verified copy when its source is missing, replaced, or
+  rewritten in place; and Trash rejects same-named replacements. Recovery
+  also uses checkpointed destination identities plus size and nanosecond file
+  timestamps, validates exact operation-owned temporary paths, fails closed
+  on ambiguous duplicates and journal-inspection errors, validates complete
+  plan semantics, rejects every unsafe source/destination/temporary pathname,
+  resolved alias, inode alias, and path inside journal storage, and binds every
+  new committed marker to the exact operation and a SHA-256 digest of the
+  immutable raw plan bytes. Copy safely supports distinct hard-linked source
+  names; Move, Clean Up, and Trash undo reject such batches before mutation
+  because changing one shared inode would make sibling recovery ambiguous.
+  Authentic legacy markers—including empty committed v1 plans—remain
+  recoverable. Deterministic regressions now execute pair rollback, cover the
+  crash before a rollback checkpoint, and detect altered plans and commit
+  records without touching the original.
+
+- Added one exclusive process lock around every Copy, Move, Trash, restore, and
+  launch-recovery transaction, plus a single-instance app declaration. A
+  second Louppe process now leaves the live operation untouched, and a stale
+  journal blocks every new transaction until recovery completes. Move is
+  limited to the same storage volume, revalidates the source immediately, and
+  uses the OS's exclusive rename primitive so it can neither fall back to
+  copy-then-delete nor overwrite a late collision; Copy remains available for
+  exports to another drive or card.
+
+- Upgraded new file-operation journals to plan v3, storing the exact raw
+  filesystem bytes for source, destination, temporary, and resolved Trash
+  paths. Recovery no longer normalizes composed/decomposed Unicode names;
+  malformed raw paths fail closed, while existing v1/v2 journals remain
+  readable. Export validation and Copy/Move also preserve the exact selected
+  destination spelling instead of normalizing it to a different Unicode
+  sibling.
+
+- Bound every mutable file operation to the physical identity captured during
+  scanning. Copy, Move, Trash, restore, and pair rollback now recheck each
+  source immediately before touching it, reconcile thrown-after-effect paths
+  by identity, preserve same-path replacements, stop the remaining batch on
+  ambiguity, and retain a retryable journal. Destination preflight returns the
+  exact symlink-resolved directory used by the worker. Successful app-owned
+  rollbacks refresh the live identity so the next operation works without a
+  rescan, and stable volume UUIDs keep recovery valid across remounts. Journal
+  checkpoints independently verify the exact identity a worker just proved,
+  duplicate cleanup repeats its byte comparison after an exclusive quarantine
+  rename, and mutating operations reject even a single externally hard-linked
+  source whose pre-checkpoint recovery would be ambiguous.
+
+- Added schema-4 physical identities to rating entries. Ratings now follow a
+  verified file or folder rename, dormant entries survive while an original
+  is temporarily missing, and a returning file recovers its decision. A
+  same-named replacement cannot inherit or overwrite the old rating; copied
+  or unrelated relocated sidecars remain blocked unless at least one exact
+  original proves the move. The opened directory is itself bound to stable
+  volume, inode, and birth identity before scanning, after metadata work, and
+  again before applying ratings, so swapping a card or folder at the same path
+  cannot redirect a read or save.
+
+- Added exact session-file conflict detection and monotonic snapshot
+  generations. Louppe compares the raw sidecar bytes it actually read again at
+  the final replacement boundary, leaves external edits untouched, keys
+  backups by physical folder identity, and chooses the newest valid copy by
+  generation instead of wall-clock time. Older path-keyed backups remain
+  available only when no authoritative current copy exists. Filename-only
+  schema 1–3 ratings now require an explicit one-time **Use Saved Ratings**
+  confirmation before migration; Close Folder and Quit preserve the legacy
+  files byte-for-byte, and missing legacy entries remain blocked.
+
+- Serialized session persistence across Louppe processes with one advisory
+  lock keyed by stable folder identity. The lock covers exact sidecar and
+  identity-keyed backup revision checks, replacement or fallback, and lineage
+  update; backup-only saves use the same compare-and-swap boundary. Exact
+  Unicode folder spelling is retained, and an unreadable backup is preserved
+  without preventing an otherwise safe sidecar save. If that unknown backup
+  becomes readable or disappears while a writer waits, the stale save now
+  fails closed instead of tying and outranking a newer backup-only snapshot.
+
+- Added a shared power-loss durability boundary for session snapshots and
+  filesystem transactions. Plans and checkpoints are written and synced
+  before activation, copied media and affected directories are flushed before
+  step advancement, commit records receive a full sync, and sidecars/backups
+  use write-sync-rename-directory-sync ordering. Commit-marker failure now
+  retains the active journal instead of deleting the only recovery evidence.
+  Cross-directory renames flush the new name before the old name, active
+  journals retire through an atomic root-synced rename before recursive
+  housekeeping, and journal/session reads are bounded regular-file reads that
+  refuse leaf symlinks.
+
+- Bounded rating-save latency during continuous culling, coalesced checkpoints
+  behind slow storage, and made same-folder reopen wait for the newest
+  snapshot. Quit now freezes mutating commands before its final snapshot and
+  releases that barrier only when Quit is cancelled. The persistence boundary
+  now rejects a malformed current-schema snapshot before replacing either valid
+  copy, preserves both copies byte-for-byte, and reports that internal
+  inconsistency separately instead of offering a futile save retry. A gated
+  regression proves slow storage automatically flushes the newest deferred
+  rating.
+
+- Made RAW+JPEG pairing fail closed on uncertain filename equality. Pairing
+  now keys exact filesystem bytes per directory, applies only ASCII case
+  folding when a volume explicitly reports case-insensitive names, preserves
+  accents and normalization spellings, treats unknown volume behavior as
+  case-sensitive, and refuses ambiguous one-to-many groups. Byte-exact,
+  percent-encoded file identity now continues through pairing reprojection,
+  selection, ratings, sidecar reload, and image caches. Schema 3 makes that
+  encoding explicit and requires canonical IDs with no primary/paired
+  identity overlap, while legacy sidecars preserve byte-distinct Unicode
+  ratings during migration.
+
+- Scoped every session hotkey and menu action to the focused Louppe session
+  window while keeping the culling workflow independent of button focus.
+  Sheets, popovers, other windows, text editors, selectable metadata,
+  VoiceOver chords, Fn/Globe, Help, and undocumented modifier combinations
+  retain their input. Clicking Rating, View, toolbar, or video controls no
+  longer disables F/D/G or the other review letters, while Space, Tab, Escape,
+  and arrows remain native when a control has keyboard focus. The session
+  monitor is the single owner of session Command shortcuts, so duplicate menu
+  equivalents cannot bypass focus rules; unknown keys are no longer swallowed
+  during file operations.
+
+- Fixed the Grid rating status control so every native activation advances
+  exactly once. Rapid second and third clicks are no longer discarded as
+  accidental double-clicks, dragging from a Rating or Play control no longer
+  starts rubber-band selection, and both Grid and Info rating controls now
+  show a real disabled state whenever the session cannot accept a rating.
+  VoiceOver exposes rating actions only while rating is available.
+
+- Removed the Grid's single-click delay. Clicking a photo now updates the
+  selection immediately on mouse-up instead of waiting for the double-click
+  interval to expire; a second click still opens Gallery. Shift/Command-click,
+  rubber-band selection, Rating/Play controls, and keyboard focus retain their
+  existing behavior.
+
+- Restored instant Gallery/Grid switching after the cache-identity upgrade.
+  The v5 thumbnail namespace binds pixels to scan-time physical identity;
+  production scans deliberately rebuild older identity-less thumbnails once
+  rather than risk showing a same-path replacement. Only legacy items without
+  a scanned identity may promote timestamp-proven v4 or unambiguous ASCII-path
+  v3 entries, and a corrupt v5 entry self-heals from a fresh source decode.
+  Disk pruning runs as delayed daily maintenance rather than competing with
+  launch, per-control Grid geometry probes were removed, and the shared Info
+  panel survives view changes.
+  Thumbnail, preview, EXIF, histogram, 100% tile, and video state now follows a
+  content revision, so replacing a same-named file cannot retain stale media
+  even when its item ID and modification date are unchanged.
+
+- Generation-guarded video end/failure/status callbacks so an old A→B→A
+  playback task cannot poison the replacement item. Starting Copy, Move,
+  Clean Up, or restore now stops playback before any file can move.
+
+- Strengthened release preflight so the loose and archived apps each repeat
+  signature, identity, Sparkle, version, and linkage checks, then compare the
+  complete `Contents/` trees before the archive is accepted.
+
+- Sanitized untrusted photo and video numbers before converting or formatting
+  them. Nonfinite or unrepresentable durations, dimensions, frame rates, EXIF
+  values, shutter reciprocals, and physically nonsensical finite metadata are
+  now omitted safely instead of risking a trap or misleading display.
+
+- Added one shared, truthful empty-session state to Gallery and Grid. Moving
+  every item now points to the intact export destination and never claims the
+  files are in Trash or undoable; Clean Up states limit their undo promise to
+  the current open session. Export and Clean Up actions are disabled when the
+  session has no eligible targets.
+
+- Added a fresh, evidence-backed codebase audit with the verified build,
+  test, performance, and launch baseline plus a prioritized safety,
+  architecture, accessibility, testing, and release-quality improvement plan.
 
 - Split Grid selection from rating: clicking a photo now selects it without
   changing its decision, while a larger clickable status circle cycles
@@ -71,11 +265,11 @@ release bundle.
   stop safely. Export now rejects destinations inside the reviewed folder and
   checks write permission and available space before starting.
 
-- Added crash- and power-loss recovery for Copy, Move, Clean Up, and Clean Up
-  undo. Each file change now has a durable checkpoint tied to the exact volume
-  and file identity. On the next launch Louppe safely removes incomplete copies
-  or restores originals before opening a folder, never overwrites an existing
-  file, and offers Retry Recovery when a drive is unavailable.
+- Added process-crash recovery for Copy, Move, Clean Up, and Clean Up undo.
+  Each file change now has an atomic persistent checkpoint tied to the exact
+  volume and file identity. On the next launch Louppe safely removes incomplete
+  copies or restores originals before opening a folder, never overwrites an
+  existing file, and offers Retry Recovery when a drive is unavailable.
 
 - Adopted Swift 6 language mode with complete concurrency checking. Scanner
   chunk collection, export callbacks, video metadata reads, and playback

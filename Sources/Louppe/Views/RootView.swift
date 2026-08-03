@@ -42,6 +42,7 @@ struct RootView: View {
                 if let warning = store.persistenceWarning {
                     PersistenceWarningBanner(
                         message: warning,
+                        showsRetry: store.canRetryPersistence,
                         retry: store.retryPersistence
                     )
                 }
@@ -96,13 +97,23 @@ struct RootView: View {
     }
 
     private var recoveryTitle: String {
-        store.operationRecoveryReport?.hasUnresolvedFiles == true
+        if store.operationRecoveryReport?.operationLockUnavailable == true {
+            return "Another Louppe copy is active"
+        }
+        return store.operationRecoveryReport?.hasUnresolvedFiles == true
             ? "Some files need attention"
             : "Interrupted operation recovered"
     }
 
     private var recoveryMessage: String {
         guard let report = store.operationRecoveryReport else { return "" }
+        let interruptionPrefix = store.operationRecoveryCause.map {
+            $0.hasSuffix(".") ? "\($0) " : "\($0). "
+        } ?? ""
+        if report.operationLockUnavailable {
+            return "This window left the other copy's file operation untouched. "
+                + "Close the other Louppe copy, then retry recovery here."
+        }
         if report.hasUnresolvedFiles {
             var message = "Louppe recovered everything it could, but left "
                 + "\(report.unresolvedFiles) file"
@@ -112,10 +123,17 @@ struct RootView: View {
             if let detail = report.details.first {
                 message += " \(detail)"
             }
-            return message
+            return interruptionPrefix + message
         }
 
         var actions: [String] = []
+        if report.preservedCopies > 0 {
+            actions.append(
+                "kept \(report.preservedCopies) completed cop"
+                    + (report.preservedCopies == 1 ? "y" : "ies")
+                    + " at the destination"
+            )
+        }
         if report.restoredFiles > 0 {
             actions.append(
                 "restored \(report.restoredFiles) original file"
@@ -129,9 +147,11 @@ struct RootView: View {
             )
         }
         if actions.isEmpty {
-            return "Louppe verified the completed operation and cleared its recovery record. No photo or video was changed."
+            return interruptionPrefix
+                + "Louppe verified the completed operation and cleared its recovery record. No photo or video was changed."
         }
-        return "Louppe \(actions.joined(separator: " and ")). No existing file was overwritten."
+        return interruptionPrefix
+            + "Louppe \(actions.joined(separator: " and ")). No existing file was overwritten."
     }
 }
 
@@ -180,6 +200,7 @@ private struct RecoveryWarningBanner: View {
 /// the backup, and an unsafe save can be retried without dismissing an alert.
 private struct PersistenceWarningBanner: View {
     let message: String
+    let showsRetry: Bool
     let retry: () -> Void
 
     var body: some View {
@@ -192,7 +213,9 @@ private struct PersistenceWarningBanner: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel("Session save warning. \(message)")
             Spacer(minLength: 12)
-            Button("Retry Saving", action: retry)
+            if showsRetry {
+                Button("Retry Saving", action: retry)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)

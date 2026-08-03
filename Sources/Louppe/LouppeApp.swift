@@ -5,7 +5,9 @@ import Sparkle
 @main
 struct LouppeApp: App {
     @NSApplicationDelegateAdaptor(LouppeApplicationDelegate.self) private var appDelegate
-    @StateObject private var store = SessionStore()
+    @StateObject private var store = SessionStore(
+        automaticallyRecoversInterruptedOperations: true
+    )
     private let updaterController: SPUStandardUpdaterController
 
     init() {
@@ -56,61 +58,12 @@ struct LouppeApp: App {
                     store.promptForSourceFolder()
                 }
                 .keyboardShortcut("o")
-                .disabled(store.isFileOperationRunning)
-
-                Button("Rescan Folder") {
-                    store.rescan()
-                }
-                .keyboardShortcut("r")
-                .disabled(store.sourceFolder == nil || store.isFileOperationRunning)
-
-                Button("Close Session") {
-                    store.closeSession()
-                }
-                .disabled(store.sourceFolder == nil || store.isFileOperationRunning)
+                .disabled(
+                    store.isFileOperationRunning
+                        || store.isSessionCommandPresentationActive
+                )
             }
-            CommandGroup(replacing: .undoRedo) {
-                // Undoes ratings and clean-ups alike, so just "Undo".
-                Button("Undo") {
-                    store.undo()
-                }
-                .keyboardShortcut("z")
-                .disabled(store.isFileOperationRunning || !store.canUndo)
-
-                Button("Clear All Ratings") {
-                    store.requestClearAllRatings()
-                }
-                .disabled(store.ratedCount == 0 || store.isFileOperationRunning)
-            }
-            CommandGroup(after: .saveItem) {
-                Button("Export…") {
-                    store.isExportPresented = true
-                }
-                .keyboardShortcut("e")
-                .disabled(store.items.isEmpty || store.isFileOperationRunning)
-
-                Divider()
-
-                // Clean Up asks for confirmation in the session window
-                // (SessionView presents the dialog when pendingCleanUp is set).
-                Menu("Clean Up") {
-                    CleanUpMenuItems(store: store)
-                }
-                .disabled(store.items.isEmpty || store.isFileOperationRunning)
-            }
-            CommandGroup(after: .toolbar) {
-                Button("Zoom In") {
-                    store.zoomGrid(larger: true)
-                }
-                .keyboardShortcut("+")
-                .disabled(store.viewMode != .grid)
-
-                Button("Zoom Out") {
-                    store.zoomGrid(larger: false)
-                }
-                .keyboardShortcut("-")
-                .disabled(store.viewMode != .grid)
-            }
+            FocusedLouppeSessionCommands(store: store)
         }
 
         Settings {
@@ -152,6 +105,109 @@ struct LouppeApp: App {
     }
 }
 
+/// Session commands are available only while Louppe's photo window is the
+/// focused scene. `SessionView` owns their key equivalents because it can prove
+/// the live window and responder context; keeping duplicate equivalents out of
+/// the menu prevents them from bypassing text selection or AppKit's Undo.
+private struct FocusedLouppeSessionCommands: Commands {
+    @ObservedObject var store: SessionStore
+    @FocusedValue(\.louppeSessionStore) private var sceneStore
+
+    private var focusedStore: SessionStore? {
+        guard sceneStore === store else { return nil }
+        return sceneStore
+    }
+
+    private var actionableStore: SessionStore? {
+        guard let focusedStore,
+              !focusedStore.isSessionCommandPresentationActive else {
+            return nil
+        }
+        return focusedStore
+    }
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("Rescan Folder") {
+                actionableStore?.rescan()
+            }
+            .disabled(
+                actionableStore?.sourceFolder == nil
+                    || actionableStore?.isFileOperationRunning != false
+            )
+
+            Button("Close Session") {
+                actionableStore?.closeSession()
+            }
+            .disabled(
+                actionableStore?.sourceFolder == nil
+                    || actionableStore?.isFileOperationRunning != false
+            )
+        }
+
+        CommandGroup(after: .undoRedo) {
+            Button("Undo Louppe Action") {
+                actionableStore?.undo()
+            }
+            .disabled(
+                actionableStore?.isFileOperationRunning != false
+                    || actionableStore?.canUndo != true
+            )
+
+            Button("Clear All Ratings") {
+                actionableStore?.requestClearAllRatings()
+            }
+            .disabled(
+                actionableStore?.ratedCount == 0
+                    || actionableStore?.isFileOperationRunning != false
+            )
+        }
+
+        CommandGroup(after: .saveItem) {
+            Button("Export…") {
+                actionableStore?.presentExport()
+            }
+            .disabled(
+                actionableStore?.canExport != true
+            )
+
+            Divider()
+
+            // Clean Up asks for confirmation in the session window
+            // (SessionView presents the dialog when pendingCleanUp is set).
+            Menu("Clean Up") {
+                CleanUpMenuItems(store: store)
+            }
+            .disabled(
+                actionableStore?.canCleanUp != true
+            )
+        }
+
+        CommandGroup(after: .toolbar) {
+            Button("Zoom In") {
+                actionableStore?.zoomGrid(larger: true)
+            }
+            .disabled(actionableStore?.viewMode != .grid)
+
+            Button("Zoom Out") {
+                actionableStore?.zoomGrid(larger: false)
+            }
+            .disabled(actionableStore?.viewMode != .grid)
+        }
+    }
+}
+
+private struct LouppeSessionStoreFocusedValueKey: FocusedValueKey {
+    typealias Value = SessionStore
+}
+
+extension FocusedValues {
+    var louppeSessionStore: SessionStore? {
+        get { self[LouppeSessionStoreFocusedValueKey.self] }
+        set { self[LouppeSessionStoreFocusedValueKey.self] = newValue }
+    }
+}
+
 /// Keep the process alive until file operations are safe and the newest rating
 /// snapshot reaches stable storage. AppKit's terminate-later handshake avoids
 /// freezing the main thread during the final save.
@@ -189,6 +245,10 @@ private final class LouppeApplicationDelegate: NSObject, NSApplicationDelegate {
         guard let store else { return .terminateNow }
         guard !isPreparingToTerminate else { return .terminateLater }
         isPreparingToTerminate = true
+        // `.terminateLater` leaves AppKit interactive while persistence runs.
+        // Freeze rating/navigation commands before taking the final snapshot
+        // so a last key press cannot land after the data that authorizes Quit.
+        store.beginTerminationPreparation()
         attemptFinalSave(store: store, application: sender)
         return .terminateLater
     }
@@ -208,7 +268,37 @@ private final class LouppeApplicationDelegate: NSObject, NSApplicationDelegate {
                 application.reply(toApplicationShouldTerminate: true)
                 return
             }
+            if result == .rejectedInvalidSnapshot {
+                self.presentInvalidSnapshotFailure(
+                    store: store,
+                    application: application
+                )
+                return
+            }
             self.presentSaveFailure(store: store, application: application)
+        }
+    }
+
+    private func presentInvalidSnapshotFailure(
+        store: SessionStore,
+        application: NSApplication
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Session data failed a safety check"
+        alert.informativeText = "Louppe refused to replace your saved ratings because the new snapshot "
+            + "was internally inconsistent. Cancel Quit and keep this session open; you can quit without "
+            + "saving only if you accept losing the latest in-memory changes."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Cancel Quit")
+        alert.addButton(withTitle: "Quit Without Saving")
+
+        if alert.runModal() == .alertSecondButtonReturn {
+            isPreparingToTerminate = false
+            application.reply(toApplicationShouldTerminate: true)
+        } else {
+            isPreparingToTerminate = false
+            store.cancelTerminationPreparation()
+            application.reply(toApplicationShouldTerminate: false)
         }
     }
 
@@ -233,6 +323,7 @@ private final class LouppeApplicationDelegate: NSObject, NSApplicationDelegate {
             application.reply(toApplicationShouldTerminate: true)
         default:
             isPreparingToTerminate = false
+            store.cancelTerminationPreparation()
             application.reply(toApplicationShouldTerminate: false)
         }
     }

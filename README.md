@@ -74,11 +74,17 @@ histogram, and clipping information. Press **X** to mark clipped areas.
 | **Esc** | Cancel a scan or clear the current selection |
 | **⌘⌫** | Move the selection to the Trash immediately, without a dialog. **⌘Z** restores it |
 
+Letter review shortcuts such as F, D, and G stay active after clicking Rating,
+View, toolbar, or video controls. When a control has keyboard focus, Space,
+Tab, Escape, and the arrow keys remain available to that control. Louppe also
+leaves every shortcut alone while you are editing or selecting text, or
+responding to a dialog, sheet, or popover.
+
 ## Mouse and trackpad
 
-- In Grid, click a photo to select it. Click its status circle to change its
-  rating. Double-click the photo to open it in Gallery. These actions keep the
-  Grid at the same scroll position.
+- In Grid, click a photo to select it immediately. Click its status circle to
+  change its rating. Double-click the photo to open it in Gallery. These
+  actions keep the Grid at the same scroll position.
 - **Shift-click** selects a range. **Command-click** adds or removes one item.
 - Drag across Grid photos to select several of them.
 - In Gallery, double-click a point on a photo to inspect that area at true
@@ -90,18 +96,33 @@ alone, so the main review workflow can be completed with the keyboard.
 ## Keeping your files safe
 
 - Export works with any mix of Yes, No, and Undecided items. It uses
-  **Copy to…** by default; **Move to…** is available.
+  **Copy to…** by default. **Move to…** is available when the destination is
+  on the same storage volume and uses atomic filesystem renames; use Copy for
+  another drive or card.
 - Export checks the destination before starting. A long copy can be stopped
-  safely, and a RAW+JPEG pair never gets left half-copied.
+  safely, and a RAW+JPEG pair never gets left half-copied. Louppe prevents
+  automatic system sleep while files are moving (the display may still turn
+  off). Keep a MacBook lid open until the transfer finishes. If lid-close
+  sleep does happen, Copy waits for the exact same removable source to remount
+  after wake and safely retries an untouched in-progress file once. Completed
+  copies remain at the destination; a failed in-progress temporary is removed
+  only after Louppe verifies that exact physical file belongs to the operation.
 - **Clean Up** sends files to the macOS Trash, never to permanent deletion.
-  It asks for confirmation unless you use **⌘⌫**, and **⌘Z** can restore the
-  whole batch.
+  It asks for confirmation unless you use **⌘⌫**. Immediately afterward,
+  **⌘Z** can restore the whole batch during the open session while the files
+  remain in the Trash. Emptying the Trash deletes them permanently.
 - Matching RAW+JPEG files, if grouped, move or copy together.
-- Louppe keeps a small safety record during file operations. If the app, Mac,
-  or drive stops unexpectedly, Louppe checks the exact files before recovery
-  and never overwrites an existing file.
+- Louppe keeps a small safety record during file operations. If the app is
+  interrupted, Louppe checks the exact files before process-crash recovery and
+  never overwrites an existing file.
 - Ratings are saved automatically in `.louppe_session.json` inside the opened
-  folder, with a local backup when that folder is read-only.
+  folder, with a local backup when that folder is read-only. They follow the
+  verified physical file across a rename, remain saved while a file is
+  temporarily missing, and are never silently applied to a same-named
+  replacement. Louppe also refuses to overwrite a session file changed by
+  another app and will not confuse two cards or folders that later use the
+  same path. The first time an older filename-only session is opened, Louppe
+  asks before binding those saved ratings to the current physical files.
 
 Louppe recognises common camera RAW files, JPEG, TIFF, PNG, HEIC, WebP, AVIF,
 and the photo and video formats supported by macOS. An unsupported file still

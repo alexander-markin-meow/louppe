@@ -134,6 +134,7 @@ private struct BrowserRow: View {
                     showActionTitle: "Show in Gallery",
                     show: onPlainClick,
                     open: onPlainClick,
+                    canRate: store.canRate,
                     rate: { rating in
                         store.rate(rating, at: index)
                     },

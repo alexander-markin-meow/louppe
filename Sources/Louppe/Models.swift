@@ -2,7 +2,7 @@ import Foundation
 
 enum SessionConstants {
     static let sidecarName = ".louppe_session.json"
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 4
     static let supportedSchemaVersions = 1...currentSchemaVersion
 }
 
@@ -82,6 +82,31 @@ private final class PhotoFileRatingStorage: @unchecked Sendable {
     }
 }
 
+/// File operations may temporarily rename an original and then put it back.
+/// That changes its filesystem status timestamp without changing the photo.
+/// Sharing this tiny, locked identity cell lets a background rollback refresh
+/// the live session's safety checkpoint without rebuilding every PhotoItem.
+private final class PhotoFileIdentityStorage: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: FileOperationJournal.FileIdentity?
+
+    init(_ value: FileOperationJournal.FileIdentity?) {
+        self.value = value
+    }
+
+    func snapshot() -> FileOperationJournal.FileIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ value: FileOperationJournal.FileIdentity) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+}
+
 /// One physical media file and everything Louppe learned about it.
 ///
 /// RAW+JPEG pairing is a presentation choice, so the individual files retain
@@ -90,6 +115,9 @@ private final class PhotoFileRatingStorage: @unchecked Sendable {
 /// lightweight record and is enriched only if separate review is requested.
 struct PhotoFile: Identifiable, Sendable {
     let id: String
+    /// Previous human-readable sidecars used the decoded relative path. Keep
+    /// that alias for one-way migration to the byte-exact percent-encoded ID.
+    let legacyPersistenceID: String
     let url: URL
     let displayName: String
     let fileTypeLabel: String
@@ -109,6 +137,12 @@ struct PhotoFile: Identifiable, Sendable {
     let iso: Double?
     let modificationDate: Date?
     let fileSize: Int64
+    /// Physical identity captured during folder scanning. File operations and
+    /// schema-4 rating restore refuse to adopt a same-path replacement.
+    private let identityStorage: PhotoFileIdentityStorage
+    var scannedIdentity: FileOperationJournal.FileIdentity? {
+        identityStorage.snapshot()
+    }
     let searchableText: String
     /// False only for a hidden JPEG partner whose filesystem facts are known
     /// but whose EXIF has deliberately not been opened yet.
@@ -132,6 +166,7 @@ struct PhotoFile: Identifiable, Sendable {
     init(
         id: String,
         url: URL,
+        displayRelativePath: String? = nil,
         captureDate: Date?,
         cameraModel: String?,
         lensModel: String?,
@@ -146,16 +181,20 @@ struct PhotoFile: Identifiable, Sendable {
         videoIsPlayable: Bool = false,
         modificationDate: Date? = nil,
         fileSize: Int64,
+        scannedIdentity: FileOperationJournal.FileIdentity? = nil,
         metadataIsLoaded: Bool = true,
         rating: Rating = .undecided,
         ratedAt: Date? = nil
     ) {
         let displayName = url.lastPathComponent
         let fileTypeLabel = Self.makeFileTypeLabel(url: url, mediaKind: mediaKind)
-        let subfolderPath = (id as NSString).deletingLastPathComponent
+        let legacyPersistenceID = displayRelativePath ?? id
+        let subfolderPath =
+            (legacyPersistenceID as NSString).deletingLastPathComponent
         let subfolder = subfolderPath.isEmpty ? nil : subfolderPath
 
         self.id = id
+        self.legacyPersistenceID = legacyPersistenceID
         self.url = url
         self.displayName = displayName
         self.fileTypeLabel = fileTypeLabel
@@ -175,6 +214,7 @@ struct PhotoFile: Identifiable, Sendable {
         self.iso = iso
         self.modificationDate = modificationDate
         self.fileSize = fileSize
+        self.identityStorage = PhotoFileIdentityStorage(scannedIdentity)
         self.metadataIsLoaded = metadataIsLoaded
         self.ratingStorage = PhotoFileRatingStorage(
             rating: rating,
@@ -191,6 +231,15 @@ struct PhotoFile: Identifiable, Sendable {
 
     func setRating(_ rating: Rating, ratedAt: Date?) {
         ratingStorage.set(rating: rating, ratedAt: ratedAt)
+    }
+
+    /// Refreshes the scan-time checkpoint after a verified Louppe-owned
+    /// rename/rollback. Callers capture first and publish second, so a failed
+    /// stat never erases the last known identity.
+    func refreshScannedIdentityFromDisk() throws {
+        identityStorage.set(
+            try FileOperationJournal.captureIdentity(at: url)
+        )
     }
 
     private static func makeFileTypeLabel(url: URL, mediaKind: MediaKind) -> String {
@@ -217,6 +266,125 @@ enum PhotoItemRatingState: Equatable, Sendable {
         case .no: return .no
         case .undecided, .mixed: return .undecided
         }
+    }
+}
+
+/// Immutable identity of the physical bytes represented by a scanned item.
+///
+/// Relative item IDs intentionally survive a same-folder rescan, so they are
+/// presentation identity rather than content identity. Async media work and
+/// caches use this value instead: a same-path replacement receives a different
+/// revision even when its filename and modification date were preserved.
+struct PhotoContentRevision: Hashable, Sendable {
+    struct Timestamp: Hashable, Sendable {
+        let seconds: Int64
+        let nanoseconds: Int64
+
+        fileprivate init(_ value: FileOperationJournal.FileIdentity.Timestamp) {
+            seconds = value.seconds
+            nanoseconds = value.nanoseconds
+        }
+
+        fileprivate var date: Date {
+            Date(
+                timeIntervalSince1970:
+                    TimeInterval(seconds)
+                    + TimeInterval(nanoseconds) / 1_000_000_000
+            )
+        }
+
+        fileprivate var cacheIdentity: String {
+            "\(seconds):\(nanoseconds)"
+        }
+    }
+
+    struct StableFileIdentity: Hashable, Sendable {
+        let volumeRootPath: String
+        let volumeUUIDString: String?
+        let systemNumber: UInt64
+        let fileNumber: UInt64
+        let logicalSize: Int64?
+        let modificationTime: Timestamp?
+        let statusChangeTime: Timestamp?
+        let birthTime: Timestamp?
+
+        fileprivate init(_ value: FileOperationJournal.FileIdentity) {
+            volumeRootPath = value.volumeRootPath
+            volumeUUIDString = value.volumeUUIDString
+            systemNumber = value.systemNumber
+            fileNumber = value.fileNumber
+            logicalSize = value.logicalSize
+            modificationTime = value.modificationTime.map(Timestamp.init)
+            statusChangeTime = value.statusChangeTime.map(Timestamp.init)
+            birthTime = value.birthTime.map(Timestamp.init)
+        }
+
+        fileprivate var latestSourceTimestamp: Date? {
+            [modificationTime, statusChangeTime, birthTime]
+                .compactMap { $0?.date }
+                .max()
+        }
+
+        fileprivate var cacheIdentity: String {
+            [
+                "root=\(PhotoContentRevision.encode(volumeRootPath))",
+                "uuid=\(PhotoContentRevision.encode(volumeUUIDString))",
+                "system=\(systemNumber)",
+                "file=\(fileNumber)",
+                "size=\(logicalSize.map(String.init) ?? "-")",
+                "mtime=\(modificationTime?.cacheIdentity ?? "-")",
+                "ctime=\(statusChangeTime?.cacheIdentity ?? "-")",
+                "birth=\(birthTime?.cacheIdentity ?? "-")",
+            ].joined(separator: "|")
+        }
+    }
+
+    let pathIdentity: String
+    let modificationTimeBits: UInt64?
+    let fileSize: Int64
+    let mediaKind: MediaKind
+    let stableFileIdentity: StableFileIdentity?
+
+    fileprivate init(
+        pathIdentity: String,
+        modificationDate: Date?,
+        fileSize: Int64,
+        mediaKind: MediaKind,
+        scannedIdentity: FileOperationJournal.FileIdentity?
+    ) {
+        self.pathIdentity = pathIdentity
+        self.modificationTimeBits = modificationDate?
+            .timeIntervalSince1970.bitPattern
+        self.fileSize = fileSize
+        self.mediaKind = mediaKind
+        self.stableFileIdentity = scannedIdentity.map(StableFileIdentity.init)
+    }
+
+    /// Earliest trustworthy creation time for a compatibility thumbnail. A
+    /// cache file older than this scan identity could belong to a replaced file.
+    var compatibilityCacheFloorDate: Date? {
+        if let identityDate = stableFileIdentity?.latestSourceTimestamp {
+            return identityDate
+        }
+        return modificationTimeBits.map {
+            Date(timeIntervalSince1970: TimeInterval(bitPattern: $0))
+        }
+    }
+
+    /// Stable, unambiguous text form used inside the hashed disk-cache key.
+    var cacheIdentity: String {
+        [
+            "path=\(Self.encode(pathIdentity))",
+            "mtime=\(modificationTimeBits.map(String.init) ?? "-")",
+            "size=\(fileSize)",
+            "kind=\(mediaKind.rawValue)",
+            "identity=\(stableFileIdentity?.cacheIdentity ?? "-")",
+        ].joined(separator: "|")
+    }
+
+    private static func encode(_ value: String?) -> String {
+        guard let value else { return "-" }
+        return "\(value.utf8.count):\(value)"
     }
 }
 
@@ -251,6 +419,15 @@ struct PhotoItem: Identifiable, Sendable {
     var primaryModificationDate: Date? { primaryFile.modificationDate }
     var fileSize: Int64 { primaryFile.fileSize }
     var pairedFileSize: Int64 { pairedFile?.fileSize ?? 0 }
+    var contentRevision: PhotoContentRevision {
+        PhotoContentRevision(
+            pathIdentity: primaryURL.path(percentEncoded: true),
+            modificationDate: primaryModificationDate,
+            fileSize: fileSize,
+            mediaKind: mediaKind,
+            scannedIdentity: primaryFile.scannedIdentity
+        )
+    }
     let searchableText: String
 
     var ratingState: PhotoItemRatingState {
@@ -357,6 +534,9 @@ struct PhotoItem: Identifiable, Sendable {
             videoIsPlayable: videoIsPlayable,
             modificationDate: primaryModificationDate,
             fileSize: fileSize,
+            scannedIdentity: try? FileOperationJournal.captureIdentity(
+                at: primaryURL
+            ),
             rating: rating,
             ratedAt: ratedAt
         )
@@ -373,6 +553,9 @@ struct PhotoItem: Identifiable, Sendable {
                 lensModel: nil,
                 modificationDate: nil,
                 fileSize: pairedFileSize,
+                scannedIdentity: try? FileOperationJournal.captureIdentity(
+                    at: pairedURL
+                ),
                 metadataIsLoaded: false,
                 rating: rating,
                 ratedAt: ratedAt
@@ -700,11 +883,7 @@ struct PhotoSort: Equatable, Sendable {
         }
 
         private func roundedDurationBucket(_ value: TimeInterval?) -> Int? {
-            guard let value,
-                  value.isFinite,
-                  value >= 0,
-                  value <= Double(Int.max) else { return nil }
-            return Int(value.rounded())
+            MediaNumeric.roundedNonnegativeInt(value)
         }
     }
     var key: Key = .captureDate
@@ -853,6 +1032,89 @@ struct PhotoGroup: Equatable, Identifiable, Sendable {
     let indices: [Int]
 }
 
+/// Total validation and rounded conversions for untrusted media metadata.
+enum MediaNumeric {
+    private static func finiteValue(
+        _ value: Double?,
+        in range: ClosedRange<Double>
+    ) -> Double? {
+        guard let value, value.isFinite, range.contains(value) else {
+            return nil
+        }
+        return value
+    }
+
+    /// A rounded conversion that cannot trap at the floating-point edges.
+    ///
+    /// `Double(Int.max)` rounds up to 2^63 on 64-bit platforms, so comparing
+    /// against that value before calling `Int(...)` is not sufficient.
+    static func roundedNonnegativeInt(_ value: Double?) -> Int? {
+        guard let value, value.isFinite, value >= 0 else { return nil }
+        return Int(exactly: value.rounded())
+    }
+
+    static func roundedPositiveInt(_ value: Double?) -> Int? {
+        guard let rounded = roundedNonnegativeInt(value),
+              rounded > 0 else { return nil }
+        return rounded
+    }
+
+    // Deliberately generous physical/display limits. They reject corrupt
+    // finite metadata without excluding plausible specialist equipment.
+    static func aperture(_ value: Double?) -> Double? {
+        finiteValue(value, in: 0.1...1_024)
+    }
+
+    static func iso(_ value: Double?) -> Double? {
+        finiteValue(value, in: 1...10_000_000)
+    }
+
+    static func focalLength(_ value: Double?) -> Double? {
+        finiteValue(value, in: 1...100_000)
+    }
+
+    static func frameRate(_ value: Double?) -> Double? {
+        finiteValue(value, in: 0.01...1_000_000)
+    }
+
+    static func exposureCompensation(_ value: Double?) -> Double? {
+        finiteValue(value, in: -100...100)
+    }
+
+    static func latitude(_ value: Double?) -> Double? {
+        finiteValue(value, in: -90...90)
+    }
+
+    static func longitude(_ value: Double?) -> Double? {
+        finiteValue(value, in: -180...180)
+    }
+
+    static func duration(_ value: TimeInterval?) -> TimeInterval? {
+        guard let value,
+              roundedNonnegativeInt(value) != nil else { return nil }
+        return value
+    }
+
+    static func shutterSpeed(_ value: Double?) -> Double? {
+        guard let value = finiteValue(
+            value,
+            in: (1.0 / 1_000_000_000)...86_400
+        ) else { return nil }
+        if value < 1 {
+            guard roundedPositiveInt(1 / value) != nil else { return nil }
+        }
+        return value
+    }
+
+    static func pixelDimension(_ value: CGFloat) -> Int? {
+        guard let value = finiteValue(
+            Double(value),
+            in: 1...1_000_000
+        ) else { return nil }
+        return roundedPositiveInt(value)
+    }
+}
+
 /// EXIF value formatting shared by the filter fields and group headers.
 enum MetadataFormat {
     static func decimal(_ value: Double) -> String {
@@ -862,13 +1124,16 @@ enum MetadataFormat {
     }
 
     static func shutter(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds > 0 else { return "" }
+        guard let seconds = MediaNumeric.shutterSpeed(seconds) else {
+            return ""
+        }
         if seconds >= 1 {
             return "\(decimal(seconds))s"
         }
-        let denominator = (1 / seconds).rounded()
-        if denominator >= 1, abs(seconds - (1 / denominator)) < 0.000_001 {
-            return "1/\(Int(denominator))"
+        guard let denominator = MediaNumeric.roundedPositiveInt(1 / seconds)
+        else { return "" }
+        if abs(seconds - (1 / Double(denominator))) < 0.000_001 {
+            return "1/\(denominator)"
         }
         return "\(decimal(seconds))s"
     }
@@ -1052,13 +1317,261 @@ struct SessionEntry: Codable, Sendable {
     var pairedFilename: String?
     var rating: String
     var ratedAt: Date?
+    /// Required by schema 4. Older sidecars remain readable for one-way
+    /// migration, but current ratings are restored only onto this exact
+    /// scanned physical file rather than whichever file now owns the path.
+    var fileIdentity: FileOperationJournal.FileIdentity? = nil
 }
 
 struct SessionFile: Codable, Sendable {
+    enum FileIDEncoding: String, Codable, Sendable {
+        case percentEncodedFileSystemPath
+    }
+
     var version: Int
     var sourcePath: String
     var scannedAt: Date
     var entries: [SessionEntry]
+    /// Required by schema 3 and newer. Absent in legacy schema-1/2 snapshots
+    /// whose IDs were decoded paths. Keeping the marker optional preserves
+    /// legacy reads while making a downgrade fail safely.
+    var fileIDEncoding: FileIDEncoding? = nil
+    /// Actor-assigned durable ordering for current snapshots. Older sidecars
+    /// omit it and remain readable; once present, this counter is authoritative
+    /// over wall-clock timestamps when choosing between sidecar and backup.
+    var snapshotGeneration: UInt64? = nil
+}
+
+/// Resolves sidecar ratings by byte-exact file ID, with a read-only fallback
+/// for sidecars written before IDs became percent-encoded. New saves always
+/// write the exact ID, so canonically equivalent filenames remain independent.
+struct SessionRatingIndex {
+    struct Value: Equatable {
+        let rating: Rating
+        let ratedAt: Date?
+        let fileIdentity: FileOperationJournal.FileIdentity?
+    }
+
+    struct Match: Equatable {
+        let value: Value
+        /// Exact ID used by the loaded sidecar. It may differ from the live
+        /// file ID when the same verified physical file was renamed.
+        let persistedFileID: String
+        /// Byte spelling used for migration coverage. Swift String equality
+        /// folds NFC/NFD equivalents that can be distinct filesystem names.
+        let persistedFileIDBytes: Data
+    }
+
+    /// A missing sidecar entry and a same-path replacement have very
+    /// different safety consequences. The former is a new file; the latter
+    /// means an existing saved rating belongs to a different physical file
+    /// and the current sidecar must not be rewritten automatically.
+    enum Lookup: Equatable {
+        case absent
+        case match(Match)
+        case identityConflict(Match)
+    }
+
+    private struct PersistedIdentityKey: Hashable {
+        enum Volume: Hashable {
+            case uuid(String)
+            case legacy(root: String, systemNumber: UInt64)
+        }
+
+        let volume: Volume
+        let fileNumber: UInt64
+        let logicalSize: Int64?
+        let modificationSeconds: Int64?
+        let modificationNanoseconds: Int64?
+        let birthSeconds: Int64?
+        let birthNanoseconds: Int64?
+
+        init(_ identity: FileOperationJournal.FileIdentity) {
+            if let uuid = identity.volumeUUIDString {
+                volume = .uuid(uuid)
+            } else {
+                volume = .legacy(
+                    root: identity.volumeRootPath,
+                    systemNumber: identity.systemNumber
+                )
+            }
+            fileNumber = identity.fileNumber
+            logicalSize = identity.logicalSize
+            modificationSeconds = identity.modificationTime?.seconds
+            modificationNanoseconds = identity.modificationTime?.nanoseconds
+            birthSeconds = identity.birthTime?.seconds
+            birthNanoseconds = identity.birthTime?.nanoseconds
+        }
+    }
+
+    private enum IdentityCandidate {
+        case unique(Match)
+        case ambiguous
+    }
+
+    private let exactValuesByFileID: [String: Value]
+    private let legacyValuesByUTF8ID: [Data: Value]
+    private let valuesByPhysicalIdentity: [PersistedIdentityKey: IdentityCandidate]
+    let persistedPhysicalFileIDBytes: Set<Data>
+    private let allowsLegacyAliases: Bool
+    private let requiresPhysicalIdentity: Bool
+
+    init(session: SessionFile) {
+        let usesExactIDs =
+            session.fileIDEncoding == .percentEncodedFileSystemPath
+        var exactValues: [String: Value] = [:]
+        var legacyValues: [Data: Value] = [:]
+        var identityValues: [PersistedIdentityKey: IdentityCandidate] = [:]
+        var physicalFileIDBytes = Set<Data>()
+        for entry in session.entries {
+            let value = Value(
+                rating: Rating(rawValue: entry.rating) ?? .undecided,
+                ratedAt: entry.ratedAt,
+                fileIdentity: entry.fileIdentity
+            )
+            if usesExactIDs {
+                // Exact IDs contain ASCII percent escapes, so Swift's
+                // canonical-equivalent String equality cannot merge them.
+                exactValues[entry.filename] = value
+                if session.version >= 4,
+                   let identity = entry.fileIdentity {
+                    let key = PersistedIdentityKey(identity)
+                    let match = Match(
+                        value: value,
+                        persistedFileID: entry.filename,
+                        persistedFileIDBytes: Data(entry.filename.utf8)
+                    )
+                    if identityValues[key] == nil {
+                        identityValues[key] = .unique(match)
+                    } else {
+                        // Hard-linked or corrupt duplicate identities are
+                        // still safe by exact path, but never drive a rename.
+                        identityValues[key] = .ambiguous
+                    }
+                }
+            } else {
+                // Legacy IDs are decoded paths. Preserve their underlying
+                // UTF-8 spellings: NFC and NFD filenames can coexist on a
+                // normalization-sensitive filesystem and need independent
+                // ratings.
+                legacyValues[Data(entry.filename.utf8)] = value
+            }
+            physicalFileIDBytes.insert(Data(entry.filename.utf8))
+            if let pairedFilename = entry.pairedFilename {
+                let pairedID: String
+                if let separator = entry.filename.lastIndex(of: "/") {
+                    pairedID =
+                        "\(entry.filename[..<separator])/\(pairedFilename)"
+                } else {
+                    pairedID = pairedFilename
+                }
+                if usesExactIDs {
+                    exactValues[pairedID] = value
+                } else {
+                    legacyValues[Data(pairedID.utf8)] = value
+                }
+                physicalFileIDBytes.insert(Data(pairedID.utf8))
+            }
+        }
+        exactValuesByFileID = exactValues
+        legacyValuesByUTF8ID = legacyValues
+        valuesByPhysicalIdentity = identityValues
+        persistedPhysicalFileIDBytes = physicalFileIDBytes
+        allowsLegacyAliases = !usesExactIDs
+        requiresPhysicalIdentity = session.version >= 4
+    }
+
+    func lookup(for file: PhotoFile) -> Lookup {
+        if let exact = exactValuesByFileID[file.id] {
+            guard !requiresPhysicalIdentity else {
+                guard let expected = exact.fileIdentity,
+                      let actual = file.scannedIdentity else {
+                    return .identityConflict(Match(
+                        value: exact,
+                        persistedFileID: file.id,
+                        persistedFileIDBytes: Data(file.id.utf8)
+                    ))
+                }
+                if Self.persistedIdentityMatches(
+                        expected: expected,
+                        actual: actual
+                ) {
+                    return .match(Match(
+                        value: exact,
+                        persistedFileID: file.id,
+                        persistedFileIDBytes: Data(file.id.utf8)
+                    ))
+                }
+                if let renamed = identityMatch(for: actual),
+                   renamed.persistedFileID != file.id {
+                    return .match(renamed)
+                }
+                return .identityConflict(Match(
+                    value: exact,
+                    persistedFileID: file.id,
+                    persistedFileIDBytes: Data(file.id.utf8)
+                ))
+            }
+            return .match(Match(
+                value: exact,
+                persistedFileID: file.id,
+                persistedFileIDBytes: Data(file.id.utf8)
+            ))
+        }
+        if requiresPhysicalIdentity,
+           let actual = file.scannedIdentity,
+           let renamed = identityMatch(for: actual) {
+            return .match(renamed)
+        }
+        guard allowsLegacyAliases,
+              let legacy = legacyValuesByUTF8ID[
+                Data(file.legacyPersistenceID.utf8)
+              ] else { return .absent }
+        return .match(Match(
+            value: legacy,
+            persistedFileID: file.legacyPersistenceID,
+            persistedFileIDBytes: Data(file.legacyPersistenceID.utf8)
+        ))
+    }
+
+    func value(for file: PhotoFile) -> Value? {
+        guard case .match(let match) = lookup(for: file) else { return nil }
+        return match.value
+    }
+
+    private func identityMatch(
+        for identity: FileOperationJournal.FileIdentity
+    ) -> Match? {
+        guard case .unique(let match) = valuesByPhysicalIdentity[
+            PersistedIdentityKey(identity)
+        ] else {
+            return nil
+        }
+        return match
+    }
+
+    /// Persistence follows content identity across remounts. A stable volume
+    /// UUID supersedes the transient mount path and device number; filesystems
+    /// without one retain the conservative legacy volume checks. ctime is
+    /// deliberately ignored because moving a file can change it without
+    /// changing the photographed content.
+    static func persistedIdentityMatches(
+        expected: FileOperationJournal.FileIdentity,
+        actual: FileOperationJournal.FileIdentity
+    ) -> Bool {
+        let sameVolume: Bool
+        if let expectedUUID = expected.volumeUUIDString {
+            sameVolume = actual.volumeUUIDString == expectedUUID
+        } else {
+            sameVolume = actual.volumeRootPath == expected.volumeRootPath
+                && actual.systemNumber == expected.systemNumber
+        }
+        return sameVolume
+            && actual.fileNumber == expected.fileNumber
+            && actual.logicalSize == expected.logicalSize
+            && actual.modificationTime == expected.modificationTime
+            && actual.birthTime == expected.birthTime
+    }
 }
 
 struct CleanUpProgress: Sendable {

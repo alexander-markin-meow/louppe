@@ -88,7 +88,8 @@ struct ExportView: View {
                             store.finishExport(
                                 mode: $0,
                                 movedIDs: $1,
-                                requiresRecovery: $2
+                                requiresRecovery: $2,
+                                interruptionMessage: $3
                             )
                         }
                     )
@@ -201,14 +202,26 @@ struct ExportView: View {
     }
 
     private func finishedTitle(for outcome: ExportManager.Outcome) -> String {
-        if outcome.recoveryRequired { return "Restoring files for safety" }
+        if outcome.recoveryRequired {
+            return outcome.mode == .copy
+                ? "Securing copied files"
+                : "Restoring files for safety"
+        }
         if outcome.cancelled { return "Copy stopped" }
         return outcome.isClean ? "Export complete" : "Export finished with problems"
     }
 
     private func finishedMessage(for outcome: ExportManager.Outcome) -> String {
         if outcome.recoveryRequired {
-            return "Louppe kept a durable record of the interrupted operation and is returning every affected file to its safe source state. Wait for the recovery notice before starting another file operation."
+            let cause = outcome.failureMessage.map {
+                $0.hasSuffix(".") ? "\($0) " : "\($0). "
+            } ?? ""
+            if outcome.mode == .copy {
+                return cause
+                    + "Louppe kept a durable record of the interrupted copy and is preserving every verified completed file while checking the unfinished transfer. Wait for the recovery notice before starting another file operation."
+            }
+            return cause
+                + "Louppe kept a durable record of the interrupted move and is returning every affected original to its safe source state. Wait for the recovery notice before starting another file operation."
         }
         let verb = outcome.mode == .copy ? "copied" : "moved"
         var text = "\(outcome.files) file\(outcome.files == 1 ? "" : "s") \(verb) to \(outcome.destination.lastPathComponent)"
@@ -236,7 +249,10 @@ struct ExportView: View {
             }
         }
         if outcome.journalFailure {
-            text += " Louppe couldn't finish its recovery checkpoint, so the affected photo was rolled back and no further file was started."
+            text += " Louppe's file-safety checks stopped the operation before another file was started; affected originals remain at their last verified location."
+        }
+        if let failure = outcome.failureMessage {
+            text += failure.hasSuffix(".") ? " \(failure)" : " \(failure)."
         }
         return text
     }

@@ -37,6 +37,7 @@ final class VideoPlaybackController: ObservableObject {
     let player = AVPlayer()
 
     @Published private(set) var itemID: String?
+    @Published private(set) var contentRevision: PhotoContentRevision?
     @Published private(set) var isPlaying = false
     @Published private(set) var errorMessage: String?
 
@@ -44,6 +45,11 @@ final class VideoPlaybackController: ObservableObject {
     private let failureObserver = NotificationObserverBox()
     private var timeControlObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
+    /// A content revision can recur after A → B → A navigation. Advancing a
+    /// separate generation prevents a Task queued by the first A player item
+    /// from mutating the replacement A item when it eventually reaches the
+    /// main actor.
+    private var playbackGeneration: UInt64 = 0
 
     init() {
         player.actionAtItemEnd = .pause
@@ -61,9 +67,12 @@ final class VideoPlaybackController: ObservableObject {
 
     func prepare(_ item: PhotoItem) {
         guard item.isVideo else { return }
-        if itemID == item.id, player.currentItem != nil { return }
+        let requestedRevision = item.contentRevision
+        if contentRevision == requestedRevision,
+           player.currentItem != nil { return }
         stop()
         itemID = item.id
+        contentRevision = requestedRevision
         errorMessage = nil
         guard item.videoIsPlayable else {
             errorMessage = "This video's format or codec isn't supported by macOS."
@@ -72,7 +81,11 @@ final class VideoPlaybackController: ObservableObject {
 
         let playerItem = AVPlayerItem(url: item.primaryURL)
         player.replaceCurrentItem(with: playerItem)
-        observe(playerItem, itemID: item.id)
+        observe(
+            playerItem,
+            contentRevision: requestedRevision,
+            generation: playbackGeneration
+        )
     }
 
     func toggle(_ item: PhotoItem) {
@@ -97,18 +110,28 @@ final class VideoPlaybackController: ObservableObject {
     }
 
     func stop() {
+        playbackGeneration &+= 1
         pause()
         removeObservers()
         player.replaceCurrentItem(with: nil)
         itemID = nil
+        contentRevision = nil
         errorMessage = nil
     }
 
     func isActive(_ item: PhotoItem) -> Bool {
-        itemID == item.id && player.currentItem != nil
+        represents(item) && player.currentItem != nil
     }
 
-    private func observe(_ playerItem: AVPlayerItem, itemID observedID: String) {
+    func represents(_ item: PhotoItem) -> Bool {
+        itemID == item.id && contentRevision == item.contentRevision
+    }
+
+    private func observe(
+        _ playerItem: AVPlayerItem,
+        contentRevision observedRevision: PhotoContentRevision,
+        generation observedGeneration: UInt64
+    ) {
         removeObservers()
         endObserver.replace(with: NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -116,7 +139,8 @@ final class VideoPlaybackController: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard self?.itemID == observedID else { return }
+                guard self?.playbackGeneration == observedGeneration,
+                      self?.contentRevision == observedRevision else { return }
                 self?.isPlaying = false
             }
         })
@@ -127,7 +151,8 @@ final class VideoPlaybackController: ObservableObject {
         ) { [weak self] notification in
             let message = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
             Task { @MainActor in
-                guard self?.itemID == observedID else { return }
+                guard self?.playbackGeneration == observedGeneration,
+                      self?.contentRevision == observedRevision else { return }
                 self?.isPlaying = false
                 self?.errorMessage = message ?? "The video couldn't be played."
             }
@@ -136,7 +161,8 @@ final class VideoPlaybackController: ObservableObject {
             guard item.status == .failed else { return }
             let message = item.error?.localizedDescription ?? "The video couldn't be played."
             Task { @MainActor in
-                guard self?.itemID == observedID else { return }
+                guard self?.playbackGeneration == observedGeneration,
+                      self?.contentRevision == observedRevision else { return }
                 self?.isPlaying = false
                 self?.errorMessage = message
             }

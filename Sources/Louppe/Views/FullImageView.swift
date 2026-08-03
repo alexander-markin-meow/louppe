@@ -23,10 +23,11 @@ struct FullImageView: View {
     /// decode runs, so switching photos never flashes an empty pane.
     @State private var preview: NSImage?
     @State private var failedToLoad = false
-    @State private var loadedItemID: String
+    @State private var imageRevision: PhotoContentRevision
+    @State private var clippingRevision: PhotoContentRevision
 
     private struct ClippingLoadID: Hashable {
-        let itemID: String
+        let contentRevision: PhotoContentRevision
         let isEnabled: Bool
     }
 
@@ -46,7 +47,9 @@ struct FullImageView: View {
         self.onZoomToActual = onZoomToActual
         self.onZoomToFit = onZoomToFit
         self.onLoading = onLoading
-        self._loadedItemID = State(initialValue: item.id)
+        let revision = item.contentRevision
+        self._imageRevision = State(initialValue: revision)
+        self._clippingRevision = State(initialValue: revision)
         // Seed from the in-memory caches — synchronous dictionary lookups,
         // nothing is decoded here. Prefetched neighbours appear instantly at
         // full quality; anything else starts from its thumbnail.
@@ -62,13 +65,14 @@ struct FullImageView: View {
     }
 
     var body: some View {
-        let displayedImage = loadedItemID == item.id
+        let contentRevision = item.contentRevision
+        let displayedImage = imageRevision == contentRevision
             ? image
             : ImagePipeline.shared.cachedFullImage(for: item)
-        let displayedPreview = loadedItemID == item.id
+        let displayedPreview = imageRevision == contentRevision
             ? preview
             : ImagePipeline.shared.cachedThumbnail(for: item)
-        let displayedClippingImage = loadedItemID == item.id
+        let displayedClippingImage = clippingRevision == contentRevision
             ? clippingImage
             : ClippingPreviewPipeline.shared.cachedImage(for: item)
         let presentationImage = showsClippingWarnings
@@ -84,6 +88,7 @@ struct FullImageView: View {
                     systemImage: "doc.questionmark",
                     description: Text("Louppe can't preview \(item.fileTypeLabel) files yet. You can still rate it — \(item.displayName)")
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 switch zoomMode {
                 case .actual:
@@ -111,12 +116,13 @@ struct FullImageView: View {
                         )
                     }
                 case .fit, .small:
-                    if loadedItemID == item.id, failedToLoad {
+                    if imageRevision == contentRevision, failedToLoad {
                         ContentUnavailableView(
                             "Can't preview this photo",
                             systemImage: "exclamationmark.triangle",
                             description: Text("The file may be corrupt or unreadable. You can still rate it — \(item.displayName)")
                         )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if let presentationPreview {
                         // Blurry-but-instant stand-in; the full decode replaces it.
                         ZoomableFittedImage(
@@ -134,20 +140,18 @@ struct FullImageView: View {
                 }
             }
         }
-        .task(id: item.id) {
+        .task(id: contentRevision) {
             let requestedItem = item
+            let requestedRevision = requestedItem.contentRevision
             let cachedFull = ImagePipeline.shared.cachedFullImage(
                 for: requestedItem
             )
             image = cachedFull
-            clippingImage = ClippingPreviewPipeline.shared.cachedImage(
-                for: requestedItem
-            )
             preview = cachedFull == nil
                 ? ImagePipeline.shared.cachedThumbnail(for: requestedItem)
                 : nil
             failedToLoad = false
-            loadedItemID = requestedItem.id
+            imageRevision = requestedRevision
             guard requestedItem.isSupported, cachedFull == nil else { return }
 
             // Key repeat can create and cancel several view tasks in a few
@@ -155,7 +159,7 @@ struct FullImageView: View {
             try? await Task.sleep(
                 nanoseconds: Self.navigationDebounceNanoseconds
             )
-            guard !Task.isCancelled, loadedItemID == requestedItem.id
+            guard !Task.isCancelled, imageRevision == requestedRevision
             else { return }
             onLoading(true)
             defer { onLoading(false) }
@@ -167,27 +171,29 @@ struct FullImageView: View {
                    for: requestedItem
                ),
                !Task.isCancelled,
-               loadedItemID == requestedItem.id,
+               imageRevision == requestedRevision,
                image == nil {
                 preview = thumb
             }
             let loaded = await full
-            guard !Task.isCancelled, loadedItemID == requestedItem.id
+            guard !Task.isCancelled, imageRevision == requestedRevision
             else { return }
             image = loaded
             failedToLoad = (loaded == nil)
         }
         .task(
             id: ClippingLoadID(
-                itemID: item.id,
+                contentRevision: contentRevision,
                 isEnabled: showsClippingWarnings
             )
         ) {
             let requestedItem = item
+            let requestedRevision = requestedItem.contentRevision
             let cached = ClippingPreviewPipeline.shared.cachedImage(
                 for: requestedItem
             )
             clippingImage = cached
+            clippingRevision = requestedRevision
             guard showsClippingWarnings,
                   requestedItem.mediaKind == .photo,
                   requestedItem.isSupported,
@@ -200,14 +206,14 @@ struct FullImageView: View {
                 nanoseconds: Self.navigationDebounceNanoseconds
             )
             guard !Task.isCancelled,
-                  loadedItemID == requestedItem.id else { return }
+                  clippingRevision == requestedRevision else { return }
             onLoading(true)
             defer { onLoading(false) }
             let loaded = await ClippingPreviewPipeline.shared.image(
                 for: requestedItem
             )
             guard !Task.isCancelled,
-                  loadedItemID == requestedItem.id else { return }
+                  clippingRevision == requestedRevision else { return }
             clippingImage = loaded
         }
     }
