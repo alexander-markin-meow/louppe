@@ -34,6 +34,23 @@ final class HistogramTests: XCTestCase {
         XCTAssertTrue(HistogramAnalysis.isHighPercentage(61))
     }
 
+    func testAnalysisIgnoresFullyTransparentPixels() throws {
+        let image = try makeImage([
+            (0, 0, 0, 0),
+            (128, 128, 128, 255),
+            (0, 0, 0, 0),
+        ])
+        let analysis = try XCTUnwrap(
+            ClippingWarningProcessor.analyze(image)
+        )
+
+        XCTAssertEqual(analysis.sampleCount, 1)
+        XCTAssertEqual(analysis.bins[0], 0)
+        XCTAssertEqual(analysis.bins[128], 1)
+        XCTAssertEqual(analysis.shadowCount, 0)
+        XCTAssertEqual(analysis.highlightCount, 0)
+    }
+
     func testOverlayMarksWarningsRedAndLeavesMidtonesUntouched() throws {
         let image = try makeImage([
             (0, 0, 0),
@@ -77,7 +94,13 @@ final class HistogramTests: XCTestCase {
     private func makeImage(
         _ pixels: [(UInt8, UInt8, UInt8)]
     ) throws -> CGImage {
-        let bytes = pixels.flatMap { [$0.0, $0.1, $0.2, UInt8(255)] }
+        try makeImage(pixels.map { ($0.0, $0.1, $0.2, UInt8(255)) })
+    }
+
+    private func makeImage(
+        _ pixels: [(UInt8, UInt8, UInt8, UInt8)]
+    ) throws -> CGImage {
+        let bytes = pixels.flatMap { [$0.0, $0.1, $0.2, $0.3] }
         let provider = try XCTUnwrap(
             CGDataProvider(data: Data(bytes) as CFData)
         )

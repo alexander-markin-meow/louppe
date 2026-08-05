@@ -183,8 +183,10 @@ nothing in either mode, and S retains its centered reset behavior.
 
 Clipping warnings use the same 8-bit sRGB luminance thresholds as the Info
 panel histogram: 0–5 for shadows and 250–255 for highlights. Fit and
-phone-size modes reuse a bounded 4,096-pixel warning preview. At 100%, the
-threshold is applied inside the existing two-operation tile lane, keyed by
+phone-size modes reuse a bounded 4,096-pixel warning preview. Fully
+transparent pixels are excluded from histogram totals rather than counted as
+black. At 100%, the threshold is applied inside the existing two-operation
+tile lane, keyed by
 warning mode, so toggling never constructs a whole source-resolution bitmap.
 Changing photos or warning mode advances the viewport generation before stale
 tile results can display.

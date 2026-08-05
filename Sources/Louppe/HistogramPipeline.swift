@@ -56,6 +56,7 @@ enum ClippingWarningProcessor {
     static func analyze(_ image: CGImage) -> HistogramAnalysis? {
         guard let buffer = rgbaBuffer(for: image) else { return nil }
         var bins = Array(repeating: 0, count: 256)
+        var sampleCount = 0
         var shadowCount = 0
         var highlightCount = 0
         let pixelCount = buffer.width * buffer.height
@@ -65,11 +66,13 @@ enum ClippingWarningProcessor {
             else { return }
             for pixel in 0..<pixelCount {
                 let offset = pixel * 4
+                guard bytes[offset + 3] > 0 else { continue }
                 let value = luminance(
                     red: bytes[offset],
                     green: bytes[offset + 1],
                     blue: bytes[offset + 2]
                 )
+                sampleCount += 1
                 bins[Int(value)] += 1
                 if value <= HistogramAnalysis.nearBlackUpperBound {
                     shadowCount += 1
@@ -82,7 +85,7 @@ enum ClippingWarningProcessor {
 
         return HistogramAnalysis(
             bins: bins,
-            sampleCount: pixelCount,
+            sampleCount: sampleCount,
             shadowCount: shadowCount,
             highlightCount: highlightCount
         )

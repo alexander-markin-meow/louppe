@@ -13,6 +13,8 @@ photos to the macOS Trash. It never permanently deletes a file.
 
 macOS 14 or newer.
 
+Learn more at [louppe.eu](https://louppe.eu).
+
 ## Download
 
 Download `Louppe.zip` from the

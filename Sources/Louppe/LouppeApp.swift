@@ -87,6 +87,10 @@ struct LouppeApp: App {
         credits.append(NSAttributedString(
             string: "Fast photo and video culling for photographers.\n\n", attributes: base))
 
+        link[.link] = URL(string: "https://louppe.eu")!
+        credits.append(NSAttributedString(string: "louppe.eu", attributes: link))
+        credits.append(NSAttributedString(string: "\n", attributes: base))
+
         link[.link] = URL(string: "https://github.com/alexander-markin-meow/louppe/releases")!
         credits.append(NSAttributedString(string: "Version History", attributes: link))
         credits.append(NSAttributedString(string: "\n\n", attributes: base))

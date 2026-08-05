@@ -7,6 +7,10 @@ release bundle.
 
 ## 1.7.0 (9) — 2026-08-05
 
+- Added [louppe.eu](https://louppe.eu) to the About panel and README. PNG
+  histograms now exclude fully transparent pixels instead of treating them as
+  black.
+
 - Established the audited parser foundation for future XMP interoperability.
   A pinned Adobe XMPCore Objective-C++/Swift bridge now round-trips synthetic
   Lightroom Classic, Bridge, Capture One, darktable, and universal packets
