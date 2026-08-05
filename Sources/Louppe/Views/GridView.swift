@@ -291,29 +291,35 @@ private struct GridCell: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
 
-                    GridImmediateClickSurface(
-                        onSingleClick: actions.selectPhoto,
-                        onDoubleClick: actions.openInGallery
-                    )
-                        .mediaTileAccessibility(
-                            item: item,
-                            isCurrent: index == store.currentIndex,
-                            isSelected: store.selectedIndices.contains(index),
-                            showActionTitle: "Make Current",
-                            show: {
-                                actions.makeCurrent()
-                            },
-                            open: {
-                                actions.openInGallery()
-                            },
-                            canRate: store.canRate,
-                            rate: { rating in
-                                store.rate(rating, at: index)
-                            },
-                            toggleSelection: {
-                                store.toggleSelection(of: index)
-                            }
-                        )
+                    // A representable has a 100x100 default ideal size. Keep
+                    // it in an overlay so it receives the media square's real
+                    // size without participating in the Grid cell's layout.
+                    Color.clear
+                        .overlay {
+                            GridImmediateClickSurface(
+                                onSingleClick: actions.selectPhoto,
+                                onDoubleClick: actions.openInGallery
+                            )
+                            .mediaTileAccessibility(
+                                item: item,
+                                isCurrent: index == store.currentIndex,
+                                isSelected: store.selectedIndices.contains(index),
+                                showActionTitle: "Make Current",
+                                show: {
+                                    actions.makeCurrent()
+                                },
+                                open: {
+                                    actions.openInGallery()
+                                },
+                                canRate: store.canRate,
+                                rate: { rating in
+                                    store.rate(rating, at: index)
+                                },
+                                toggleSelection: {
+                                    store.toggleSelection(of: index)
+                                }
+                            )
+                        }
 
                     if item.isVideo, item.videoIsPlayable {
                         Button {
@@ -366,23 +372,25 @@ private struct GridCell: View {
                         )
                     )
                 }
+                .frame(maxWidth: .infinity)
                 .aspectRatio(1, contentMode: .fit)
 
-                ZStack {
-                    Text(item.displayName)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .accessibilityHidden(true)
-
-                    GridImmediateClickSurface(
-                        onSingleClick: actions.selectPhoto,
-                        onDoubleClick: actions.openInGallery
-                    )
+                Text(item.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity)
                     .accessibilityHidden(true)
-                }
+                    .overlay {
+                        GridImmediateClickSurface(
+                            onSingleClick: actions.selectPhoto,
+                            onDoubleClick: actions.openInGallery
+                        )
+                        .accessibilityHidden(true)
+                    }
             }
+            .frame(maxWidth: .infinity)
         }
     }
 }

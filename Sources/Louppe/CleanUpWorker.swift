@@ -131,13 +131,14 @@ enum CleanUpWorker {
                         try writer.requireUnchangedSource(at: fileIndex)
                         trashCallAttempted = true
                         try fm.trashItem(at: url, resultingItemURL: &trashURL)
-                        if let landed = trashURL as URL? {
-                            try DurableFileIO.syncRenameDirectories(
-                                from: url,
-                                to: landed,
-                                fullSync: true
-                            )
-                        }
+                        // `trashItem` owns the destination inside macOS's
+                        // protected .Trash/.Trashes container. That directory
+                        // can reject a direct open/fsync even though the system
+                        // move succeeded. Persist the directory-entry removal
+                        // on the ordinary photo-folder side; the returned URL,
+                        // exact identity, and following journal checkpoint bind
+                        // the Trash result without opening its parent.
+                        try syncPhotoDirectory(containing: url)
                     } catch {
                         if let landed = trashURL as URL?,
                            fm.fileExists(atPath: landed.path),
@@ -374,11 +375,10 @@ enum CleanUpWorker {
                             from: file.trash,
                             to: file.original
                         )
-                        try DurableFileIO.syncRenameDirectories(
-                            from: file.trash,
-                            to: file.original,
-                            fullSync: true
-                        )
+                        // The Trash container is system-protected. Sync the
+                        // restored photo's ordinary destination directory, then
+                        // prove its exact identity before checkpointing.
+                        try syncPhotoDirectory(containing: file.original)
                         try writer.requirePlannedIdentity(
                             at: fileIndex,
                             fileURL: file.original
@@ -440,27 +440,18 @@ enum CleanUpWorker {
             if attempted < photo.files.count { reporter.advance(by: photo.files.count - attempted) }
 
             if failed {
-                // Put a partially restored pair back exactly where it came from.
-                var rollbackFailed = false
-                for entry in restoredFiles.reversed() {
-                    if !rollbackRestoredFile(
-                        entry.file,
-                        fileManager: fm
-                    ) {
-                        rollbackFailed = true
-                        continue
-                    }
-                    do {
-                        try writer.mark(.rolledBack, fileAt: entry.index)
-                    } catch {
-                        journalFailure = true
-                    }
-                }
+                // Never move a successfully restored original back into the
+                // privacy-protected Trash. Louppe cannot durably sync that
+                // destination directory, so a power loss after syncing only
+                // the removed source name could leave no durable name at all.
+                // Keep the restored member, retain the journal, and let the
+                // session rescan/report the partial undo without risking data.
+                let partialRestore = !restoredFiles.isEmpty
                 lostPhotos += 1
-                if mutationAmbiguous || rollbackFailed {
+                if mutationAmbiguous || partialRestore {
                     inconsistentPhotos += 1
                 }
-                if mutationAmbiguous || rollbackFailed || journalFailure {
+                if mutationAmbiguous || partialRestore || journalFailure {
                     lostPhotos += orderedPhotos.count - photoOffset - 1
                     break photoLoop
                 }
@@ -558,11 +549,7 @@ enum CleanUpWorker {
                 from: file.trash,
                 to: file.original
             )
-            try DurableFileIO.syncRenameDirectories(
-                from: file.trash,
-                to: file.original,
-                fullSync: true
-            )
+            try syncPhotoDirectory(containing: file.original)
             try FileOperationJournal.requireIdentity(
                 identity,
                 at: file.original
@@ -573,37 +560,16 @@ enum CleanUpWorker {
         }
     }
 
-    private static func rollbackRestoredFile(
-        _ file: TrashedFile,
-        fileManager: FileManager
-    ) -> Bool {
-        guard let identity = file.identity,
-              fileManager.fileExists(atPath: file.original.path),
-              !fileManager.fileExists(atPath: file.trash.path),
-              (try? FileOperationJournal.requireIdentity(
-                identity,
-                at: file.original
-              )) != nil else {
-            return false
-        }
-        do {
-            try ExportWorker.atomicExclusiveRename(
-                from: file.original,
-                to: file.trash
-            )
-            try DurableFileIO.syncRenameDirectories(
-                from: file.original,
-                to: file.trash,
-                fullSync: true
-            )
-            try FileOperationJournal.requireIdentity(
-                identity,
-                at: file.trash
-            )
-            return !fileManager.fileExists(atPath: file.original.path)
-        } catch {
-            return false
-        }
+    /// macOS performs Trash moves through a protected system-managed
+    /// directory. Louppe may stat a returned Trash item to bind its exact
+    /// identity, but it must not require opening the Trash directory itself.
+    /// Every caller passes the ordinary photo path, whether that path is the
+    /// source being removed or the destination being restored.
+    private static func syncPhotoDirectory(containing photoURL: URL) throws {
+        try DurableFileIO.syncDirectory(
+            photoURL.deletingLastPathComponent(),
+            fullSync: true
+        )
     }
 
     /// Reconstruct the original ordering in one pass. Positions belonging to a

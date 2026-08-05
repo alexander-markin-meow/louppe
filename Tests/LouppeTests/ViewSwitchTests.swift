@@ -98,6 +98,18 @@ final class ViewSwitchTests: XCTestCase {
             .seconds(2),
             "the tiny real-media fixture should still finish its thumbnail promptly"
         )
+        hostingView.layoutSubtreeIfNeeded()
+        let allClickSurfaceSizes = descendants(of: hostingView)
+            .compactMap { ($0 as? GridImmediateClickSurface.ClickView)?.frame.size }
+        let photoClickSurfaces = allClickSurfaceSizes.filter {
+            $0.height >= store.gridThumbSize - 1
+        }
+        XCTAssertTrue(
+            photoClickSurfaces.contains {
+                $0.width >= store.gridThumbSize - 1
+            },
+            "Grid media surfaces must fill the adaptive column instead of shrinking to the thumbnail image's intrinsic size; rendered sizes: \(allClickSurfaceSizes)"
+        )
 
 
 #if DEBUG
@@ -214,6 +226,10 @@ final class ViewSwitchTests: XCTestCase {
             }
         }
         return nil
+    }
+
+    private func descendants(of view: NSView) -> [NSView] {
+        view.subviews.flatMap { [$0] + descendants(of: $0) }
     }
 
 #if DEBUG

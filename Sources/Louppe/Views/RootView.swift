@@ -36,7 +36,11 @@ struct RootView: View {
             VStack(spacing: 0) {
                 if store.recoveryNeedsAttention {
                     RecoveryWarningBanner(
-                        retry: store.retryInterruptedOperationRecovery
+                        message: store.recoveryAttentionMessage
+                            ?? "Some interrupted files are still untouched.",
+                        canRetry: store.canRetryInterruptedOperationRecovery,
+                        retry: store.retryInterruptedOperationRecovery,
+                        keepFilesAsTheyAre: store.keepInterruptedFilesAsTheyAre
                     )
                 }
                 if let warning = store.persistenceWarning {
@@ -54,20 +58,11 @@ struct RootView: View {
             }
         }
         .alert(
-            recoveryTitle,
+            "Interrupted operation recovered",
             isPresented: operationRecoveryReportIsPresented
         ) {
-            if store.operationRecoveryReport?.hasUnresolvedFiles == true {
-                Button("Retry Recovery") {
-                    store.retryInterruptedOperationRecovery()
-                }
-                Button("Leave Files Untouched", role: .cancel) {
-                    store.dismissOperationRecoveryReport()
-                }
-            } else {
-                Button("OK") {
-                    store.dismissOperationRecoveryReport()
-                }
+            Button("OK") {
+                store.dismissOperationRecoveryReport()
             }
         } message: {
             Text(recoveryMessage)
@@ -89,20 +84,13 @@ struct RootView: View {
 
     private var operationRecoveryReportIsPresented: Binding<Bool> {
         Binding(
-            get: { store.operationRecoveryReport != nil },
+            get: {
+                store.operationRecoveryReportRequiresAcknowledgement
+            },
             set: {
                 if !$0 { store.dismissOperationRecoveryReport() }
             }
         )
-    }
-
-    private var recoveryTitle: String {
-        if store.operationRecoveryReport?.operationLockUnavailable == true {
-            return "Another Louppe copy is active"
-        }
-        return store.operationRecoveryReport?.hasUnresolvedFiles == true
-            ? "Some files need attention"
-            : "Interrupted operation recovered"
     }
 
     private var recoveryMessage: String {
@@ -110,27 +98,18 @@ struct RootView: View {
         let interruptionPrefix = store.operationRecoveryCause.map {
             $0.hasSuffix(".") ? "\($0) " : "\($0). "
         } ?? ""
-        if report.operationLockUnavailable {
-            return "This window left the other copy's file operation untouched. "
-                + "Close the other Louppe copy, then retry recovery here."
-        }
-        if report.hasUnresolvedFiles {
-            var message = "Louppe recovered everything it could, but left "
-                + "\(report.unresolvedFiles) file"
-                + (report.unresolvedFiles == 1 ? "" : "s")
-                + " untouched because it couldn't confirm the exact file or volume. "
-                + "Reconnect any drive used by the operation, then retry."
-            if let detail = report.details.first {
-                message += " \(detail)"
-            }
-            return interruptionPrefix + message
-        }
-
         var actions: [String] = []
         if report.preservedCopies > 0 {
             actions.append(
                 "kept \(report.preservedCopies) completed cop"
                     + (report.preservedCopies == 1 ? "y" : "ies")
+                    + " at the destination"
+            )
+        }
+        if report.preservedMoves > 0 {
+            actions.append(
+                "kept \(report.preservedMoves) completed Move file"
+                    + (report.preservedMoves == 1 ? "" : "s")
                     + " at the destination"
             )
         }
@@ -145,10 +124,6 @@ struct RootView: View {
                 "removed \(report.removedPartialCopies) incomplete cop"
                     + (report.removedPartialCopies == 1 ? "y" : "ies")
             )
-        }
-        if actions.isEmpty {
-            return interruptionPrefix
-                + "Louppe verified the completed operation and cleared its recovery record. No photo or video was changed."
         }
         return interruptionPrefix
             + "Louppe \(actions.joined(separator: " and ")). No existing file was overwritten."
@@ -175,18 +150,25 @@ private struct InterruptedOperationRecoveryOverlay: View {
 }
 
 private struct RecoveryWarningBanner: View {
+    let message: String
+    let canRetry: Bool
     let retry: () -> Void
+    let keepFilesAsTheyAre: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
-            Text("Some interrupted files are still untouched. Reconnect the drive used by the operation, then retry recovery.")
+            Text(message)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("Interrupted operation warning. \(message)")
             Spacer(minLength: 12)
+            Button("Keep Files As They Are", action: keepFilesAsTheyAre)
+                .disabled(!canRetry)
             Button("Retry Recovery", action: retry)
+                .disabled(!canRetry)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)

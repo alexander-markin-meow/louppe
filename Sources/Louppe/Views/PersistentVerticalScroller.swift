@@ -1,10 +1,9 @@
 import SwiftUI
 import AppKit
 
-/// Configures the enclosing SwiftUI ScrollView with a permanently visible
-/// vertical scroller. It keeps AppKit's proportional scrolling behavior and a
-/// real layout gutter, while drawing the wide rounded style used by overlay
-/// scrollers instead of the narrower legacy thumb.
+/// Configures the enclosing SwiftUI ScrollView with AppKit's permanently
+/// visible native vertical scroller. The non-overlay style reserves a real
+/// gutter and lets AppKit keep the indicator synchronized during live scroll.
 struct PersistentVerticalScroller: NSViewRepresentable {
     static let gutterWidth = NSScroller.scrollerWidth(
         for: .regular,
@@ -25,20 +24,17 @@ struct PersistentVerticalScroller: NSViewRepresentable {
         // publish). Once the scroll view holds a fully configured scroller,
         // skip the replace/tile work; any drifted property re-takes the full
         // path, so the invariant remains self-healing.
-        if scrollView.verticalScroller is AlwaysVisibleScroller,
-           scrollView.scrollerStyle == .legacy,
+        if scrollView.scrollerStyle == .legacy,
            scrollView.hasVerticalScroller,
            !scrollView.autohidesScrollers,
+           scrollView.verticalScroller?.controlSize == .regular,
            scrollView.verticalScroller?.isHidden == false,
            scrollView.verticalScroller?.alphaValue == 1 {
             return
         }
-        // SwiftUI's standard scroller remains eligible for the system's fade
-        // treatment. This subclass opts out, then paints the preferred rounded
-        // overlay-style track and thumb itself so it never fades away.
-        if !(scrollView.verticalScroller is AlwaysVisibleScroller) {
-            scrollView.verticalScroller = AlwaysVisibleScroller()
-        }
+        // Keep the NSScroller object installed by AppKit. Replacing it with a
+        // hand-drawn subclass made the indicator miss live-scroll frames while
+        // the lazy Grid was realizing tiles.
         scrollView.scrollerStyle = .legacy
         scrollView.hasVerticalScroller = true
         scrollView.verticalScroller?.controlSize = .regular
@@ -49,76 +45,9 @@ struct PersistentVerticalScroller: NSViewRepresentable {
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
-    static func hasAlwaysVisibleScroller(_ scrollView: NSScrollView) -> Bool {
-        scrollView.verticalScroller is AlwaysVisibleScroller
-    }
-
-    private final class AlwaysVisibleScroller: NSScroller {
-        override class var isCompatibleWithOverlayScrollers: Bool { false }
-
-        private let visualWidth: CGFloat = 11
-        private let minimumKnobHeight: CGFloat = 20
-
-        override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {
-            let rect = centeredRect(in: slotRect, width: visualWidth)
-            trackColor.setFill()
-            NSBezierPath(
-                roundedRect: rect,
-                xRadius: visualWidth / 2,
-                yRadius: visualWidth / 2
-            ).fill()
-        }
-
-        override func drawKnob() {
-            let appKitRect = rect(for: .knob)
-            guard !appKitRect.isEmpty else { return }
-
-            let height = min(max(appKitRect.height, minimumKnobHeight), bounds.height)
-            let y = min(
-                max(appKitRect.midY - height / 2, bounds.minY),
-                bounds.maxY - height
-            )
-            let rect = NSRect(
-                x: bounds.midX - visualWidth / 2,
-                y: y,
-                width: visualWidth,
-                height: height
-            )
-            knobColor.setFill()
-            NSBezierPath(
-                roundedRect: rect,
-                xRadius: visualWidth / 2,
-                yRadius: visualWidth / 2
-            ).fill()
-        }
-
-        private func centeredRect(in rect: NSRect, width: CGFloat) -> NSRect {
-            NSRect(
-                x: bounds.midX - width / 2,
-                y: rect.minY,
-                width: width,
-                height: rect.height
-            )
-        }
-
-        private var usesDarkAppearance: Bool {
-            effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        }
-
-        private var trackColor: NSColor {
-            usesDarkAppearance
-                ? NSColor.white.withAlphaComponent(0.055)
-                : NSColor.black.withAlphaComponent(0.055)
-        }
-
-        private var knobColor: NSColor {
-            usesDarkAppearance
-                ? NSColor.white.withAlphaComponent(0.58)
-                : NSColor.black.withAlphaComponent(0.42)
-        }
-    }
-
     private final class Configurator: NSView {
+        private var configurationScheduled = false
+
         override func viewDidMoveToSuperview() {
             super.viewDidMoveToSuperview()
             scheduleConfiguration()
@@ -130,10 +59,23 @@ struct PersistentVerticalScroller: NSViewRepresentable {
         }
 
         func scheduleConfiguration() {
-            // SwiftUI installs its NSScrollView around this representable later
-            // in the update pass, so resolve the enclosing view next turn.
+            // Once mounted, update synchronously. Queueing one block for every
+            // lazy-Grid update can make those callbacks compete with live
+            // scrolling even though configure itself immediately returns.
+            if let scrollView = enclosingScrollView {
+                PersistentVerticalScroller.configure(scrollView)
+                return
+            }
+
+            // SwiftUI can install its NSScrollView around this representable
+            // later in the first update pass. Coalesce those unresolved calls
+            // into one next-turn lookup.
+            guard !configurationScheduled else { return }
+            configurationScheduled = true
             DispatchQueue.main.async { [weak self] in
-                guard let scrollView = self?.enclosingScrollView else { return }
+                guard let self else { return }
+                self.configurationScheduled = false
+                guard let scrollView = self.enclosingScrollView else { return }
                 PersistentVerticalScroller.configure(scrollView)
             }
         }

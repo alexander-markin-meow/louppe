@@ -34,8 +34,9 @@ Most photo and video formats are supported; support for more file types is
 planned. Filters and sorting cover ratings, dates, folders, file types, camera
 details, media type, and video length.
 
-Matching RAW+JPEG files are grouped by default; you can separate or regroup
-them. RAW and JPEG each keep their own rating.
+Matching RAW+JPEG files are grouped by default, including across subfolders
+when the filename match is unambiguous; you can separate or regroup them. RAW
+and JPEG each keep their own rating.
 
 For close inspection, Gallery offers a fast Fit view, a phone-sized preview
 (**A**), and true 100% zoom (**S**). The Info panel includes metadata, a
@@ -113,16 +114,27 @@ alone, so the main review workflow can be completed with the keyboard.
   remain in the Trash. Emptying the Trash deletes them permanently.
 - Matching RAW+JPEG files, if grouped, move or copy together.
 - Louppe keeps a small safety record during file operations. If the app is
-  interrupted, Louppe checks the exact files before process-crash recovery and
-  never overwrites an existing file.
+  interrupted, Louppe checks the exact files and never overwrites an existing
+  file. A completed Trash action stays in Trash—it is never silently undone on
+  the next launch. If an unusual file action still needs attention, reviewing,
+  rating, opening folders, saving, and quitting remain available; only another
+  Copy, Move, Clean Up, or Trash undo waits. Retry when the relevant drive is
+  available, or choose **Keep Files As They Are** to set aside only Louppe's
+  recovery record—without deleting its contents—and continue with the files
+  exactly where they are.
 - Ratings are saved automatically in `.louppe_session.json` inside the opened
-  folder, with a local backup when that folder is read-only. They follow the
+  folder, with an identity-bound local backup when that folder is read-only or
+  its card/drive is temporarily disconnected. A clean Quit does not rewrite an
+  already saved session just because the photo volume is no longer connected.
+  Ratings follow the
   verified physical file across a rename, remain saved while a file is
-  temporarily missing, and are never silently applied to a same-named
-  replacement. Louppe also refuses to overwrite a session file changed by
+  temporarily missing, and current identity-bound ratings are never silently
+  applied to a same-named replacement. Louppe also refuses to overwrite a session file changed by
   another app and will not confuse two cards or folders that later use the
-  same path. The first time an older filename-only session is opened, Louppe
-  asks before binding those saved ratings to the current physical files.
+  same path. An older filename-only session upgrades automatically when every
+  saved filename is still present in its original folder. If old saved items
+  are missing, you can explicitly forget only their ratings and open the rest
+  of the folder without restoring intentionally deleted files.
 
 Louppe recognises common camera RAW files, JPEG, TIFF, PNG, HEIC, WebP, AVIF,
 and the photo and video formats supported by macOS. An unsupported file still

@@ -351,6 +351,7 @@ enum FileOperationJournal {
         var unresolvedOperations = 0
         var restoredFiles = 0
         var preservedCopies = 0
+        var preservedMoves = 0
         var removedPartialCopies = 0
         var unresolvedFiles = 0
         var operationLockUnavailable = false
@@ -640,8 +641,10 @@ enum FileOperationJournal {
     }
 
     /// Reconciles every *active* operation without overwriting an existing
-    /// path. Mutating operations restore their conservative source state;
-    /// Copy keeps every identity-verified staged or completed destination.
+    /// path. Move restores its conservative source state, Copy keeps every
+    /// identity-verified staged or completed destination, and an intentional
+    /// Clean Up accepts the files exactly where they are. Only explicit Trash
+    /// undo recovery moves a trashed file back to its source path.
     static func recoverPendingOperations(
         directory rootOverride: URL? = nil
     ) -> RecoveryReport {
@@ -688,7 +691,7 @@ enum FileOperationJournal {
         }
 
         for operationURL in contents
-            .filter({ $0.pathExtension == "operation" })
+            .filter(isActiveOperationURL)
             .sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             report.discoveredOperations += 1
             do {
@@ -705,6 +708,38 @@ enum FileOperationJournal {
                     continue
                 }
 
+                if plan.kind == .moveToTrash {
+                    let ambiguousPairFiles = ambiguousTrashPairFileCount(
+                        plan: plan,
+                        operationURL: operationURL
+                    )
+                    if ambiguousPairFiles > 0 {
+                        report.unresolvedOperations += 1
+                        report.unresolvedFiles += ambiguousPairFiles
+                        report.details.append(
+                            "A paired Trash action stopped between its files. Louppe left every file where it is."
+                        )
+                        continue
+                    }
+                }
+
+                let completedMoveItemIDs: Set<String>
+                if plan.kind == .exportMove {
+                    let grouped = Dictionary(
+                        grouping: plan.files.indices,
+                        by: { plan.files[$0].itemID }
+                    )
+                    completedMoveItemIDs = Set(grouped.compactMap {
+                        itemID, indices in
+                        indices.allSatisfy {
+                            readState(at: operationURL, index: $0)?.state
+                                == .completed
+                        } ? itemID : nil
+                    })
+                } else {
+                    completedMoveItemIDs = []
+                }
+
                 var operationUnresolved = 0
                 for index in plan.files.indices {
                     let state = readState(
@@ -718,10 +753,15 @@ enum FileOperationJournal {
                             state: state,
                             operationID: plan.operationID,
                             fileIndex: index,
-                            planVersion: plan.version
+                            planVersion: plan.version,
+                            preserveCompletedMove:
+                                completedMoveItemIDs.contains(
+                                    plan.files[index].itemID
+                                )
                         )
                         report.restoredFiles += result.restoredFiles
                         report.preservedCopies += result.preservedCopies
+                        report.preservedMoves += result.preservedMoves
                         report.removedPartialCopies += result.removedCopies
                     } catch {
                         operationUnresolved += 1
@@ -753,9 +793,78 @@ enum FileOperationJournal {
         return report
     }
 
+    /// Explicitly forgets active recovery metadata while leaving every media
+    /// path untouched. This is the photographer-controlled escape for a
+    /// permanently ambiguous or corrupt journal; it never decodes a plan and
+    /// never reads, moves, or removes a photo.
+    static func keepFilesAsTheyAreAndForgetPendingOperations(
+        directory rootOverride: URL? = nil
+    ) -> RecoveryReport {
+        let root = rootOverride ?? defaultDirectory
+        let fm = FileManager()
+        var report = RecoveryReport()
+        guard fm.fileExists(atPath: root.path) else { return report }
+
+        let operationLock: OperationLock
+        do {
+            operationLock = try OperationLock.acquire(in: root)
+        } catch {
+            if case JournalError.operationInUse = error {
+                report.operationLockUnavailable = true
+            }
+            report.unresolvedOperations = 1
+            report.unresolvedFiles = 1
+            report.details = [error.localizedDescription]
+            return report
+        }
+        defer { operationLock.release() }
+
+        let operations: [URL]
+        do {
+            operations = try pendingOperationURLs(in: root, fileManager: fm)
+        } catch {
+            report.unresolvedOperations = 1
+            report.unresolvedFiles = 1
+            report.details = [error.localizedDescription]
+            return report
+        }
+
+        for operation in operations {
+            report.discoveredOperations += 1
+            do {
+                let operationID = operation.deletingPathExtension()
+                    .lastPathComponent
+                let forgotten = root.appendingPathComponent(
+                    "\(operationID)-\(UUID().uuidString.lowercased()).forgotten",
+                    isDirectory: true
+                )
+                try DurableFileIO.atomicExclusiveRename(
+                    from: operation,
+                    to: forgotten
+                )
+                try DurableFileIO.syncRenameDirectories(
+                    from: operation,
+                    to: forgotten,
+                    fullSync: true
+                )
+                // Keep is intentionally deletion-free. Even a corrupt record
+                // could contain an unexpected entry that Louppe cannot prove
+                // is journal metadata. The ignored `.forgotten` directory is
+                // tiny in the normal case and can never become active again.
+                report.restoredOperations += 1
+            } catch {
+                report.unresolvedOperations += 1
+                report.unresolvedFiles += 1
+                report.details.append(error.localizedDescription)
+            }
+        }
+        return report
+    }
+
     private struct RecoveredFileCounts {
         var restoredFiles = 0
         var preservedCopies = 0
+        var preservedMoves = 0
         var removedCopies = 0
     }
 
@@ -765,7 +874,8 @@ enum FileOperationJournal {
         state: StateRecord?,
         operationID: String,
         fileIndex: Int,
-        planVersion: Int
+        planVersion: Int,
+        preserveCompletedMove: Bool
     ) throws -> RecoveredFileCounts {
         switch kind {
         case .exportCopy:
@@ -782,19 +892,60 @@ enum FileOperationJournal {
                 state: state,
                 operationID: operationID,
                 fileIndex: fileIndex,
-                planVersion: planVersion
+                planVersion: planVersion,
+                preserveDestination: preserveCompletedMove
             )
         case .moveToTrash:
-            return try recoverTrash(
-                file,
-                state: state,
-                planVersion: planVersion
-            )
+            // Clean Up already had the photographer's explicit intent to move
+            // these files out of the source folder. Process recovery must not
+            // reverse that choice, search Trash for an inode, or guess whether
+            // the photographer later emptied Trash. Retiring the durable
+            // journal accepts the current filesystem state without touching a
+            // photo. `.restoreFromTrash` below remains the separate, explicit
+            // undo operation and keeps its identity-verified recovery.
+            return RecoveredFileCounts()
         case .restoreFromTrash:
             return try recoverTrashRestore(
                 file,
                 planVersion: planVersion
             )
+        }
+    }
+
+    /// A single-file Trash action can be accepted in any crash state without
+    /// touching media. A RAW+JPEG item needs one extra guard: if durable step
+    /// records show that the process stopped between its files, keep the
+    /// journal as nonblocking attention so the photographer can inspect the
+    /// partial result or explicitly keep it.
+    private static func ambiguousTrashPairFileCount(
+        plan: Plan,
+        operationURL: URL
+    ) -> Int {
+        let grouped = Dictionary(
+            grouping: plan.files.indices,
+            by: { plan.files[$0].itemID }
+        )
+        return grouped.values.reduce(into: 0) { count, indices in
+            guard indices.count > 1 else { return }
+            var states: [StepState?] = []
+            var hasUnreadableState = false
+            for index in indices {
+                let stateURL = operationURL
+                    .appendingPathComponent("steps", isDirectory: true)
+                    .appendingPathComponent(String(format: "%08d.json", index))
+                let state = readState(at: operationURL, index: index)
+                if pathEntryExists(stateURL), state == nil {
+                    hasUnreadableState = true
+                }
+                states.append(state?.state)
+            }
+            let allCompleted = states.allSatisfy { $0 == .completed }
+            let allUntouched = states.allSatisfy {
+                $0 == nil || $0 == .rolledBack
+            }
+            if hasUnreadableState || (!allCompleted && !allUntouched) {
+                count += indices.count
+            }
         }
     }
 
@@ -1042,7 +1193,8 @@ enum FileOperationJournal {
         state: StateRecord?,
         operationID: String,
         fileIndex: Int,
-        planVersion: Int
+        planVersion: Int,
+        preserveDestination: Bool
     ) throws -> RecoveredFileCounts {
         let source = try plannedURL(
             for: file,
@@ -1085,6 +1237,42 @@ enum FileOperationJournal {
         }
         guard existingLocations.count <= 1 else {
             throw RecoveryError.multipleRecoveryCandidates(source)
+        }
+
+        if preserveDestination {
+            if sourceExists {
+                // A worker-side rollback may have completed after the final
+                // checkpoint. Keep that current source state, but never remove
+                // a second location while honoring forward Move intent.
+                guard existingLocations.isEmpty else {
+                    throw RecoveryError.bothLocationsExist(source)
+                }
+                try requireIdentity(
+                    file.identity,
+                    at: source,
+                    includeStatusChange: false
+                )
+                try DurableFileIO.syncDirectory(
+                    source.deletingLastPathComponent(),
+                    fullSync: true
+                )
+                return RecoveredFileCounts()
+            }
+
+            guard let location = existingLocations.first,
+                  !location.isTemporary else {
+                throw RecoveryError.missingMovedFile(source)
+            }
+            let identity = try movedArtifactIdentity(
+                file,
+                state: state,
+                at: location.url,
+                isTemporary: false
+            )
+            try requireIdentity(identity, at: location.url)
+            var counts = RecoveredFileCounts()
+            counts.preservedMoves = 1
+            return counts
         }
 
         if sourceExists {
@@ -1214,55 +1402,6 @@ enum FileOperationJournal {
         throw RecoveryError.unverifiedOwnedFile(url)
     }
 
-    private static func recoverTrash(
-        _ file: PlannedFile,
-        state: StateRecord?,
-        planVersion: Int
-    ) throws -> RecoveredFileCounts {
-        let source = try plannedURL(
-            for: file,
-            role: .source,
-            planVersion: planVersion
-        )
-        let resolvedDestination = try resolvedDestinationURL(
-            from: state,
-            planVersion: planVersion
-        )
-        if pathEntryExists(source) {
-            // A pathname alone is never proof that Trash rollback succeeded.
-            // A rename out and back changes ctime, so ownership recovery uses
-            // the other stable identity fields here.
-            try requireIdentity(file.identity, at: source)
-            if let resolvedDestination,
-               pathEntryExists(resolvedDestination) {
-                throw RecoveryError.bothLocationsExist(source)
-            }
-            return RecoveredFileCounts()
-        }
-
-        if let trash = resolvedDestination {
-            guard pathEntryExists(trash) else {
-                throw RecoveryError.missingTrashedFile(source)
-            }
-            guard let identity = state?.resolvedIdentity else {
-                throw RecoveryError.unverifiedOwnedFile(trash)
-            }
-            guard try linkCount(at: trash) == 1 else {
-                throw RecoveryError.unverifiedOwnedFile(trash)
-            }
-            try requireIdentity(identity, at: trash)
-            try restoreWithoutOverwrite(from: trash, to: source)
-            return RecoveredFileCounts(restoredFiles: 1)
-        }
-
-        guard state?.state == .started,
-              let trash = locateInTrash(identity: file.identity) else {
-            throw RecoveryError.missingTrashedFile(source)
-        }
-        try restoreWithoutOverwrite(from: trash, to: source)
-        return RecoveredFileCounts(restoredFiles: 1)
-    }
-
     private static func recoverTrashRestore(
         _ file: PlannedFile,
         planVersion: Int
@@ -1290,6 +1429,14 @@ enum FileOperationJournal {
                 throw RecoveryError.unverifiedOwnedFile(source)
             }
             try requireIdentity(file.identity, at: source)
+            // A previous recovery attempt may have completed the exclusive
+            // Trash-to-source rename and then failed its destination sync.
+            // Repeat the accessible photo-directory durability boundary before
+            // retiring the journal.
+            try DurableFileIO.syncDirectory(
+                source.deletingLastPathComponent(),
+                fullSync: true
+            )
             return RecoveredFileCounts()
         }
         guard trashExists else { throw RecoveryError.missingTrashedFile(source) }
@@ -1297,11 +1444,19 @@ enum FileOperationJournal {
             throw RecoveryError.unverifiedOwnedFile(trash)
         }
         try requireIdentity(file.identity, at: trash)
-        try restoreWithoutOverwrite(from: trash, to: source)
+        try restoreWithoutOverwrite(
+            from: trash,
+            to: source,
+            syncRemovedSourceDirectory: false
+        )
         return RecoveredFileCounts(restoredFiles: 1)
     }
 
-    private static func restoreWithoutOverwrite(from: URL, to: URL) throws {
+    private static func restoreWithoutOverwrite(
+        from: URL,
+        to: URL,
+        syncRemovedSourceDirectory: Bool = true
+    ) throws {
         let fm = FileManager()
         guard !pathEntryExists(to) else {
             throw RecoveryError.refusesOverwrite(to)
@@ -1311,11 +1466,24 @@ enum FileOperationJournal {
             withIntermediateDirectories: true
         )
         try DurableFileIO.atomicExclusiveRename(from: from, to: to)
-        try DurableFileIO.syncRenameDirectories(
-            from: from,
-            to: to,
-            fullSync: true
-        )
+        if syncRemovedSourceDirectory {
+            try DurableFileIO.syncRenameDirectories(
+                from: from,
+                to: to,
+                fullSync: true
+            )
+        } else {
+            // macOS protects Trash directories from ordinary directory opens
+            // on some volumes. The explicit undo's important durability edge
+            // is the restored name in the photographer's source folder. Sync
+            // that ordinary destination only; a crash before the protected
+            // Trash removal becomes durable can at worst leave a second name,
+            // which the still-active journal will preserve as an ambiguity.
+            try DurableFileIO.syncDirectory(
+                to.deletingLastPathComponent(),
+                fullSync: true
+            )
+        }
     }
 
     private static func validateTemporary(
@@ -1389,47 +1557,6 @@ enum FileOperationJournal {
             )
     }
 
-    private static func locateInTrash(identity: FileIdentity) -> URL? {
-        let fm = FileManager()
-        let volumeRoot = URL(fileURLWithPath: identity.volumeRootPath)
-        guard fm.fileExists(atPath: volumeRoot.path) else { return nil }
-
-        var roots = [
-            fm.homeDirectoryForCurrentUser.appendingPathComponent(
-                ".Trash",
-                isDirectory: true
-            ),
-            volumeRoot.appendingPathComponent(
-                ".Trashes/\(getuid())",
-                isDirectory: true
-            ),
-        ]
-        var seen = Set<String>()
-        roots = roots.filter {
-            let path = $0.standardizedFileURL.path
-            return seen.insert(path).inserted && fm.fileExists(atPath: path)
-        }
-        for root in roots {
-            guard let enumerator = fm.enumerator(
-                at: root,
-                includingPropertiesForKeys: nil,
-                options: [.skipsPackageDescendants]
-            ) else { continue }
-            for case let candidate as URL in enumerator {
-                if (try? linkCount(at: candidate)) == 1,
-                   let candidateIdentity = try? fileIdentity(at: candidate),
-                   identitiesMatch(
-                       expected: identity,
-                       actual: candidateIdentity,
-                       includeStatusChange: false
-                   ) {
-                    return candidate
-                }
-            }
-        }
-        return nil
-    }
-
     private static func pendingOperationURLs(
         in root: URL,
         fileManager: FileManager
@@ -1438,7 +1565,7 @@ enum FileOperationJournal {
             return try fileManager.contentsOfDirectory(
                 at: root,
                 includingPropertiesForKeys: nil
-            ).filter { $0.pathExtension == "operation" }
+            ).filter(isActiveOperationURL)
         } catch {
             throw JournalError.cannotInspectOperations(root)
         }
@@ -1446,6 +1573,13 @@ enum FileOperationJournal {
 
     private static func isCreatingOperationURL(_ url: URL) -> Bool {
         guard url.pathExtension == "creating" else { return false }
+        let operationID = url.deletingPathExtension().lastPathComponent
+        return UUID(uuidString: operationID) != nil
+            && operationID == operationID.lowercased()
+    }
+
+    private static func isActiveOperationURL(_ url: URL) -> Bool {
+        guard url.pathExtension == "operation" else { return false }
         let operationID = url.deletingPathExtension().lastPathComponent
         return UUID(uuidString: operationID) != nil
             && operationID == operationID.lowercased()
@@ -2337,7 +2471,7 @@ enum FileOperationJournal {
             case .missingCopySource(let source):
                 return "Recovery couldn't verify the original \(source.lastPathComponent), so it preserved every copy."
             case .missingTrashedFile(let source):
-                return "The interrupted Trash operation couldn't locate \(source.lastPathComponent)."
+                return "The interrupted Trash undo couldn't locate \(source.lastPathComponent)."
             case .bothLocationsExist(let source):
                 return "\(source.lastPathComponent) exists in both locations; Louppe left both untouched."
             case .multipleRecoveryCandidates(let source):

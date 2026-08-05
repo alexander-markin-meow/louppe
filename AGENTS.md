@@ -142,7 +142,22 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
 - Copy, Move, Trash, and Trash undo must activate a
   `FileOperationJournal` before their first filesystem change. Recovery must
   verify stable file identity, never overwrite an existing path, never infer
-  ownership from a filename alone, and keep unresolved journals retryable.
+  ownership from a filename alone, and keep unresolved journals retryable until
+  the photographer explicitly chooses **Keep Files As They Are**. That escape
+  may retire only a canonical Louppe journal by atomically setting it aside as
+  `.forgotten`; it must never delete the record's contents, adopt an arbitrary
+  `.operation` file, or touch media.
+  Launch recovery for an intentional Trash action commits forward: it must
+  never restore a photo the photographer deliberately sent to Trash. Only the
+  explicit in-session Undo restores it. macOS owns Trash durability and may
+  deny direct access to `.Trash`/`.Trashes`, so never make opening or syncing a
+  protected Trash directory a requirement for operation success.
+  A fully completed Export Move stays at its destination during recovery; only
+  an incomplete RAW+JPEG item rolls back. A partially checkpointed paired Trash
+  action remains nonblocking attention instead of silently discarding its
+  evidence. Trash Undo must never move a successfully restored member back into
+  protected Trash merely to make a pair look atomic—keep the restored original,
+  rescan, and report the partial undo.
   New plan-v3 paths use exact raw filesystem bytes; never normalize them
   through Swift strings. Export validation and target construction must carry
   the exact selected destination bytes into the worker. Keep v1/v2 recovery
@@ -210,6 +225,12 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   commits the first mouse-up synchronously and treats only the second click as
   double-click-to-open. Do not replace it with exclusive single/double SwiftUI
   tap gestures; they delay selection for the system double-click interval.
+- **Grid scrolling keeps AppKit's native scroller**:
+  `PersistentVerticalScroller` may make the native legacy scroller permanently
+  visible and reserve its gutter, but must not replace it with a hand-drawn
+  subclass. Resolve an already-mounted scroll view synchronously and coalesce
+  the initial deferred lookup so fast lazy-grid updates cannot queue main-actor
+  work ahead of the scrolling indicator.
 - **100% view identity is persistent**: `GalleryView` must not add
   `.id(item.id)` back to `FullImageView`. The AppKit actual-size viewport stays
   alive across current-item changes so its normalized inspection position can
@@ -244,9 +265,37 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   generations; never fall back to path or `scannedAt` as the current authority.
   One stable-folder advisory lock must span sidecar and backup revision checks,
   replacement/fallback, and lineage update; do not split that transaction.
+  Lock acquisition must have a short finite deadline so a stale second process
+  can produce a retryable save failure but can never freeze Close or Quit.
+  If the exact opened folder path is absent because its volume disconnected,
+  a save may advance only its stable-identity-keyed backup under that same lock,
+  retaining the last proven sidecar revision and never recreating the missing
+  path. Preserve exact `lstat` identities for every ancestor of the opened path
+  so a different folder, symlink, non-directory ancestor, permission ambiguity,
+  or replacement appearing there fails as `sourceFolderChanged` without
+  touching either lineage. A UUID-owned source volume may receive a different
+  `st_dev` on remount; allow that only after the complete folder is recaptured
+  and its UUID/folder identity matches. If the final folder is absent or
+  unreadable, retain strict device checks so a different mounted card cannot be
+  classified as the missing original. If a sidecar rename
+  may have committed immediately before disconnection, only that exact
+  per-access marked revision may be adopted after reconnect; equality with an
+  older backup alone must never bypass sidecar CAS. A backup rename followed
+  by a sync error must likewise be adopted only when its exact desired bytes
+  are observed, so Retry cannot conflict with Louppe's own commit. Quit must
+  await an active checkpoint and compare the live monotonic change generation
+  with the generation captured by successful sidecar/backup requests; a
+  just-opened generation-zero session is a discard-safe baseline, so failure of
+  its optional repair does not block Quit. Clean sessions start no new I/O,
+  while a backup-only success is already safe to quit and remains manually
+  retryable for sidecar repair.
   The obsolete path-keyed backup is read only when both current locations are
-  absent. Schema 1–3 filename-only ratings require the explicit migration
-  confirmation and must not autosave, close-save, or quit-save before it.
+  absent. Schema 1–3 filename-only ratings migrate automatically only when
+  every saved filename is present in its original folder. An unowned legacy
+  backup or missing legacy entries requires explicit confirmation and must not
+  autosave, close-save, or quit-save before it. Missing entries may be discarded
+  only through **Open Folder and Forget Missing Items**; Close Folder and Quit
+  must preserve both legacy copies byte-for-byte.
 - **Clean Up has a three-phase boundary**: snapshot on `SessionStore`, file I/O
   in `CleanUpWorker`, apply on `SessionStore`. Do not put `trashItem`/`moveItem`
   loops back on the main actor. While `isCleaningUp`, keep item-index mutations
@@ -261,7 +310,11 @@ Clean Up. It records ownership boundaries, cache budgets, and verification.
   retry only when the operation temporary path is absent. Never retry over or
   delete an identity-ambiguous partial artifact. An identity-recorded partial
   may be removed through the journal's two reserved paths. Do not add a second
-  independent in-flight flag.
+  independent in-flight flag. A recovery pass that is actively touching files
+  remains mutually exclusive with new work. An unresolved journal awaiting
+  attention blocks only new Copy, Move, Trash/Clean Up, and Trash undo actions;
+  it must never block reviewing, rating, navigation, folder open/close/rescan,
+  saving, updates, or Quit.
 - `RootView` owns the persistent window's phase-aware content layout through
   `WindowContentLayout`: Welcome/Scanning use `.fullSizeContentView`, while
   Ready removes it so photos cannot scroll behind the liquid-glass toolbar.

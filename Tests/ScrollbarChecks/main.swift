@@ -7,13 +7,24 @@ struct ScrollbarChecks {
         let scrollView = NSScrollView(
             frame: NSRect(x: 0, y: 0, width: 500, height: 400)
         )
+        // Settle AppKit on the non-overlay style before capturing its native
+        // scroller. Louppe may configure visibility and the gutter, but must
+        // not replace this optimized control with a hand-drawn subclass.
+        scrollView.scrollerStyle = .legacy
+        scrollView.hasVerticalScroller = true
+        guard let nativeScroller = scrollView.verticalScroller else {
+            throw CheckFailure("AppKit must provide a native vertical scroller")
+        }
         scrollView.documentView = NSView(
             frame: NSRect(x: 0, y: 0, width: 500, height: 1_000)
         )
 
         PersistentVerticalScroller.configure(scrollView)
 
-        try expect(PersistentVerticalScroller.hasAlwaysVisibleScroller(scrollView), "scroller must opt out of overlay compatibility")
+        try expect(
+            scrollView.verticalScroller === nativeScroller,
+            "configuration must retain AppKit's native scrolling indicator"
+        )
         try expect(scrollView.scrollerStyle == .legacy, "scroller must use the non-overlay legacy style")
         try expect(scrollView.hasVerticalScroller, "vertical scroller must be installed")
         try expect(!scrollView.autohidesScrollers, "vertical scroller must never autohide")
@@ -38,7 +49,16 @@ struct ScrollbarChecks {
             abs(reservedWidth - PersistentVerticalScroller.gutterWidth) < 0.5,
             "vertical scroller must reserve its own layout gutter"
         )
-        print("Scrollbar checks passed (9/9); reserved gutter: \(reservedWidth) pt")
+
+        for _ in 0..<20 {
+            PersistentVerticalScroller.configure(scrollView)
+            try expect(
+                scrollView.verticalScroller === nativeScroller,
+                "repeated SwiftUI updates must not replace or retile the native scroller"
+            )
+        }
+
+        print("Scrollbar checks passed (10/10); reserved gutter: \(reservedWidth) pt")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {

@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// Narrow persistence boundary used by `SessionStore`. Keeping the actor
@@ -31,6 +32,23 @@ actor SessionPersistence: SessionPersistenceClient {
         let systemNumber: UInt64
         let fileNumber: UInt64
         let birthTime: FileOperationJournal.FileIdentity.Timestamp
+        /// lstat identities for every exact path component that existed when
+        /// this access began. Equality/storage remain folder-identity based;
+        /// this chain only distinguishes an absent path from a replacement.
+        private let pathEntries: [PathEntry]
+
+        private struct PathEntry: Hashable, Sendable {
+            let pathBytes: Data
+            let systemNumber: UInt64
+            let fileNumber: UInt64
+            let fileType: UInt32
+        }
+
+        fileprivate enum PathState {
+            case matching
+            case unavailable
+            case changed
+        }
 
         static func capture(at folder: URL) throws -> Self {
             // The URL supplied by FolderScanner is the pathname authority.
@@ -54,13 +72,119 @@ actor SessionPersistence: SessionPersistenceClient {
                 volumeUUIDString: identity.volumeUUIDString,
                 systemNumber: identity.systemNumber,
                 fileNumber: identity.fileNumber,
-                birthTime: birthTime
+                birthTime: birthTime,
+                pathEntries: try capturePathEntries(for: folder)
             )
+        }
+
+        private static func fileSystemPathBytes(
+            for folder: URL
+        ) throws -> Data {
+            try folder.withUnsafeFileSystemRepresentation { pointer in
+                guard let pointer else {
+                    throw CocoaError(.fileReadInvalidFileName)
+                }
+                return Data(bytes: pointer, count: strlen(pointer))
+            }
+        }
+
+        private static func capturePathEntries(
+            for folder: URL
+        ) throws -> [PathEntry] {
+            let path = try fileSystemPathBytes(for: folder)
+            let bytes = [UInt8](path)
+            guard bytes.first == UInt8(ascii: "/"),
+                  bytes.count > 1 else {
+                throw CocoaError(.fileReadInvalidFileName)
+            }
+            var prefixes = [Data([UInt8(ascii: "/")])]
+            for index in 1..<bytes.count where bytes[index] == UInt8(ascii: "/") {
+                prefixes.append(Data(bytes[..<index]))
+            }
+            prefixes.append(path)
+            return try prefixes.map { prefix in
+                let (status, _) = lstatPath(prefix)
+                guard let status else {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                return PathEntry(
+                    pathBytes: prefix,
+                    systemNumber: UInt64(status.st_dev),
+                    fileNumber: UInt64(status.st_ino),
+                    fileType: UInt32(status.st_mode & mode_t(S_IFMT))
+                )
+            }
+        }
+
+        private static func lstatPath(
+            _ path: Data
+        ) -> (Darwin.stat?, Int32) {
+            var terminated = [UInt8](path)
+            terminated.append(0)
+            var info = Darwin.stat()
+            var failure: Int32 = 0
+            let result = terminated.withUnsafeMutableBufferPointer { buffer in
+                buffer.baseAddress!.withMemoryRebound(
+                    to: CChar.self,
+                    capacity: buffer.count
+                ) { pointer in
+                    var status: Int32
+                    repeat {
+                        status = Darwin.lstat(pointer, &info)
+                    } while status != 0 && errno == EINTR
+                    if status != 0 { failure = errno }
+                    return status
+                }
+            }
+            return result == 0 ? (info, 0) : (nil, failure)
+        }
+
+        fileprivate func pathState(
+            at folder: URL,
+            allowSourceVolumeDeviceRemapping: Bool
+        ) -> PathState {
+            guard let requestedPath = try? Self.fileSystemPathBytes(
+                for: folder
+            ), requestedPath == pathEntries.last?.pathBytes else {
+                return .changed
+            }
+            for expected in pathEntries {
+                let (current, failure) = Self.lstatPath(expected.pathBytes)
+                guard let current else {
+                    switch failure {
+                    case ENOENT, ENODEV, ENXIO, ESTALE:
+                        return .unavailable
+                    default:
+                        return .changed
+                    }
+                }
+                // A real removable volume can receive a new st_dev number on
+                // remount. When that volume has a UUID, its UUID is the volume
+                // authority and `sourceFolderState` verifies it immediately
+                // after this path walk. Keep strict device checks for every
+                // ancestor outside that UUID-owned source volume.
+                let sourceVolumeCanRemount =
+                    allowSourceVolumeDeviceRemapping
+                    && volumeUUIDString != nil
+                    && expected.systemNumber == systemNumber
+                guard (sourceVolumeCanRemount
+                        || UInt64(current.st_dev) == expected.systemNumber),
+                      UInt64(current.st_ino) == expected.fileNumber,
+                      UInt32(current.st_mode & mode_t(S_IFMT))
+                        == expected.fileType else {
+                    return .changed
+                }
+            }
+            return .matching
         }
 
         func matches(folder: URL) -> Bool {
             guard let current = try? Self.capture(at: folder) else { return false }
-            return self == current
+            guard self == current else { return false }
+            return pathState(
+                at: folder,
+                allowSourceVolumeDeviceRemapping: true
+            ) == .matching
         }
 
         static func == (lhs: Self, rhs: Self) -> Bool {
@@ -90,6 +214,34 @@ actor SessionPersistence: SessionPersistenceClient {
             hasher.combine(birthTime.seconds)
             hasher.combine(birthTime.nanoseconds)
         }
+
+#if DEBUG
+        /// Models macOS assigning the same UUID-owned card a different st_dev
+        /// after remount; ordinary temporary test folders cannot trigger that
+        /// kernel behavior deterministically.
+        func remappingSourceSystemNumberForTesting(
+            to replacement: UInt64
+        ) -> Self {
+            let previous = systemNumber
+            let remappedEntries = pathEntries.map { entry in
+                guard entry.systemNumber == previous else { return entry }
+                return PathEntry(
+                    pathBytes: entry.pathBytes,
+                    systemNumber: replacement,
+                    fileNumber: entry.fileNumber,
+                    fileType: entry.fileType
+                )
+            }
+            return Self(
+                volumeRootPath: volumeRootPath,
+                volumeUUIDString: volumeUUIDString,
+                systemNumber: replacement,
+                fileNumber: fileNumber,
+                birthTime: birthTime,
+                pathEntries: remappedEntries
+            )
+        }
+#endif
 
         fileprivate var storageKey: String {
             let volume = volumeUUIDString.map { "uuid:\($0)" }
@@ -146,6 +298,7 @@ actor SessionPersistence: SessionPersistenceClient {
         case permissionDenied
         case outOfSpace
         case volumeUnavailable
+        case busy
         case encoding
         case other
     }
@@ -275,30 +428,54 @@ actor SessionPersistence: SessionPersistenceClient {
     }
 
     private enum SaveGuardError: Error {
+        case sourceFolderUnavailable
         case sourceFolderChanged
         case sidecarChanged
+    }
+
+    private enum SourceFolderState {
+        case matching
+        case unavailable
+        case changed
     }
 
     private var latestSequenceByFolder: [String: UInt64] = [:]
     private var revisionByAccessID: [UUID: SidecarRevision] = [:]
     private var backupRevisionByAccessID: [UUID: SidecarRevision] = [:]
     private var snapshotGenerationByAccessID: [UUID: UInt64] = [:]
+    /// Set only when this access may have renamed a sidecar immediately before
+    /// its source volume disappeared. It permits adopting that one exact
+    /// Louppe-owned revision after reconnect without weakening ordinary CAS.
+    private var possibleCommittedSidecarRevisionByAccessID:
+        [UUID: SidecarRevision] = [:]
     private let backupDirectory: URL
     private let lockDirectory: URL
     private let afterSidecarReadForTesting: (@Sendable () -> Void)?
     private let beforeSaveLockForTesting: (@Sendable () -> Void)?
     private let afterSaveLockAcquiredForTesting: (@Sendable () -> Void)?
+    private let afterSidecarReplaceForTesting: (@Sendable () throws -> Void)?
+    private let beforeBackupValidationForTesting:
+        (@Sendable () throws -> Void)?
+    private let afterBackupReplaceForTesting: (@Sendable () throws -> Void)?
 
     init(
         backupDirectory: URL? = nil,
         afterSidecarReadForTesting: (@Sendable () -> Void)? = nil,
         beforeSaveLockForTesting: (@Sendable () -> Void)? = nil,
-        afterSaveLockAcquiredForTesting: (@Sendable () -> Void)? = nil
+        afterSaveLockAcquiredForTesting: (@Sendable () -> Void)? = nil,
+        afterSidecarReplaceForTesting: (@Sendable () throws -> Void)? = nil,
+        beforeBackupValidationForTesting:
+            (@Sendable () throws -> Void)? = nil,
+        afterBackupReplaceForTesting: (@Sendable () throws -> Void)? = nil
     ) {
         self.afterSidecarReadForTesting = afterSidecarReadForTesting
         self.beforeSaveLockForTesting = beforeSaveLockForTesting
         self.afterSaveLockAcquiredForTesting =
             afterSaveLockAcquiredForTesting
+        self.afterSidecarReplaceForTesting = afterSidecarReplaceForTesting
+        self.beforeBackupValidationForTesting =
+            beforeBackupValidationForTesting
+        self.afterBackupReplaceForTesting = afterBackupReplaceForTesting
         // Advisory locks only need to survive while processes are alive. The
         // per-user temporary root is shared by those processes and remains
         // writable even when Application Support or a custom backup location
@@ -370,9 +547,6 @@ actor SessionPersistence: SessionPersistenceClient {
 
         let sidecar = Self.sidecarURL(for: sourceFolder)
         let backup = backupSessionURL(for: access.folderIdentity)
-        guard access.folderIdentity.matches(folder: sourceFolder) else {
-            return .sourceFolderChanged
-        }
         let expectedRevision = revisionByAccessID[access.id]
             ?? access.sidecarRevision
         let expectedBackupRevision = backupRevisionByAccessID[access.id]
@@ -422,33 +596,85 @@ actor SessionPersistence: SessionPersistenceClient {
         expectedBackupRevision: SidecarRevision,
         assignedGeneration: UInt64?
     ) -> SaveResult {
-        guard access.folderIdentity.matches(folder: sourceFolder) else {
+        var effectiveSidecarRevision = expectedRevision
+        switch Self.sourceFolderState(
+            expected: access.folderIdentity,
+            at: sourceFolder
+        ) {
+        case .matching:
+            break
+        case .unavailable:
+            return saveToBackupWhileSourceUnavailable(
+                data,
+                sourceFolder: sourceFolder,
+                sequence: sequence,
+                folderKey: folderKey,
+                access: access,
+                expectedSidecarRevision: effectiveSidecarRevision,
+                expectedBackupRevision: expectedBackupRevision,
+                assignedGeneration: assignedGeneration
+            )
+        case .changed:
             return .sourceFolderChanged
         }
-        guard Self.revisionsMatch(
-            expected: expectedRevision,
-            current: Self.sidecarRevision(at: sidecar)
-        ), Self.backupLineageAllowsSidecarSave(
+        let observedSidecarRevision = Self.sidecarRevision(at: sidecar)
+        let observedBackupRevision = Self.sidecarRevision(at: backup)
+        if Self.revisionsMatch(
+            expected: effectiveSidecarRevision,
+            current: observedSidecarRevision
+        ) {
+            if let possible = possibleCommittedSidecarRevisionByAccessID[
+                access.id
+            ], possible != observedSidecarRevision {
+                // Seeing the expected old sidecar proves the uncertain rename
+                // did not occupy this live path. Retire the one-shot exception
+                // before any later backup-only fallback can preserve it.
+                possibleCommittedSidecarRevisionByAccessID.removeValue(
+                    forKey: access.id
+                )
+            }
+        } else {
+            // A previous save can rename the sidecar successfully, lose the
+            // volume before directory sync, then secure its newest snapshot
+            // in the tracked backup. Adopt only the exact possible sidecar
+            // commit recorded by this same access; an ordinary rollback to an
+            // older backup remains an external-change conflict.
+            guard observedSidecarRevision
+                    == possibleCommittedSidecarRevisionByAccessID[access.id]
+            else {
+                return .sidecarChanged
+            }
+            effectiveSidecarRevision = observedSidecarRevision
+            revisionByAccessID[access.id] = observedSidecarRevision
+        }
+        guard Self.backupLineageAllowsSidecarSave(
             expected: expectedBackupRevision,
-            current: Self.sidecarRevision(at: backup)
+            current: observedBackupRevision
         ) else {
             return .sidecarChanged
         }
 
         let desiredRevision = SidecarRevision.content(Self.digest(data))
+        let afterSidecarReplaceHook = afterSidecarReplaceForTesting
         do {
             try DurableFileIO.atomicWrite(
                 data,
                 to: sidecar,
                 fullSync: true,
                 validateBeforeReplace: {
-                    guard access.folderIdentity.matches(
-                        folder: sourceFolder
-                    ) else {
+                    switch Self.sourceFolderState(
+                        expected: access.folderIdentity,
+                        at: sourceFolder
+                    ) {
+                    case .matching:
+                        break
+                    case .unavailable:
+                        throw SaveGuardError.sourceFolderUnavailable
+                    case .changed:
                         throw SaveGuardError.sourceFolderChanged
                     }
                     guard Self.revisionsMatch(
-                        expected: expectedRevision,
+                        expected: effectiveSidecarRevision,
                         current: Self.sidecarRevision(at: sidecar)
                     ), Self.backupLineageAllowsSidecarSave(
                         expected: expectedBackupRevision,
@@ -456,6 +682,9 @@ actor SessionPersistence: SessionPersistenceClient {
                     ) else {
                         throw SaveGuardError.sidecarChanged
                     }
+                },
+                afterReplaceForTesting: {
+                    try afterSidecarReplaceHook?()
                 }
             )
             let finalBackupRevision = writeBackupBestEffort(
@@ -471,14 +700,49 @@ actor SessionPersistence: SessionPersistenceClient {
                 folderKey: folderKey,
                 sequence: sequence
             )
+            possibleCommittedSidecarRevisionByAccessID.removeValue(
+                forKey: access.id
+            )
             return .savedToSidecar
+        } catch SaveGuardError.sourceFolderUnavailable {
+            return saveToBackupWhileSourceUnavailable(
+                data,
+                sourceFolder: sourceFolder,
+                sequence: sequence,
+                folderKey: folderKey,
+                access: access,
+                expectedSidecarRevision: effectiveSidecarRevision,
+                expectedBackupRevision: expectedBackupRevision,
+                assignedGeneration: assignedGeneration
+            )
         } catch SaveGuardError.sourceFolderChanged {
             return .sourceFolderChanged
         } catch SaveGuardError.sidecarChanged {
             return .sidecarChanged
         } catch {
             let sidecarFailure = Self.failureReason(for: error)
-            guard access.folderIdentity.matches(folder: sourceFolder) else {
+            switch Self.sourceFolderState(
+                expected: access.folderIdentity,
+                at: sourceFolder
+            ) {
+            case .matching:
+                break
+            case .unavailable:
+                // The sidecar transition can no longer be inspected. Keep
+                // its last proven revision and secure the newest snapshot in
+                // the identity-owned backup instead.
+                return saveToBackupWhileSourceUnavailable(
+                    data,
+                    sourceFolder: sourceFolder,
+                    sequence: sequence,
+                    folderKey: folderKey,
+                    access: access,
+                    expectedSidecarRevision: effectiveSidecarRevision,
+                    expectedBackupRevision: expectedBackupRevision,
+                    assignedGeneration: assignedGeneration,
+                    sidecarMayContainDesiredRevision: true
+                )
+            case .changed:
                 return .sourceFolderChanged
             }
             let observedRevision = Self.sidecarRevision(at: sidecar)
@@ -498,10 +762,13 @@ actor SessionPersistence: SessionPersistenceClient {
                     folderKey: folderKey,
                     sequence: sequence
                 )
+                possibleCommittedSidecarRevisionByAccessID.removeValue(
+                    forKey: access.id
+                )
                 return .savedToSidecar
             }
             guard Self.revisionsMatch(
-                expected: expectedRevision,
+                expected: effectiveSidecarRevision,
                 current: observedRevision
             ), Self.backupLineageAllowsSidecarSave(
                 expected: expectedBackupRevision,
@@ -523,7 +790,7 @@ actor SessionPersistence: SessionPersistenceClient {
                 )
                 recordSuccessfulSave(
                     accessID: access.id,
-                    sidecarRevision: expectedRevision,
+                    sidecarRevision: effectiveSidecarRevision,
                     backupRevision: desiredRevision,
                     assignedGeneration: assignedGeneration,
                     folderKey: folderKey,
@@ -533,6 +800,21 @@ actor SessionPersistence: SessionPersistenceClient {
             } catch SaveGuardError.sidecarChanged {
                 return .sidecarChanged
             } catch {
+                if recordCommittedBackupIfObserved(
+                    desiredRevision: desiredRevision,
+                    folderIdentity: access.folderIdentity,
+                    accessID: access.id,
+                    sidecarRevision: effectiveSidecarRevision,
+                    assignedGeneration: assignedGeneration,
+                    folderKey: folderKey,
+                    sequence: sequence
+                ) {
+                    // The backup rename committed and only the trailing
+                    // directory sync (or its deterministic test boundary)
+                    // failed. Adopt those exact bytes so Retry stays on the
+                    // same lineage instead of conflicting with our own save.
+                    return .savedToBackup(sidecarFailure: sidecarFailure)
+                }
                 // Do not mark the sequence as persisted. A later request (or
                 // an explicit retry of this snapshot) must still be accepted.
                 return .failed(SaveFailure(
@@ -540,6 +822,113 @@ actor SessionPersistence: SessionPersistenceClient {
                     backup: Self.failureReason(for: error)
                 ))
             }
+        }
+    }
+
+    /// An ejected card cannot receive its sidecar, but its already-captured
+    /// stable identity still owns one exact Application Support fallback.
+    /// Save there under the same lineage lock without touching or recreating
+    /// the absent source path. A replacement that appears before commit turns
+    /// this back into a source-folder conflict instead of inheriting ratings.
+    private func saveToBackupWhileSourceUnavailable(
+        _ data: Data,
+        sourceFolder: URL,
+        sequence: UInt64,
+        folderKey: String,
+        access: AccessContext,
+        expectedSidecarRevision: SidecarRevision,
+        expectedBackupRevision: SidecarRevision,
+        assignedGeneration: UInt64?,
+        sidecarMayContainDesiredRevision: Bool = false
+    ) -> SaveResult {
+        guard expectedBackupRevision != .unavailable else {
+            return .failed(SaveFailure(
+                sidecar: .volumeUnavailable,
+                backup: .other
+            ))
+        }
+        let desiredRevision = SidecarRevision.content(Self.digest(data))
+        var validatedSidecarRevision = expectedSidecarRevision
+        do {
+            try writeBackup(
+                data,
+                for: access.folderIdentity,
+                expectedRevision: expectedBackupRevision,
+                validateBeforeReplace: {
+                    switch Self.sourceFolderState(
+                        expected: access.folderIdentity,
+                        at: sourceFolder
+                    ) {
+                    case .unavailable:
+                        validatedSidecarRevision = expectedSidecarRevision
+                    case .changed:
+                        throw SaveGuardError.sourceFolderChanged
+                    case .matching:
+                        let current = Self.sidecarRevision(
+                            at: Self.sidecarURL(for: sourceFolder)
+                        )
+                        guard Self.revisionsMatch(
+                            expected: expectedSidecarRevision,
+                            current: current
+                        ) || (
+                            sidecarMayContainDesiredRevision
+                                && current == desiredRevision
+                        ) else {
+                            throw SaveGuardError.sidecarChanged
+                        }
+                        validatedSidecarRevision = current
+                    }
+                }
+            )
+            recordSuccessfulSave(
+                accessID: access.id,
+                sidecarRevision: validatedSidecarRevision,
+                backupRevision: desiredRevision,
+                assignedGeneration: assignedGeneration,
+                folderKey: folderKey,
+                sequence: sequence
+            )
+            if sidecarMayContainDesiredRevision,
+               validatedSidecarRevision != desiredRevision {
+                possibleCommittedSidecarRevisionByAccessID[access.id] =
+                    desiredRevision
+            } else {
+                possibleCommittedSidecarRevisionByAccessID.removeValue(
+                    forKey: access.id
+                )
+            }
+            return validatedSidecarRevision == desiredRevision
+                ? .savedToSidecar
+                : .savedToBackup(sidecarFailure: .volumeUnavailable)
+        } catch SaveGuardError.sourceFolderChanged {
+            return .sourceFolderChanged
+        } catch SaveGuardError.sidecarChanged {
+            return .sidecarChanged
+        } catch {
+            let possibleSidecarRevision = sidecarMayContainDesiredRevision
+                    && validatedSidecarRevision != desiredRevision
+                ? desiredRevision
+                : nil
+            if recordCommittedBackupIfObserved(
+                desiredRevision: desiredRevision,
+                folderIdentity: access.folderIdentity,
+                accessID: access.id,
+                sidecarRevision: validatedSidecarRevision,
+                assignedGeneration: assignedGeneration,
+                folderKey: folderKey,
+                sequence: sequence,
+                possibleSidecarRevision: possibleSidecarRevision
+            ) {
+                // As above, exact destination bytes prove the rename landed
+                // even when its following directory sync reported an error.
+                return validatedSidecarRevision == desiredRevision
+                    ? .savedToSidecar
+                    : .savedToBackup(sidecarFailure: .volumeUnavailable)
+            }
+            return .failed(SaveFailure(
+                sidecar: .volumeUnavailable,
+                backup: Self.failureReason(for: error)
+            ))
         }
     }
 
@@ -1025,6 +1414,38 @@ actor SessionPersistence: SessionPersistenceClient {
         latestSequenceByFolder[folderKey] = sequence
     }
 
+    /// `atomicWrite` can throw after its rename has committed. Exact
+    /// destination bytes are sufficient to adopt that commit and keep the
+    /// access's CAS/generation lineage usable for the next save.
+    private func recordCommittedBackupIfObserved(
+        desiredRevision: SidecarRevision,
+        folderIdentity: SourceFolderIdentity,
+        accessID: UUID,
+        sidecarRevision: SidecarRevision,
+        assignedGeneration: UInt64?,
+        folderKey: String,
+        sequence: UInt64,
+        possibleSidecarRevision: SidecarRevision? = nil
+    ) -> Bool {
+        let backup = backupSessionURL(for: folderIdentity)
+        guard Self.sidecarRevision(at: backup) == desiredRevision else {
+            return false
+        }
+        recordSuccessfulSave(
+            accessID: accessID,
+            sidecarRevision: sidecarRevision,
+            backupRevision: desiredRevision,
+            assignedGeneration: assignedGeneration,
+            folderKey: folderKey,
+            sequence: sequence
+        )
+        if let possibleSidecarRevision {
+            possibleCommittedSidecarRevisionByAccessID[accessID] =
+                possibleSidecarRevision
+        }
+        return true
+    }
+
     /// Updating the fallback is best-effort after a durable sidecar commit.
     /// Reconcile an error from exact bytes because `atomicWrite` can report a
     /// trailing directory-sync failure after its rename already committed.
@@ -1059,26 +1480,68 @@ actor SessionPersistence: SessionPersistenceClient {
     private func writeBackup(
         _ data: Data,
         for folderIdentity: SourceFolderIdentity,
-        expectedRevision: SidecarRevision
+        expectedRevision: SidecarRevision,
+        validateBeforeReplace: () throws -> Void = {}
     ) throws {
         try FileManager.default.createDirectory(
             at: backupDirectory,
             withIntermediateDirectories: true
         )
         let backup = backupSessionURL(for: folderIdentity)
+        let beforeValidationForTesting = beforeBackupValidationForTesting
+        let afterReplaceForTesting = afterBackupReplaceForTesting
         try DurableFileIO.atomicWrite(
             data,
             to: backup,
             fullSync: true,
             validateBeforeReplace: {
+                try beforeValidationForTesting?()
+                try validateBeforeReplace()
                 guard Self.revisionsMatch(
                     expected: expectedRevision,
                     current: Self.sidecarRevision(at: backup)
                 ) else {
                     throw SaveGuardError.sidecarChanged
                 }
+            },
+            afterReplaceForTesting: {
+                try afterReplaceForTesting?()
             }
         )
+    }
+
+    /// Distinguishes a genuinely absent/ejected path from a different folder
+    /// now occupying the same name. Only absence may use the identity-keyed
+    /// backup without a live identity check.
+    private static func sourceFolderState(
+        expected: SourceFolderIdentity,
+        at folder: URL
+    ) -> SourceFolderState {
+        // Device-number remapping is safe only after the complete folder can
+        // be captured and its UUID/folder identity proves this is the same
+        // reconnected volume. If the leaf is absent or unreadable, repeat the
+        // path decision with strict devices so a different blank card cannot
+        // masquerade as an ejected original merely because both roots use a
+        // common inode such as 2.
+        if let current = try? SourceFolderIdentity.capture(at: folder) {
+            guard current == expected else { return .changed }
+            return expected.pathState(
+                at: folder,
+                allowSourceVolumeDeviceRemapping: true
+            ) == .matching ? .matching : .changed
+        }
+        switch expected.pathState(
+            at: folder,
+            allowSourceVolumeDeviceRemapping: false
+        ) {
+        case .unavailable:
+            return .unavailable
+        case .changed, .matching:
+            // Every exact path entry either changed or still exists with its
+            // original strict identity. In both cases, inability to capture
+            // the final directory is ambiguity rather than proof of eject.
+            return .changed
+        }
     }
 
     static func sidecarURL(for folder: URL) -> URL {
@@ -1176,6 +1639,13 @@ actor SessionPersistence: SessionPersistenceClient {
     }
 
     private static func failureReason(for error: Error) -> FailureReason {
+        if case DurableFileIO.IOError.system(
+            operation: "wait for persistence lock",
+            path: _,
+            code: _
+        ) = error {
+            return .busy
+        }
         let nsError = error as NSError
         if nsError.domain == NSCocoaErrorDomain {
             switch CocoaError.Code(rawValue: nsError.code) {

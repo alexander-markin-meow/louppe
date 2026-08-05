@@ -43,23 +43,25 @@ struct SessionView: View {
                 Text(clearAllRatingsMessage)
             }
             .alert(
-                "Use Saved Ratings?",
+                legacyMigrationTitle,
                 isPresented: legacyMigrationConfirmationPresented
             ) {
-                Button("Use Saved Ratings") {
-                    store.confirmLegacySessionMigration()
+                if store.legacySessionMigrationMissingFileCount > 0 {
+                    Button(legacyMissingFilesActionTitle, role: .destructive) {
+                        store.confirmLegacySessionMigration()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                } else {
+                    Button("Use Saved Ratings") {
+                        store.confirmLegacySessionMigration()
+                    }
+                    .keyboardShortcut(.defaultAction)
                 }
-                .keyboardShortcut(.defaultAction)
                 Button("Close Folder", role: .cancel) {
                     store.closeLegacySessionWithoutMigrating()
                 }
             } message: {
-                Text(
-                    "This folder contains ratings saved by an older version of Louppe. "
-                        + "Every saved filename is present, but the older session cannot prove that the files are the exact originals. "
-                        + "Use Saved Ratings upgrades the session and binds each rating to its physical file. "
-                        + "Close Folder leaves the existing session untouched."
-                )
+                Text(legacyMigrationMessage)
             }
             .confirmationDialog(
                 cleanUpTitle,
@@ -106,6 +108,50 @@ struct SessionView: View {
             // Only the two explicit alert actions may resolve this gate.
             set: { _ in }
         )
+    }
+
+    private var legacyMigrationTitle: String {
+        switch store.legacySessionMigrationMissingFileCount {
+        case 0:
+            return "Use Saved Ratings?"
+        case 1:
+            return "A Saved File Is Missing"
+        default:
+            return "Saved Files Are Missing"
+        }
+    }
+
+    private var legacyMissingFilesActionTitle: String {
+        store.legacySessionMigrationMissingFileCount == 1
+            ? "Open Folder and Forget Missing Item"
+            : "Open Folder and Forget Missing Items"
+    }
+
+    private var legacyMigrationMessage: String {
+        let count = store.legacySessionMigrationMissingFileCount
+        guard count > 0 else {
+            return "This folder contains ratings saved by an older version of Louppe. "
+                + "Every saved filename is present, but the older session cannot prove that the files are the exact originals. "
+                + "Use Saved Ratings upgrades the session and binds each rating to its physical file. "
+                + "Close Folder leaves the existing session untouched."
+        }
+        let files = count == 1
+            ? "1 file that is"
+            : "\(count) files that are"
+        let availability = count == 1
+            ? "it was deleted intentionally or is temporarily unavailable"
+            : "they were deleted intentionally or are temporarily unavailable"
+        let ratings = count == 1
+            ? "that old saved rating"
+            : "those old saved ratings"
+        var message = "This older Louppe session has saved ratings for \(files) no longer in the folder. "
+            + "Louppe cannot tell whether \(availability). "
+            + "Open Folder and Forget Missing \(count == 1 ? "Item" : "Items") removes only \(ratings), keeps the ratings for files still here, and upgrades the session. "
+            + "Close Folder changes nothing."
+        if store.legacySessionMigrationUsesUnownedBackup {
+            message += " These ratings also came from an older local backup that is not tied to this exact folder; opening will bind the surviving same-name ratings to the files currently here."
+        }
+        return message
     }
 
     private var isCleanUpErrorPresented: Binding<Bool> {
@@ -991,7 +1037,7 @@ struct CleanUpMenuItems: View {
         Button(store.selectionCleanUpTitle) {
             store.requestCleanUp(.selection)
         }
-        .disabled(store.isFileOperationRunning || !store.hasCleanUpTargets(for: .selection))
+        .disabled(store.isNewFileOperationBlocked || !store.hasCleanUpTargets(for: .selection))
         Divider()
         Picker("For “No” / “Yes” Actions", selection: $store.cleanUpScope) {
             cleanUpScopeLabel("All Photos", scope: .all)
@@ -1002,16 +1048,16 @@ struct CleanUpMenuItems: View {
                 .tag(CleanUpScope.selected)
         }
         .pickerStyle(.inline)
-        .disabled(store.isFileOperationRunning)
+        .disabled(store.isNewFileOperationBlocked)
         Divider()
         Button("Move “No” to Trash…") {
             store.requestCleanUp(.trashNo)
         }
-        .disabled(store.isFileOperationRunning || !store.hasCleanUpTargets(for: .trashNo))
+        .disabled(store.isNewFileOperationBlocked || !store.hasCleanUpTargets(for: .trashNo))
         Button("Keep Only “Yes”…") {
             store.requestCleanUp(.keepOnlyYes)
         }
-        .disabled(store.isFileOperationRunning || !store.hasCleanUpTargets(for: .keepOnlyYes))
+        .disabled(store.isNewFileOperationBlocked || !store.hasCleanUpTargets(for: .keepOnlyYes))
     }
 
     private func cleanUpScopeLabel(_ title: String, scope: CleanUpScope) -> Text {

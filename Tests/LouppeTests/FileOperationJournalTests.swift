@@ -360,6 +360,94 @@ final class FileOperationJournalTests: XCTestCase {
             )
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: externalPlan.path))
+
+        let kept = FileOperationJournal
+            .keepFilesAsTheyAreAndForgetPendingOperations(
+                directory: fixture.journals
+            )
+        XCTAssertEqual(kept.unresolvedOperations, 0)
+        XCTAssertFalse(
+            FileOperationJournal.hasPendingOperations(
+                directory: fixture.journals
+            )
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: externalPlan.path),
+            "forgetting Louppe's record must not follow or remove its symlink target"
+        )
+    }
+
+    func testKeepQuarantinesCanonicalCorruptRecordWithoutDeletingContents() throws {
+        let fixture = try makeFixture(named: "KeepCorruptRecord")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try FileManager.default.createDirectory(
+            at: fixture.journals,
+            withIntermediateDirectories: true
+        )
+        let operationID = UUID().uuidString.lowercased()
+        let operation = fixture.journals.appendingPathComponent(
+            "\(operationID).operation",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: operation,
+            withIntermediateDirectories: false
+        )
+        let unexpectedMedia = operation.appendingPathComponent("PHOTO.NEF")
+        let contents = Data("must remain untouched".utf8)
+        try contents.write(to: unexpectedMedia)
+
+        XCTAssertTrue(FileOperationJournal.hasPendingOperations(
+            directory: fixture.journals
+        ))
+        let kept = FileOperationJournal
+            .keepFilesAsTheyAreAndForgetPendingOperations(
+                directory: fixture.journals
+            )
+
+        XCTAssertEqual(kept.discoveredOperations, 1)
+        XCTAssertEqual(kept.restoredOperations, 1)
+        XCTAssertEqual(kept.unresolvedOperations, 0)
+        XCTAssertFalse(FileOperationJournal.hasPendingOperations(
+            directory: fixture.journals
+        ))
+        let forgotten = try XCTUnwrap(
+            try FileManager.default.contentsOfDirectory(
+                at: fixture.journals,
+                includingPropertiesForKeys: nil
+            ).first(where: { $0.pathExtension == "forgotten" })
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: forgotten.appendingPathComponent("PHOTO.NEF")),
+            contents,
+            "Keep must rename the record out of the active set without deleting any entry"
+        )
+    }
+
+    func testNoncanonicalOperationNameIsNeverAdoptedOrDeleted() throws {
+        let fixture = try makeFixture(named: "NoncanonicalOperation")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let stray = fixture.journals.appendingPathComponent(
+            "photos.operation",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: stray,
+            withIntermediateDirectories: true
+        )
+        let payload = stray.appendingPathComponent("PHOTO.JPG")
+        let contents = Data("not Louppe metadata".utf8)
+        try contents.write(to: payload)
+
+        XCTAssertFalse(FileOperationJournal.hasPendingOperations(
+            directory: fixture.journals
+        ))
+        let kept = FileOperationJournal
+            .keepFilesAsTheyAreAndForgetPendingOperations(
+                directory: fixture.journals
+            )
+        XCTAssertEqual(kept.discoveredOperations, 0)
+        XCTAssertEqual(try Data(contentsOf: payload), contents)
     }
 
     func testOperationLockRefusesLeafSymlink() throws {
@@ -678,7 +766,365 @@ final class FileOperationJournalTests: XCTestCase {
         )
     }
 
-    func testResolvedTrashDestinationRoundTripsExactBytesAndRecoveryUsesThem() throws {
+    func testStartedTrashRecoveryAcceptsCurrentLocationWithoutRestoring() throws {
+        let fixture = try makeFixture(named: "StartedTrashCurrentLocation")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let unreportedTrashLocation = fixture.root.appendingPathComponent(
+            "UNREPORTED-TRASH-LOCATION.JPG"
+        )
+        let originalContents = try Data(contentsOf: fixture.source)
+        let writer = try FileOperationJournal.start(
+            kind: .moveToTrash,
+            seeds: [
+                .init(
+                    itemID: "SOURCE.JPG",
+                    source: fixture.source,
+                    destination: nil
+                ),
+            ],
+            directory: fixture.journals
+        )
+
+        // This is the production failure window behind the reported banner:
+        // Trash moved the file after `.started`, but no destination checkpoint
+        // became durable. Recovery must accept that intentional Clean Up result
+        // without searching for or restoring the file.
+        try writer.mark(.started, fileAt: 0)
+        try FileManager.default.moveItem(
+            at: fixture.source,
+            to: unreportedTrashLocation
+        )
+        XCTAssertTrue(FileOperationJournal.finalize(
+            writer,
+            operationIsConsistent: false
+        ))
+
+        let report = FileOperationJournal.recoverPendingOperations(
+            directory: fixture.journals
+        )
+
+        XCTAssertEqual(report.restoredOperations, 1)
+        XCTAssertEqual(report.restoredFiles, 0)
+        XCTAssertEqual(report.unresolvedOperations, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.source.path))
+        XCTAssertEqual(
+            try Data(contentsOf: unreportedTrashLocation),
+            originalContents
+        )
+        XCTAssertFalse(
+            FileOperationJournal.hasPendingOperations(
+                directory: fixture.journals
+            )
+        )
+    }
+
+    func testInterruptedPairedTrashStaysForExplicitKeepDecision() throws {
+        let fixture = try makeFixture(named: "InterruptedPairedTrash")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let jpeg = fixture.root.appendingPathComponent("PAIR.JPG")
+        let raw = fixture.root.appendingPathComponent("SOURCE.RAW")
+        let simulatedTrash = fixture.root.appendingPathComponent("TRASH.RAW")
+        try FileManager.default.moveItem(at: fixture.source, to: jpeg)
+        try Data("raw".utf8).write(to: raw)
+        let writer = try FileOperationJournal.start(
+            kind: .moveToTrash,
+            seeds: [
+                .init(itemID: "pair", source: raw, destination: nil),
+                .init(itemID: "pair", source: jpeg, destination: nil),
+            ],
+            directory: fixture.journals
+        )
+        try writer.mark(.started, fileAt: 0)
+        try DurableFileIO.atomicExclusiveRename(
+            from: raw,
+            to: simulatedTrash
+        )
+        let trashedIdentity = try FileOperationJournal.captureIdentity(
+            at: simulatedTrash
+        )
+        try writer.mark(
+            .completed,
+            fileAt: 0,
+            resolvedDestination: simulatedTrash,
+            identityAt: simulatedTrash,
+            expectedIdentity: trashedIdentity
+        )
+        XCTAssertTrue(FileOperationJournal.finalize(
+            writer,
+            operationIsConsistent: false
+        ))
+
+        let report = FileOperationJournal.recoverPendingOperations(
+            directory: fixture.journals
+        )
+        XCTAssertEqual(report.unresolvedOperations, 1)
+        XCTAssertEqual(report.unresolvedFiles, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: raw.path))
+        XCTAssertEqual(try Data(contentsOf: simulatedTrash), Data("raw".utf8))
+        XCTAssertEqual(try Data(contentsOf: jpeg), Data("source".utf8))
+        XCTAssertTrue(
+            FileOperationJournal.hasPendingOperations(
+                directory: fixture.journals
+            )
+        )
+
+        let kept = FileOperationJournal
+            .keepFilesAsTheyAreAndForgetPendingOperations(
+                directory: fixture.journals
+            )
+        XCTAssertEqual(kept.unresolvedOperations, 0)
+        XCTAssertFalse(
+            FileOperationJournal.hasPendingOperations(
+                directory: fixture.journals
+            )
+        )
+        XCTAssertEqual(try Data(contentsOf: simulatedTrash), Data("raw".utf8))
+        XCTAssertEqual(try Data(contentsOf: jpeg), Data("source".utf8))
+    }
+
+    func testCompletedMoveRecoveryKeepsDestination() throws {
+        let fixture = try makeFixture(named: "CompletedMoveForward")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let writer = try FileOperationJournal.start(
+            kind: .exportMove,
+            seeds: [
+                .init(
+                    itemID: "SOURCE.JPG",
+                    source: fixture.source,
+                    destination: fixture.destination
+                ),
+            ],
+            directory: fixture.journals
+        )
+        try writer.mark(.started, fileAt: 0)
+        try DurableFileIO.atomicExclusiveRename(
+            from: fixture.source,
+            to: fixture.destination
+        )
+        let destinationIdentity = try FileOperationJournal.captureIdentity(
+            at: fixture.destination
+        )
+        try writer.mark(
+            .completed,
+            fileAt: 0,
+            identityAt: fixture.destination,
+            expectedIdentity: destinationIdentity
+        )
+        XCTAssertTrue(FileOperationJournal.finalize(
+            writer,
+            operationIsConsistent: false
+        ))
+
+        let report = FileOperationJournal.recoverPendingOperations(
+            directory: fixture.journals
+        )
+        XCTAssertEqual(report.unresolvedOperations, 0)
+        XCTAssertEqual(report.preservedMoves, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.source.path))
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.destination),
+            Data("source".utf8)
+        )
+    }
+
+    func testCompletedPairedMoveRecoveryKeepsBothDestinations() throws {
+        let fixture = try makeFixture(named: "CompletedPairedMoveForward")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let rawSource = fixture.root.appendingPathComponent("SOURCE.RAW")
+        let rawDestination = fixture.root.appendingPathComponent("COPY.RAW")
+        try Data("raw".utf8).write(to: rawSource)
+        let sources = [fixture.source, rawSource]
+        let destinations = [fixture.destination, rawDestination]
+        let writer = try FileOperationJournal.start(
+            kind: .exportMove,
+            seeds: zip(sources, destinations).map { source, destination in
+                .init(
+                    itemID: "pair",
+                    source: source,
+                    destination: destination
+                )
+            },
+            directory: fixture.journals
+        )
+
+        for index in sources.indices {
+            try writer.mark(.started, fileAt: index)
+            try DurableFileIO.atomicExclusiveRename(
+                from: sources[index],
+                to: destinations[index]
+            )
+            let destinationIdentity = try FileOperationJournal.captureIdentity(
+                at: destinations[index]
+            )
+            try writer.mark(
+                .completed,
+                fileAt: index,
+                identityAt: destinations[index],
+                expectedIdentity: destinationIdentity
+            )
+        }
+        XCTAssertTrue(FileOperationJournal.finalize(
+            writer,
+            operationIsConsistent: false
+        ))
+
+        let report = FileOperationJournal.recoverPendingOperations(
+            directory: fixture.journals
+        )
+        XCTAssertEqual(report.unresolvedOperations, 0)
+        XCTAssertEqual(report.preservedMoves, 2)
+        XCTAssertEqual(report.restoredFiles, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.source.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rawSource.path))
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.destination),
+            Data("source".utf8)
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: rawDestination),
+            Data("raw".utf8)
+        )
+    }
+
+    func testPartiallyCompletedPairedMoveRecoveryRestoresThePair() throws {
+        let fixture = try makeFixture(named: "PartialPairedMoveRollback")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let rawSource = fixture.root.appendingPathComponent("SOURCE.RAW")
+        let rawDestination = fixture.root.appendingPathComponent("COPY.RAW")
+        try Data("raw".utf8).write(to: rawSource)
+        let writer = try FileOperationJournal.start(
+            kind: .exportMove,
+            seeds: [
+                .init(
+                    itemID: "pair",
+                    source: fixture.source,
+                    destination: fixture.destination
+                ),
+                .init(
+                    itemID: "pair",
+                    source: rawSource,
+                    destination: rawDestination
+                ),
+            ],
+            directory: fixture.journals
+        )
+        try writer.mark(.started, fileAt: 0)
+        try DurableFileIO.atomicExclusiveRename(
+            from: fixture.source,
+            to: fixture.destination
+        )
+        let destinationIdentity = try FileOperationJournal.captureIdentity(
+            at: fixture.destination
+        )
+        try writer.mark(
+            .completed,
+            fileAt: 0,
+            identityAt: fixture.destination,
+            expectedIdentity: destinationIdentity
+        )
+        try writer.mark(.started, fileAt: 1)
+        XCTAssertTrue(FileOperationJournal.finalize(
+            writer,
+            operationIsConsistent: false
+        ))
+
+        let report = FileOperationJournal.recoverPendingOperations(
+            directory: fixture.journals
+        )
+        XCTAssertEqual(report.unresolvedOperations, 0)
+        XCTAssertEqual(report.preservedMoves, 0)
+        XCTAssertEqual(report.restoredFiles, 1)
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.source),
+            Data("source".utf8)
+        )
+        XCTAssertEqual(try Data(contentsOf: rawSource), Data("raw".utf8))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.destination.path)
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rawDestination.path))
+    }
+
+    func testTrashUndoRecoverySyncsOnlyTheRestoredPhotoDirectory() throws {
+        let fixture = try makeFixture(named: "ProtectedTrashUndo")
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try FileManager.default.removeItem(at: fixture.source)
+        let sourceFolder = fixture.root.appendingPathComponent(
+            "Source",
+            isDirectory: true
+        )
+        let protectedTrashFolder = fixture.root.appendingPathComponent(
+            "ProtectedTrash",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: sourceFolder,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: protectedTrashFolder,
+            withIntermediateDirectories: true
+        )
+        let source = sourceFolder.appendingPathComponent("SOURCE.JPG")
+        let trash = protectedTrashFolder.appendingPathComponent("SOURCE.JPG")
+        let originalContents = Data("trashed original".utf8)
+        try originalContents.write(to: trash)
+        let writer = try FileOperationJournal.start(
+            kind: .restoreFromTrash,
+            seeds: [
+                .init(
+                    itemID: "SOURCE.JPG",
+                    source: source,
+                    destination: trash,
+                    identityURL: trash
+                ),
+            ],
+            directory: fixture.journals
+        )
+        try writer.mark(.started, fileAt: 0)
+        XCTAssertTrue(FileOperationJournal.finalize(
+            writer,
+            operationIsConsistent: false
+        ))
+
+        // Rename needs write + search permission, but opening this directory
+        // read-only for fsync does not. This models protected macOS Trash
+        // directories and proves recovery syncs only the restored destination.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o300],
+            ofItemAtPath: protectedTrashFolder.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: protectedTrashFolder.path
+            )
+        }
+        XCTAssertThrowsError(
+            try DurableFileIO.syncDirectory(
+                protectedTrashFolder,
+                fullSync: true
+            ),
+            "the fixture must reject the protected Trash-directory sync"
+        )
+
+        let report = FileOperationJournal.recoverPendingOperations(
+            directory: fixture.journals
+        )
+
+        XCTAssertEqual(report.restoredOperations, 1)
+        XCTAssertEqual(report.restoredFiles, 1)
+        XCTAssertEqual(report.unresolvedOperations, 0)
+        XCTAssertEqual(try Data(contentsOf: source), originalContents)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: trash.path))
+        XCTAssertFalse(
+            FileOperationJournal.hasPendingOperations(
+                directory: fixture.journals
+            )
+        )
+    }
+
+    func testResolvedTrashDestinationRoundTripsExactBytesAndRecoveryLeavesItThere() throws {
         let fixture = try makeFixture(named: "ExactTrashDestination")
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         try FileManager.default.removeItem(at: fixture.source)
@@ -746,13 +1192,19 @@ final class FileOperationJournalTests: XCTestCase {
         let report = FileOperationJournal.recoverPendingOperations(
             directory: fixture.journals
         )
-        XCTAssertEqual(report.restoredFiles, 1)
+        XCTAssertEqual(report.restoredOperations, 1)
+        XCTAssertEqual(report.restoredFiles, 0)
         XCTAssertEqual(report.unresolvedOperations, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
         XCTAssertEqual(
-            try Data(contentsOf: source),
+            try Data(contentsOf: trash),
             Data("irreplaceable".utf8)
         )
-        XCTAssertFalse(FileManager.default.fileExists(atPath: trash.path))
+        XCTAssertFalse(
+            FileOperationJournal.hasPendingOperations(
+                directory: fixture.journals
+            )
+        )
     }
 
     func testVersionTwoPlanWithoutRawPathFieldsRemainsReadable() throws {

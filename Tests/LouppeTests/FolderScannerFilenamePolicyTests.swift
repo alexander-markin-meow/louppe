@@ -74,13 +74,13 @@ final class FolderScannerFilenamePolicyTests: XCTestCase {
         XCTAssertTrue(pairs.allSatisfy { $0.paired == nil })
     }
 
-    func testPairingNeverFoldsParentDirectoriesTogether() {
+    func testPairingAcrossSubfoldersRequiresOneUnambiguousPair() throws {
         let root = URL(fileURLWithPath: "/Photos", isDirectory: true)
         let raw = root
-            .appendingPathComponent("straße", isDirectory: true)
+            .appendingPathComponent("RAW", isDirectory: true)
             .appendingPathComponent("SHOT.NEF")
         let jpeg = root
-            .appendingPathComponent("STRASSE", isDirectory: true)
+            .appendingPathComponent("JPEG", isDirectory: true)
             .appendingPathComponent("shot.JPG")
 
         let pairs = FolderScanner.pairFiles(
@@ -89,8 +89,20 @@ final class FolderScannerFilenamePolicyTests: XCTestCase {
             filenamePolicy: .init(caseSensitiveNames: false)
         )
 
-        XCTAssertEqual(pairs.count, 2)
-        XCTAssertTrue(pairs.allSatisfy { $0.paired == nil })
+        let pair = try XCTUnwrap(pairs.only)
+        XCTAssertEqual(pair.primary, raw)
+        XCTAssertEqual(pair.paired, jpeg)
+
+        let duplicateJPEG = root
+            .appendingPathComponent("Edited", isDirectory: true)
+            .appendingPathComponent("SHOT.jpeg")
+        let ambiguous = FolderScanner.pairFiles(
+            [raw, jpeg, duplicateJPEG],
+            pairingMode: .together,
+            filenamePolicy: .init(caseSensitiveNames: false)
+        )
+        XCTAssertEqual(ambiguous.count, 3)
+        XCTAssertTrue(ambiguous.allSatisfy { $0.paired == nil })
     }
 
     func testUnknownVolumeCapabilityDefaultsToCaseSensitive() {

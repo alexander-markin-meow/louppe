@@ -118,7 +118,7 @@ enum FolderScanner {
         let enrichedFileCount: Int
     }
 
-    /// Filename equality used only for RAW+JPEG pairing.
+    /// Filename-stem equality used only for RAW+JPEG pairing.
     ///
     /// A case-insensitive volume may equate `SHOT` and `shot`, but it does not
     /// equate genuinely different accented names such as `cafe` and `café`.
@@ -128,20 +128,15 @@ enum FolderScanner {
         let caseSensitiveNames: Bool
 
         fileprivate struct Key: Hashable, Comparable {
-            /// Keep directory identity exact. Applying filename folding to the
-            /// whole path can collapse two independently named directories.
-            let parentBytes: Data
-            /// Conservative stem equality: exact bytes on case-sensitive or
-            /// unknown volumes, ASCII case folding only when the volume
-            /// explicitly reports case-insensitive names.
+            /// Conservative stem equality across the whole opened folder:
+            /// exact bytes on case-sensitive or unknown volumes, ASCII case
+            /// folding only when the volume explicitly reports
+            /// case-insensitive names. A group is paired only when it contains
+            /// exactly one RAW and one JPEG, so repeated camera filenames in
+            /// different subfolders remain safely independent.
             let stemBytes: Data
 
             static func < (lhs: Key, rhs: Key) -> Bool {
-                if lhs.parentBytes != rhs.parentBytes {
-                    return lhs.parentBytes.lexicographicallyPrecedes(
-                        rhs.parentBytes
-                    )
-                }
                 return lhs.stemBytes.lexicographicallyPrecedes(rhs.stemBytes)
             }
         }
@@ -161,10 +156,8 @@ enum FolderScanner {
             let extensionSeparator = path[filenameStart...]
                 .lastIndex(of: 46)
             let stemEnd = extensionSeparator ?? path.endIndex
-            let parentEnd = separator ?? path.startIndex
             let stem = Array(path[filenameStart..<stemEnd])
             return Key(
-                parentBytes: Data(path[..<parentEnd]),
                 stemBytes: caseSensitiveNames
                     ? Data(stem)
                     : Data(stem.map(Self.foldASCIICase))

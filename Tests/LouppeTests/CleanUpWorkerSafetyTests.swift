@@ -3,6 +3,233 @@ import XCTest
 @testable import Louppe
 
 final class CleanUpWorkerSafetyTests: XCTestCase {
+    func testCleanUpDoesNotRequireOpeningProtectedTrashDirectory() throws {
+        let root = try makeTemporaryDirectory(named: "ProtectedTrash")
+        let photos = root.appendingPathComponent("Photos", isDirectory: true)
+        let trash = root.appendingPathComponent(".Trash", isDirectory: true)
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: photos,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: trash,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? setDirectoryPermissions(0o700, at: trash)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let source = photos.appendingPathComponent("SOURCE.JPG")
+        let contents = Data("original".utf8)
+        try contents.write(to: source)
+        let item = makeItem(id: "SOURCE.JPG", primaryURL: source)
+        let fileManager = ProtectedTrashFileManager(trashDirectory: trash)
+        try setDirectoryPermissions(0o300, at: trash)
+        XCTAssertThrowsError(
+            try DurableFileIO.syncDirectory(trash, fullSync: true),
+            "the fixture must reject the direct Trash-directory sync that caused the production failure"
+        )
+
+        let result = CleanUpWorker.moveToTrash(
+            [CleanUpPhotoSnapshot(index: 0, item: item)],
+            journalDirectory: journals,
+            fileManager: fileManager
+        ) { _, _ in }
+
+        XCTAssertEqual(result.succeeded.count, 1)
+        XCTAssertEqual(result.failedPhotos, 0)
+        XCTAssertEqual(result.inconsistentPhotos, 0)
+        XCTAssertFalse(result.journalFailure)
+        XCTAssertFalse(result.requiresRecovery)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        let landed = try XCTUnwrap(result.succeeded.first?.files.first?.trash)
+        XCTAssertEqual(try Data(contentsOf: landed), contents)
+        XCTAssertFalse(FileOperationJournal.hasPendingOperations(directory: journals))
+    }
+
+    func testTrashUndoDoesNotRequireOpeningProtectedTrashDirectory() throws {
+        let root = try makeTemporaryDirectory(named: "ProtectedTrashUndo")
+        let photos = root.appendingPathComponent("Photos", isDirectory: true)
+        let trashDirectory = root.appendingPathComponent(".Trash", isDirectory: true)
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: photos,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: trashDirectory,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? setDirectoryPermissions(0o700, at: trashDirectory)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let original = photos.appendingPathComponent("SOURCE.JPG")
+        let trash = trashDirectory.appendingPathComponent("SOURCE.JPG")
+        let contents = Data("original".utf8)
+        try contents.write(to: original)
+        let item = makeItem(id: "SOURCE.JPG", primaryURL: original)
+        try ExportWorker.atomicExclusiveRename(from: original, to: trash)
+        let identity = try FileOperationJournal.captureIdentity(at: trash)
+        try setDirectoryPermissions(0o300, at: trashDirectory)
+        XCTAssertThrowsError(
+            try DurableFileIO.syncDirectory(trashDirectory, fullSync: true)
+        )
+
+        let result = CleanUpWorker.restore(
+            [
+                TrashedPhotoSnapshot(
+                    index: 0,
+                    item: item,
+                    files: [
+                        TrashedFile(
+                            original: original,
+                            trash: trash,
+                            identity: identity
+                        ),
+                    ]
+                ),
+            ],
+            journalDirectory: journals
+        ) { _, _ in }
+
+        XCTAssertEqual(result.restored.count, 1)
+        XCTAssertEqual(result.lostPhotos, 0)
+        XCTAssertEqual(result.inconsistentPhotos, 0)
+        XCTAssertFalse(result.journalFailure)
+        XCTAssertFalse(result.requiresRecovery)
+        XCTAssertEqual(try Data(contentsOf: original), contents)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: trash.path))
+        XCTAssertFalse(FileOperationJournal.hasPendingOperations(directory: journals))
+    }
+
+    func testCleanUpPairRollbackDoesNotSyncProtectedTrashDirectory() throws {
+        let root = try makeTemporaryDirectory(named: "ProtectedTrashRollback")
+        let photos = root.appendingPathComponent("Photos", isDirectory: true)
+        let trash = root.appendingPathComponent(".Trash", isDirectory: true)
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: photos,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: trash,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? setDirectoryPermissions(0o700, at: trash)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let primary = photos.appendingPathComponent("PAIR.RAW")
+        let paired = photos.appendingPathComponent("PAIR.JPG")
+        let primaryContents = Data("raw".utf8)
+        let pairedContents = Data("jpeg".utf8)
+        try primaryContents.write(to: primary)
+        try pairedContents.write(to: paired)
+        let item = makeItem(
+            id: "PAIR.RAW",
+            primaryURL: primary,
+            pairedURL: paired
+        )
+        let fileManager = ProtectedTrashFileManager(
+            trashDirectory: trash,
+            failingCall: 2
+        )
+        try setDirectoryPermissions(0o300, at: trash)
+
+        let result = CleanUpWorker.moveToTrash(
+            [CleanUpPhotoSnapshot(index: 0, item: item)],
+            journalDirectory: journals,
+            fileManager: fileManager
+        ) { _, _ in }
+
+        XCTAssertTrue(result.succeeded.isEmpty)
+        XCTAssertEqual(result.failedPhotos, 1)
+        XCTAssertEqual(result.inconsistentPhotos, 0)
+        XCTAssertFalse(result.journalFailure)
+        XCTAssertFalse(result.requiresRecovery)
+        XCTAssertEqual(try Data(contentsOf: primary), primaryContents)
+        XCTAssertEqual(try Data(contentsOf: paired), pairedContents)
+        XCTAssertFalse(FileOperationJournal.hasPendingOperations(directory: journals))
+    }
+
+    func testTrashUndoKeepsRestoredPairMemberOutOfProtectedTrash() throws {
+        let root = try makeTemporaryDirectory(named: "ProtectedTrashUndoRollback")
+        let photos = root.appendingPathComponent("Photos", isDirectory: true)
+        let trashDirectory = root.appendingPathComponent(".Trash", isDirectory: true)
+        let journals = root.appendingPathComponent("Journals", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: photos,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: trashDirectory,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? setDirectoryPermissions(0o700, at: trashDirectory)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let primary = photos.appendingPathComponent("PAIR.RAW")
+        let paired = photos.appendingPathComponent("PAIR.JPG")
+        let primaryTrash = trashDirectory.appendingPathComponent("PAIR.RAW")
+        let pairedTrash = trashDirectory.appendingPathComponent("PAIR.JPG")
+        let primaryContents = Data("raw".utf8)
+        let pairedContents = Data("jpeg".utf8)
+        let blockerContents = Data("replacement".utf8)
+        try primaryContents.write(to: primary)
+        try pairedContents.write(to: paired)
+        let item = makeItem(
+            id: "PAIR.RAW",
+            primaryURL: primary,
+            pairedURL: paired
+        )
+        try ExportWorker.atomicExclusiveRename(from: primary, to: primaryTrash)
+        try ExportWorker.atomicExclusiveRename(from: paired, to: pairedTrash)
+        let primaryIdentity = try FileOperationJournal.captureIdentity(at: primaryTrash)
+        let pairedIdentity = try FileOperationJournal.captureIdentity(at: pairedTrash)
+        try blockerContents.write(to: paired)
+        try setDirectoryPermissions(0o300, at: trashDirectory)
+
+        let result = CleanUpWorker.restore(
+            [
+                TrashedPhotoSnapshot(
+                    index: 0,
+                    item: item,
+                    files: [
+                        TrashedFile(
+                            original: primary,
+                            trash: primaryTrash,
+                            identity: primaryIdentity
+                        ),
+                        TrashedFile(
+                            original: paired,
+                            trash: pairedTrash,
+                            identity: pairedIdentity
+                        ),
+                    ]
+                ),
+            ],
+            journalDirectory: journals
+        ) { _, _ in }
+
+        XCTAssertTrue(result.restored.isEmpty)
+        XCTAssertEqual(result.lostPhotos, 1)
+        XCTAssertEqual(result.inconsistentPhotos, 1)
+        XCTAssertFalse(result.journalFailure)
+        XCTAssertTrue(result.requiresRecovery)
+        XCTAssertEqual(try Data(contentsOf: primary), primaryContents)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: primaryTrash.path))
+        XCTAssertEqual(try Data(contentsOf: pairedTrash), pairedContents)
+        XCTAssertEqual(try Data(contentsOf: paired), blockerContents)
+        XCTAssertTrue(FileOperationJournal.hasPendingOperations(directory: journals))
+    }
+
     func testCleanUpRejectsSamePathReplacementCapturedAfterScan() throws {
         let root = try makeTemporaryDirectory(named: "ScanReplacement")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -260,6 +487,16 @@ final class CleanUpWorkerSafetyTests: XCTestCase {
         return root
     }
 
+    private func setDirectoryPermissions(
+        _ permissions: Int,
+        at directory: URL
+    ) throws {
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: permissions)],
+            ofItemAtPath: directory.path
+        )
+    }
+
     private func makeItem(
         id: String,
         primaryURL: URL,
@@ -275,6 +512,33 @@ final class CleanUpWorkerSafetyTests: XCTestCase {
             fileSize: 1,
             pairedFileSize: pairedURL == nil ? 0 : 1
         )
+    }
+}
+
+private final class ProtectedTrashFileManager: FileManager, @unchecked Sendable {
+    private let trashDirectory: URL
+    private let failingCall: Int?
+    private var callCount = 0
+
+    init(trashDirectory: URL, failingCall: Int? = nil) {
+        self.trashDirectory = trashDirectory
+        self.failingCall = failingCall
+        super.init()
+    }
+
+    override func trashItem(
+        at url: URL,
+        resultingItemURL outResultingURL: AutoreleasingUnsafeMutablePointer<NSURL?>?
+    ) throws {
+        callCount += 1
+        if callCount == failingCall {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let destination = trashDirectory.appendingPathComponent(
+            url.lastPathComponent
+        )
+        try FileManager.default.moveItem(at: url, to: destination)
+        outResultingURL?.pointee = destination as NSURL
     }
 }
 

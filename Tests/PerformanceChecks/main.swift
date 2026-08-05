@@ -55,8 +55,8 @@ struct PerformanceChecks {
         try operationJournalCompletesRolledBackTransactions()
         try operationJournalPreservesCommittedExport()
         try operationJournalRefusesSameNamedReplacement()
-        try operationJournalRestoresInterruptedTrash()
-        try operationJournalPreservesTrashWhenSourceIsReplaced()
+        try operationJournalAcceptsInterruptedTrashCurrentState()
+        try operationJournalLeavesTrashAndReplacementUntouched()
         try operationJournalCompletesInterruptedTrashUndo()
         try completedWorkerRemovesItsJournal()
         try scannerAndPreparedIndexShareDefaultOrder()
@@ -451,8 +451,8 @@ struct PerformanceChecks {
         let root = URL(fileURLWithPath: "/tmp/DeterministicPairing")
         let files = [
             root.appendingPathComponent("SHOT.NEF"),
-            root.appendingPathComponent("SHOT.JPG"),
-            root.appendingPathComponent("SHOT.DNG"),
+            root.appendingPathComponent("JPEG/SHOT.JPG"),
+            root.appendingPathComponent("UNPAIRED.DNG"),
             root.appendingPathComponent("OTHER.JPG"),
         ]
         let forward = FolderScanner.pairFiles(
@@ -473,6 +473,13 @@ struct PerformanceChecks {
         try expect(
             describe(forward) == describe(reversed),
             "pair choice and leftover order must not depend on enumerator input order"
+        )
+        try expect(
+            forward.contains {
+                $0.primary.lastPathComponent == "SHOT.NEF"
+                    && $0.paired?.lastPathComponent == "SHOT.JPG"
+            },
+            "one unambiguous RAW and JPEG should pair across subfolders"
         )
     }
 
@@ -1017,6 +1024,10 @@ struct PerformanceChecks {
         let jpeg = folder.appendingPathComponent("PAIR.JPG")
         try Data("raw".utf8).write(to: raw)
         try Data("jpeg".utf8).write(to: jpeg)
+        // macOS attaches its provenance xattr shortly after these disposable
+        // files are created. Let that system-only ctime change settle before
+        // capturing the same scan-time identity a real folder scan would use.
+        Thread.sleep(forTimeInterval: 0.25)
         let item = makeItem(id: "PAIR.NEF", primaryURL: raw, pairedURL: jpeg)
         let journals = folder.appendingPathComponent("Journals", isDirectory: true)
 
@@ -1097,12 +1108,38 @@ struct PerformanceChecks {
             replacementURL: raw,
             replacementData: replacementData
         )
+        let resolvedRawTrashURL: () -> URL? = {
+            let fm = FileManager.default
+            guard let operation = try? fm.contentsOfDirectory(
+                at: journals,
+                includingPropertiesForKeys: nil
+            ).first(where: { $0.pathExtension == "operation" }) else {
+                return nil
+            }
+            let stateURL = operation
+                .appendingPathComponent("steps", isDirectory: true)
+                .appendingPathComponent("00000000.json")
+            guard let data = try? Data(contentsOf: stateURL) else { return nil }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard let state = try? decoder.decode(
+                FileOperationJournal.StateRecord.self,
+                from: data
+            ),
+            let path = state.resolvedDestinationPath else { return nil }
+            return URL(fileURLWithPath: path)
+        }
         defer {
             // Leave no test original behind in the real Trash even when an
             // assertion below throws before the explicit recovery step.
             if FileOperationJournal.hasPendingOperations(directory: journals) {
                 if (try? Data(contentsOf: raw)) == replacementData {
                     try? FileManager.default.removeItem(at: raw)
+                }
+                if let trashedRaw = resolvedRawTrashURL(),
+                   FileManager.default.fileExists(atPath: trashedRaw.path),
+                   !FileManager.default.fileExists(atPath: raw.path) {
+                    try? FileManager.default.moveItem(at: trashedRaw, to: raw)
                 }
                 if FileManager.default.fileExists(atPath: displacedJPEG.path),
                    !FileManager.default.fileExists(atPath: jpeg.path) {
@@ -1145,15 +1182,40 @@ struct PerformanceChecks {
             "no later photo may be touched after rollback becomes ambiguous"
         )
 
+        guard let trashedRaw = resolvedRawTrashURL() else {
+            throw CheckFailure(
+                "Clean Up journal did not retain the exact Trash location"
+            )
+        }
+        // Restore the disposable fixture explicitly so the test never leaves a
+        // file in the photographer's real Trash. Recovery itself now accepts
+        // this current state without moving either file.
         try FileManager.default.removeItem(at: raw)
+        try FileManager.default.moveItem(at: trashedRaw, to: raw)
         try FileManager.default.moveItem(at: displacedJPEG, to: jpeg)
         let recovery = FileOperationJournal.recoverPendingOperations(
             directory: journals
         )
         let recoveredOriginal = try Data(contentsOf: raw)
-        try expect(recovery.unresolvedOperations == 0, "Clean Up journal should recover after the race clears")
-        try expect(recoveredOriginal == rawData, "recovery must restore the exact trashed original")
-        try expect(!FileOperationJournal.hasPendingOperations(directory: journals), "recovered Clean Up journal should retire")
+        try expect(
+            recovery.unresolvedOperations == 1,
+            "a paired Clean Up interrupted between files should retain an explicit decision"
+        )
+        try expect(
+            recoveredOriginal == rawData,
+            "Clean Up recovery must leave the explicitly restored original untouched"
+        )
+        let kept = FileOperationJournal
+            .keepFilesAsTheyAreAndForgetPendingOperations(
+                directory: journals
+            )
+        try expect(
+            kept.unresolvedOperations == 0
+                && !FileOperationJournal.hasPendingOperations(
+                    directory: journals
+                ),
+            "Keep Files As They Are should retire only the paired Clean Up record"
+        )
     }
 
     private static func exportCollisionSuffixSkipsTakenNames() throws {
@@ -2728,7 +2790,7 @@ struct PerformanceChecks {
         try expect(FileOperationJournal.hasPendingOperations(directory: journals), "unresolved journal should remain retryable")
     }
 
-    private static func operationJournalRestoresInterruptedTrash() throws {
+    private static func operationJournalAcceptsInterruptedTrashCurrentState() throws {
         let root = try disposableFolder(named: "JournalTrash")
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("SOURCE.JPG")
@@ -2752,12 +2814,27 @@ struct PerformanceChecks {
 
         writer.relinquishOperationLockForCrashSimulation()
         let report = FileOperationJournal.recoverPendingOperations(directory: journals)
-        try expect(report.restoredFiles == 1, "interrupted Trash should restore the source")
-        try expect(FileManager.default.fileExists(atPath: source.path), "Trash recovery should restore the original path")
-        try expect(!FileManager.default.fileExists(atPath: simulatedTrash.path), "recovered Trash location should be empty")
+        try expect(
+            report.restoredOperations == 1
+                && report.restoredFiles == 0
+                && report.unresolvedFiles == 0,
+            "interrupted Clean Up should accept its current filesystem state"
+        )
+        try expect(
+            !FileManager.default.fileExists(atPath: source.path),
+            "Clean Up recovery must not restore the original path"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: simulatedTrash.path),
+            "Clean Up recovery must leave the trashed file untouched"
+        )
+        try expect(
+            !FileOperationJournal.hasPendingOperations(directory: journals),
+            "accepted Clean Up recovery should retire its journal"
+        )
     }
 
-    private static func operationJournalPreservesTrashWhenSourceIsReplaced() throws {
+    private static func operationJournalLeavesTrashAndReplacementUntouched() throws {
         let root = try disposableFolder(named: "JournalTrashReplacedSource")
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("SOURCE.JPG")
@@ -2786,7 +2863,12 @@ struct PerformanceChecks {
         let report = FileOperationJournal.recoverPendingOperations(directory: journals)
         let sourceContents = try Data(contentsOf: source)
         let trashContents = try Data(contentsOf: simulatedTrash)
-        try expect(report.unresolvedFiles == 1, "a replaced Trash source should remain unresolved")
+        try expect(
+            report.restoredOperations == 1
+                && report.restoredFiles == 0
+                && report.unresolvedFiles == 0,
+            "Clean Up recovery should accept replacement and Trash locations without mutation"
+        )
         try expect(
             sourceContents == Data("replacement".utf8),
             "Trash recovery must leave the replacement source untouched"
@@ -2796,8 +2878,8 @@ struct PerformanceChecks {
             "Trash recovery must preserve the actual original at its resolved location"
         )
         try expect(
-            FileOperationJournal.hasPendingOperations(directory: journals),
-            "a replaced Trash source must preserve its retryable journal"
+            !FileOperationJournal.hasPendingOperations(directory: journals),
+            "accepted Clean Up recovery should retire its journal"
         )
     }
 
@@ -3369,14 +3451,13 @@ struct PerformanceChecks {
         store.openFolder(folder)
         try await waitForReadySession(store, expectedItems: 1)
         try expect(
-            store.isLegacySessionMigrationConfirmationPresented,
-            "a filename-only session must wait for explicit migration approval"
+            !store.isLegacySessionMigrationConfirmationPresented,
+            "an all-present filename-only session should migrate without an unnecessary prompt"
         )
         try expect(
             store.items[0].ratingSnapshots.allSatisfy { $0.rating == .yes },
-            "schema 1 paired ratings should be reviewable before migration"
+            "schema 1 paired ratings should survive automatic migration"
         )
-        store.confirmLegacySessionMigration()
 
         store.setRawJPEGPairingMode(.separate)
         if case .ready = store.phase {

@@ -263,6 +263,16 @@ private final class LouppeApplicationDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             let result = await store.saveSessionForTermination()
+            // AppKit remains interactive during `.terminateLater`. No file
+            // reconciliation may begin after the initial Quit check and then
+            // be cut off by the final persistence reply.
+            if store.isRecoveringInterruptedOperations
+                || store.activeFileOperation != nil {
+                self.isPreparingToTerminate = false
+                store.cancelTerminationPreparation()
+                application.reply(toApplicationShouldTerminate: false)
+                return
+            }
             if result?.canDiscardInMemoryState != false {
                 self.isPreparingToTerminate = false
                 application.reply(toApplicationShouldTerminate: true)
@@ -308,8 +318,8 @@ private final class LouppeApplicationDelegate: NSObject, NSApplicationDelegate {
     ) {
         let alert = NSAlert()
         alert.messageText = "Your latest ratings aren't saved"
-        alert.informativeText = "Louppe couldn't save them in the photo folder or its backup. "
-            + "Retry after reconnecting the volume, freeing space, or fixing permissions."
+        alert.informativeText = store.persistenceWarning
+            ?? "Louppe couldn't save them in the photo folder or its backup. Retry in a moment."
         alert.alertStyle = .critical
         alert.addButton(withTitle: "Retry Saving")
         alert.addButton(withTitle: "Cancel Quit")

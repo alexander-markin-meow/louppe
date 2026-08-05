@@ -5,10 +5,57 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-08-03
+## 1.7.0 (9) — 2026-08-05
+
+- Established the audited parser foundation for future XMP interoperability.
+  A pinned Adobe XMPCore Objective-C++/Swift bridge now round-trips synthetic
+  Lightroom Classic, Bridge, Capture One, darktable, and universal packets
+  without losing unrelated edits, keywords, or custom namespaces. The proof
+  rejects malformed packets and explicitly disables XML entity use; it does
+  not yet expose metadata controls or write sidecars in the app.
+
+- Restored full-size Grid tiles after the native immediate-click surface made
+  cells adopt the preview image's intrinsic size, and made pairing group an
+  unambiguous RAW+JPEG match even when its files live in different subfolders.
+  Fast Grid scrolling now keeps AppKit's native scrolling indicator instead of
+  redrawing a custom thumb and coalesces its one-time setup, so the indicator
+  tracks a quick scroll smoothly without changing the always-visible gutter.
+
+- Removed the false save failure shown when quitting after ejecting a photo
+  card. New ratings now save to that exact folder's identity-bound local backup
+  while its volume is offline, without recreating the missing path or touching
+  a different card mounted under the same name. A just-opened, unchanged
+  session no longer starts another save on Quit. If optional sidecar
+  maintenance is already running, Quit waits for that checkpoint, but its
+  failure is nonblocking because the opened session is already a discard-safe
+  baseline. New ratings still require a successful sidecar or backup save, with
+  the specific remaining failure shown instead of a generic
+  permissions/space/volume list. Exact ancestor identities also prevent a
+  replacement directory or symlink from impersonating an ejected card path.
 
 - Simplified the Copy/Move progress dialog by removing the persistent display
   and MacBook-lid instruction.
+
+- Removed the recovery deadlock that could appear after a successful Clean Up.
+  Louppe no longer tries to directly sync or search macOS's privacy-protected
+  Trash, and interrupted intentional Trash actions stay deleted instead of
+  being silently restored. Unresolved bookkeeping now pauses only new Copy,
+  Move, Clean Up, and Trash undo actions; reviewing, rating, folder changes,
+  saving, updating, and Quit keep working. Recovery messages mention reconnecting
+  a drive only when a drive is actually unavailable, and **Keep Files As They
+  Are** sets aside only the canonical recovery record without deleting any of
+  its contents, so file workflows can never be locked forever. Completed Move
+  items stay at their chosen destination,
+  interrupted paired Trash actions retain a visible decision instead of losing
+  evidence, and a partial Trash Undo keeps every successfully restored original
+  rather than risking it in an unsyncable move back into protected Trash.
+  Cross-process rating-save locks now have a finite wait, so another stale
+  process cannot freeze Close or Quit indefinitely.
+
+- Older filename-only sessions now upgrade quietly when every saved filename
+  is still present in its original folder. Louppe asks for a decision only
+  when an old item is genuinely missing or the ratings came from an unowned
+  legacy backup.
 
 - Fixed Copy exports from removable HDDs. A drive disconnect after a file had
   already copied, flushed, and passed source verification no longer turns that
@@ -32,8 +79,9 @@ release bundle.
   retain the concrete first I/O failure instead of reducing it to a generic
   interruption.
 
-- Closed the audit's stop-ship recovery bug. Interrupted Move recovery now
-  verifies the original at its source path before removing any staged file;
+- Closed the audit's stop-ship recovery bug. Incomplete Move recovery now
+  verifies the original at its source path before removing any staged file,
+  while a fully completed item stays at its chosen destination;
   Copy preserves every verified copy when its source is missing, replaced, or
   rewritten in place; and Trash rejects same-named replacements. Recovery
   also uses checkpointed destination identities plus size and nanosecond file
@@ -53,7 +101,8 @@ release bundle.
 - Added one exclusive process lock around every Copy, Move, Trash, restore, and
   launch-recovery transaction, plus a single-instance app declaration. A
   second Louppe process now leaves the live operation untouched, and a stale
-  journal blocks every new transaction until recovery completes. Move is
+  journal blocks every new file-changing transaction until recovery completes
+  or the photographer explicitly keeps the files where they are. Move is
   limited to the same storage volume, revalidates the source immediately, and
   uses the OS's exclusive rename primitive so it can neither fall back to
   copy-then-delete nor overwrite a late collision; Copy remains available for
@@ -96,9 +145,11 @@ release bundle.
   backups by physical folder identity, and chooses the newest valid copy by
   generation instead of wall-clock time. Older path-keyed backups remain
   available only when no authoritative current copy exists. Filename-only
-  schema 1–3 ratings now require an explicit one-time **Use Saved Ratings**
-  confirmation before migration; Close Folder and Quit preserve the legacy
-  files byte-for-byte, and missing legacy entries remain blocked.
+  schema 1–3 ratings upgrade automatically when every saved filename is still
+  present in the original folder. Missing entries or an unowned legacy backup
+  require an explicit decision: **Open Folder and Forget Missing Items** drops
+  only those obsolete ratings and upgrades the remaining session, while Close
+  Folder and Quit preserve the legacy files byte-for-byte.
 
 - Serialized session persistence across Louppe processes with one advisory
   lock keyed by stable folder identity. The lock covers exact sidecar and

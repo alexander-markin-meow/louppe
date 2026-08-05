@@ -82,10 +82,13 @@ final class SessionStore: ObservableObject {
     /// clears it automatically.
     @Published private(set) var persistenceWarning: String?
     private var persistenceRejectedInvalidSnapshot = false
-    /// Filename-only schema 1–3 ratings cannot prove physical-file identity.
-    /// Even when every filename is present, the photographer must explicitly
-    /// accept their one-way schema-4 migration before anything is saved.
+    /// Filename-only schema 1–3 ratings migrate automatically when every
+    /// saved filename is still present in its original folder. Missing or
+    /// unowned legacy entries require an explicit choice before anything is
+    /// saved.
     @Published private(set) var isLegacySessionMigrationConfirmationPresented = false
+    @Published private(set) var legacySessionMigrationMissingFileCount = 0
+    @Published private(set) var legacySessionMigrationUsesUnownedBackup = false
     /// Schema-4 ratings whose physical files were absent during the latest
     /// scan. They remain in subsequent snapshots until the exact file returns
     /// or Louppe itself explicitly removes that file from a live session.
@@ -93,7 +96,19 @@ final class SessionStore: ObservableObject {
     /// its decision merely because another photo triggered an automatic save.
     private var retainedMissingSessionEntries: [SessionEntry] = []
     var canRetryPersistence: Bool {
-        persistenceWarning != nil && !persistenceRejectedInvalidSnapshot
+        let hasLiveSession: Bool
+        if sourceFolder != nil,
+           persistenceAccess != nil,
+           case .ready = phase,
+           !isLegacySessionMigrationConfirmationPresented {
+            hasLiveSession = true
+        } else {
+            hasLiveSession = false
+        }
+        return persistenceWarning != nil
+            && !persistenceRejectedInvalidSnapshot
+            && activePersistenceSaveCount == 0
+            && (hasLiveSession || retrySaveRequest != nil)
     }
     @Published var recentFolders: [URL] = []
     let videoPlayback = VideoPlaybackController()
@@ -162,12 +177,70 @@ final class SessionStore: ObservableObject {
     /// I/O failure must not be reduced to a generic "interrupted" notice.
     @Published private(set) var operationRecoveryCause: String?
     @Published private(set) var recoveryNeedsAttention = false
+    /// True only while Louppe is actively changing state or checking an
+    /// interrupted operation. A persistent recovery warning is deliberately
+    /// not part of this gate: review and session management stay usable.
     var isFileOperationRunning: Bool {
         activeFileOperation != nil
             || isSessionTransitioning
             || isPreparingForTermination
             || isRecoveringInterruptedOperations
-            || recoveryNeedsAttention
+    }
+    /// An unresolved journal reserves filesystem mutations for Recovery. It
+    /// does not reserve ordinary review, ratings, navigation, or persistence.
+    var isNewFileOperationBlocked: Bool {
+        isFileOperationRunning || recoveryNeedsAttention
+    }
+    /// Successful recovery only needs acknowledgement when it did something
+    /// visible. Merely verifying and retiring a stale record is silent.
+    var operationRecoveryReportRequiresAcknowledgement: Bool {
+        guard let report = operationRecoveryReport,
+              !Self.recoveryReportNeedsAttention(report) else { return false }
+        return report.preservedCopies > 0
+            || report.preservedMoves > 0
+            || report.restoredFiles > 0
+            || report.removedPartialCopies > 0
+    }
+    /// One concise explanation for the nonmodal warning. Reconnecting a
+    /// drive is suggested only when Recovery actually found an unavailable
+    /// volume; identity mismatches and lock contention need different advice.
+    var recoveryAttentionMessage: String? {
+        guard recoveryNeedsAttention,
+              let report = operationRecoveryReport else { return nil }
+
+        if report.operationLockUnavailable {
+            return "Another Louppe window is still handling an interrupted file operation. Close it, then retry recovery. You can keep reviewing this folder meanwhile."
+        }
+
+        let interruptionPrefix = operationRecoveryCause.map {
+            $0.hasSuffix(".") ? "\($0) " : "\($0). "
+        } ?? ""
+        let completedNotice = report.preservedCopies > 0
+                || report.preservedMoves > 0
+                || report.restoredFiles > 0
+                || report.removedPartialCopies > 0
+            ? "Other files from the operation were already handled safely. "
+            : ""
+        if !report.unavailableVolumes.isEmpty {
+            let driveNames = report.unavailableVolumes.map { path in
+                let name = URL(fileURLWithPath: path).lastPathComponent
+                return name.isEmpty ? path : name
+            }
+            let drives = driveNames.count == 1
+                ? "“\(driveNames[0])”"
+                : driveNames.map { "“\($0)”" }.joined(separator: ", ")
+            return interruptionPrefix + completedNotice
+                + "Some interrupted files are still untouched because "
+                + (driveNames.count == 1 ? "a drive is unavailable. " : "drives are unavailable. ")
+                + "Reconnect \(drives), then retry recovery. You can keep reviewing this folder meanwhile."
+        }
+
+        let count = max(report.unresolvedFiles, 1)
+        let message = interruptionPrefix + completedNotice
+            + "Louppe couldn't finish checking \(count) interrupted file"
+            + (count == 1 ? ". " : "s. ")
+            + "It left anything uncertain untouched. You can keep reviewing; Copy, Move, and Clean Up are paused until recovery finishes."
+        return message
     }
     /// A sheet, popover, confirmation, or recovery alert owns keyboard/menu
     /// input until it is dismissed. All session command surfaces share this
@@ -181,8 +254,7 @@ final class SessionStore: ObservableObject {
             || pendingCleanUp != nil
             || cleanUpError != nil
             || isRecoveringInterruptedOperations
-            || recoveryNeedsAttention
-            || operationRecoveryReport != nil
+            || operationRecoveryReportRequiresAcknowledgement
     }
     var isCleaningUp: Bool { activeFileOperation == .cleanUp }
     var isCopyingExport: Bool { activeFileOperation == .exportCopy }
@@ -194,12 +266,12 @@ final class SessionStore: ObservableObject {
     }
     var canExport: Bool {
         !items.isEmpty
-            && !isFileOperationRunning
+            && !isNewFileOperationBlocked
             && !isLegacySessionMigrationConfirmationPresented
     }
     var canCleanUp: Bool {
         !items.isEmpty
-            && !isFileOperationRunning
+            && !isNewFileOperationBlocked
             && !isLegacySessionMigrationConfirmationPresented
     }
     var isExporting: Bool { isCopyingExport || isMovingExport }
@@ -258,7 +330,17 @@ final class SessionStore: ObservableObject {
     private var pendingPersistenceTask: Task<SessionPersistence.SaveResult, Never>?
     private var pendingPersistenceRequest: SaveRequest?
     private var retrySaveRequest: SaveRequest?
-    private var activePersistenceSaveCount = 0
+    /// A backup-only success stays manually retryable so its folder sidecar
+    /// can be repaired later, but it must never turn Close or Quit into a
+    /// requirement: the captured ratings are already durable.
+    private var retrySaveIsOptionalSidecarRepair = false
+    /// Monotonic within one opened-folder access. A completed older save can
+    /// advance durability only through the generation it actually captured;
+    /// it can never make a newer rating look clean.
+    private var sessionChangeGeneration: UInt64 = 0
+    private var durableSessionChangeGeneration: UInt64?
+    private var persistenceGenerationAccessID: UUID?
+    @Published private(set) var activePersistenceSaveCount = 0
     private var saveRequestedWhilePersistenceBusy = false
     /// Inspectable by focused concurrency tests; production uses the flag only
     /// to coalesce repeated maximum-age checkpoints behind one active write.
@@ -298,7 +380,14 @@ final class SessionStore: ObservableObject {
     private var folderOpenGeneration: UInt64 = 0
     private var cleanUpGeneration: UInt64 = 0
     private var deferredFolderOpen: URL?
-    private var shouldRescanAfterRecovery = false
+    /// The session affected by an interrupted mutation. Both the exact path
+    /// bytes and stable directory identity must still match before a delayed
+    /// rescan can touch the current session.
+    private struct RecoveryRescanTarget {
+        let folder: URL
+        let identity: SessionPersistence.SourceFolderIdentity
+    }
+    private var recoveryRescanTarget: RecoveryRescanTarget?
     private var preparedIndex = PreparedSessionIndex()
     private struct ScanResumeIdentity {
         let folder: URL
@@ -361,8 +450,61 @@ final class SessionStore: ObservableObject {
     /// Retries every still-active journal. Existing files are never
     /// overwritten; an unavailable volume or identity mismatch remains
     /// visible for another retry instead of being guessed around.
+    var canRetryInterruptedOperationRecovery: Bool {
+        recoveryNeedsAttention && !isFileOperationRunning
+    }
+    var canKeepInterruptedFilesAsTheyAre: Bool {
+        recoveryNeedsAttention && !isFileOperationRunning
+    }
+
     func retryInterruptedOperationRecovery() {
-        beginInterruptedOperationRecovery()
+        guard canRetryInterruptedOperationRecovery else { return }
+        // The user may have opened the affected folder while the warning was
+        // nonmodal. Capture its exact identity so any files restored by this
+        // retry become visible through a safe same-folder rescan.
+        beginInterruptedOperationRecovery(rescanOnSuccess: sourceFolder != nil)
+    }
+
+    /// Explicitly discard only Louppe's recovery bookkeeping. Media stays at
+    /// its current paths, so a permanently ambiguous record cannot disable
+    /// future Copy, Move, or Clean Up actions forever.
+    func keepInterruptedFilesAsTheyAre() {
+        guard canKeepInterruptedFilesAsTheyAre else { return }
+        captureRecoveryRescanTargetForCurrentFolder()
+        operationRecoveryReport = nil
+        recoveryNeedsAttention = false
+        isRecoveringInterruptedOperations = true
+
+        let journalDirectory = operationJournalDirectory
+        let worker = Task.detached(priority: .userInitiated) {
+            FileOperationJournal.keepFilesAsTheyAreAndForgetPendingOperations(
+                directory: journalDirectory
+            )
+        }
+        Task { @MainActor [weak self] in
+            let report = await worker.value
+            guard let self else { return }
+            self.isRecoveringInterruptedOperations = false
+            let needsAttention = Self.recoveryReportNeedsAttention(report)
+            self.recoveryNeedsAttention = needsAttention
+            self.operationRecoveryReport = needsAttention ? report : nil
+            let rescanTarget = self.recoveryRescanTarget
+            if !needsAttention {
+                self.operationRecoveryCause = nil
+                self.recoveryRescanTarget = nil
+            }
+
+            let deferredFolder = self.deferredFolderOpen
+            self.deferredFolderOpen = nil
+            if let deferredFolder {
+                self.openFolder(deferredFolder)
+            } else if let rescanTarget,
+                      self.recoveryRescanTargetMatchesCurrentSession(
+                        rescanTarget
+                      ) {
+                self.rescan()
+            }
+        }
     }
 
     func dismissOperationRecoveryReport() {
@@ -373,9 +515,10 @@ final class SessionStore: ObservableObject {
     private func beginInterruptedOperationRecovery(
         rescanOnSuccess: Bool = false
     ) {
-        shouldRescanAfterRecovery =
-            shouldRescanAfterRecovery || rescanOnSuccess
-        guard !isRecoveringInterruptedOperations else { return }
+        guard !isFileOperationRunning else { return }
+        if rescanOnSuccess {
+            captureRecoveryRescanTargetForCurrentFolder()
+        }
         operationRecoveryReport = nil
         recoveryNeedsAttention = false
         isRecoveringInterruptedOperations = true
@@ -390,24 +533,92 @@ final class SessionStore: ObservableObject {
             let report = await worker.value
             guard let self else { return }
             self.isRecoveringInterruptedOperations = false
-            self.operationRecoveryReport = report
-            if report.hasUnresolvedFiles {
-                self.recoveryNeedsAttention = true
-                return
+            let needsAttention = Self.recoveryReportNeedsAttention(report)
+            self.recoveryNeedsAttention = needsAttention
+            let changedFiles = report.preservedCopies > 0
+                || report.preservedMoves > 0
+                || report.restoredFiles > 0
+                || report.removedPartialCopies > 0
+            self.operationRecoveryReport = needsAttention || changedFiles
+                ? report
+                : nil
+            if !needsAttention, !changedFiles {
+                self.operationRecoveryCause = nil
             }
 
-            self.recoveryNeedsAttention = false
             let deferredFolder = self.deferredFolderOpen
             self.deferredFolderOpen = nil
-            let rescan = self.shouldRescanAfterRecovery
-            self.shouldRescanAfterRecovery = false
+            let rescanTarget = self.recoveryRescanTarget
+            if !needsAttention {
+                self.recoveryRescanTarget = nil
+            }
             if let deferredFolder {
                 self.openFolder(deferredFolder)
-            } else if rescan {
+            } else if let rescanTarget,
+                      self.recoveryRescanTargetMatchesCurrentSession(
+                        rescanTarget
+                      ) {
                 self.rescan()
             }
         }
     }
+
+    private func captureRecoveryRescanTargetForCurrentFolder() {
+        // A retry can happen after the user switches folders. Never retain a
+        // target captured for an earlier session when the current folder has
+        // gone away or can no longer be identified.
+        recoveryRescanTarget = nil
+        guard let folder = sourceFolder,
+           let identity = persistenceAccess?.folderIdentity
+                ?? (try? SessionPersistence.SourceFolderIdentity.capture(
+                    at: folder
+                )) else {
+            return
+        }
+        recoveryRescanTarget = RecoveryRescanTarget(
+            folder: folder,
+            identity: identity
+        )
+    }
+
+    private static func recoveryReportNeedsAttention(
+        _ report: FileOperationJournal.RecoveryReport
+    ) -> Bool {
+        report.operationLockUnavailable || report.hasUnresolvedFiles
+    }
+
+    private func recoveryRescanTargetMatchesCurrentSession(
+        _ target: RecoveryRescanTarget
+    ) -> Bool {
+        guard let folder = sourceFolder,
+              FileOperationJournal.exactPathsEqual(folder, target.folder)
+        else { return false }
+        return target.identity.matches(folder: folder)
+    }
+
+#if DEBUG
+    /// Deterministic recovery-state setup for command-gating tests. Production
+    /// reaches the same state only through the journal worker above.
+    func presentOperationRecoveryReportForTesting(
+        _ report: FileOperationJournal.RecoveryReport?,
+        cause: String? = nil
+    ) {
+        operationRecoveryReport = report
+        operationRecoveryCause = cause
+        recoveryNeedsAttention = report.map(Self.recoveryReportNeedsAttention)
+            ?? false
+    }
+
+    /// Places a Clean Up restore below later rating steps so tests can prove
+    /// an unavailable restore is retained instead of accidentally popped.
+    func pushCleanUpUndoForTesting() {
+        pushUndo(.cleanUp(
+            [],
+            previousItemID: currentItemID,
+            previousIndex: currentIndex
+        ))
+    }
+#endif
 
     // MARK: - Counts
 
@@ -876,7 +1087,7 @@ final class SessionStore: ObservableObject {
     }
 
     func openFolder(_ url: URL) {
-        if isRecoveringInterruptedOperations || recoveryNeedsAttention {
+        if isRecoveringInterruptedOperations {
             deferredFolderOpen = url
             return
         }
@@ -885,18 +1096,14 @@ final class SessionStore: ObservableObject {
         let openGeneration = folderOpenGeneration
         if let currentFolder = sourceFolder,
            case .ready = phase {
-            cancelScheduledSave()
-            guard let request = makeSaveRequest() else {
-                beginOpeningFolder(url)
-                return
-            }
             isSessionTransitioning = true
-            let task = enqueuePersistenceSave(request)
             Task { @MainActor [weak self] in
-                let result = await task.value
-                guard let self, self.folderOpenGeneration == openGeneration else { return }
+                guard let self else { return }
+                let result = await self
+                    .persistCurrentSessionIfNeededBeforeDiscard()
+                guard self.folderOpenGeneration == openGeneration else { return }
                 self.isSessionTransitioning = false
-                guard result.canDiscardInMemoryState,
+                guard result?.canDiscardInMemoryState != false,
                       self.sourceFolder?.standardizedFileURL
                         == currentFolder.standardizedFileURL else { return }
                 self.beginOpeningFolder(url)
@@ -908,7 +1115,12 @@ final class SessionStore: ObservableObject {
 
     private func beginOpeningFolder(_ url: URL) {
         cancelScheduledSave()
+        persistenceGenerationAccessID = nil
+        durableSessionChangeGeneration = nil
+        sessionChangeGeneration = 0
         isLegacySessionMigrationConfirmationPresented = false
+        legacySessionMigrationMissingFileCount = 0
+        legacySessionMigrationUsesUnownedBackup = false
         videoPlayback.stop()
         let isSameFolder =
             sourceFolder?.standardizedFileURL == url.standardizedFileURL
@@ -926,12 +1138,18 @@ final class SessionStore: ObservableObject {
         } else {
             scanResumeIdentity = nil
         }
+        // Every scan establishes a fresh identity/revision access. A retained
+        // backup-only Retry belongs to the access being replaced; keeping it
+        // through a failed same-folder rescan leaves a visible button whose
+        // result can no longer be applied. The new scan/save will recreate a
+        // current warning and Retry if the sidecar still needs repair.
+        persistenceWarning = nil
+        persistenceRejectedInvalidSnapshot = false
+        retrySaveRequest = nil
+        retrySaveIsOptionalSidecarRepair = false
+        persistenceAccess = nil
         if !isSameFolder {
-            persistenceWarning = nil
-            persistenceRejectedInvalidSnapshot = false
-            retrySaveRequest = nil
             retainedMissingSessionEntries = []
-            persistenceAccess = nil
         }
         scanTask?.cancel()
         scanGeneration &+= 1
@@ -1143,7 +1361,6 @@ final class SessionStore: ObservableObject {
             $0.folder == url.standardizedFileURL ? $0 : nil
         }
         scanResumeIdentity = nil
-        persistenceWarning = persistenceResult.recoveryMessage
         persistenceRejectedInvalidSnapshot = false
         guard let access = persistenceResult.access else {
             items = []
@@ -1154,6 +1371,12 @@ final class SessionStore: ObservableObject {
             return
         }
         persistenceAccess = access
+        persistenceGenerationAccessID = access.id
+        // The freshly read/scanned state is the discard-safe baseline. Its
+        // automatic sidecar creation, repair, or schema refresh is optional;
+        // only later user/session changes advance beyond this generation.
+        durableSessionChangeGeneration = 0
+        sessionChangeGeneration = 0
         let loaded = scanned
         // Restore prior ratings from the sidecar file, if present.
         var pendingIdentityConflicts: [(
@@ -1165,7 +1388,6 @@ final class SessionStore: ObservableObject {
         var unmatchedLegacyPhysicalFileCount = 0
         var legacySessionNeedsConfirmation = false
         if let session = persistenceResult.session {
-            legacySessionNeedsConfirmation = session.version < 4
             let ratingIndex = SessionRatingIndex(session: session)
             for i in loaded.indices {
                 for file in loaded[i].individualFiles {
@@ -1206,6 +1428,9 @@ final class SessionStore: ObservableObject {
                     .subtracting(consumedPersistedFileIDs)
                     .count
             }
+            legacySessionNeedsConfirmation = session.version < 4
+                && (unmatchedLegacyPhysicalFileCount > 0
+                    || persistenceResult.requiresPhysicalIdentityProof)
             let recordedFolder = URL(fileURLWithPath: session.sourcePath)
                 .resolvingSymlinksInPath().standardizedFileURL
             let openedFolder = url.resolvingSymlinksInPath()
@@ -1240,16 +1465,6 @@ final class SessionStore: ObservableObject {
                 + ", or rename the replacement so it no longer uses the original filename, then open the folder again. Louppe will retain the saved decision for the missing original."
             return
         }
-        if unmatchedLegacyPhysicalFileCount > 0 {
-            items = []
-            resetDerivedData()
-            visibleIndices = []
-            phase = .welcome
-            scanError = "This older Louppe session has saved ratings for \(unmatchedLegacyPhysicalFileCount) photo"
-                + (unmatchedLegacyPhysicalFileCount == 1 ? " or video" : "s or videos")
-                + " that are not currently in the folder. The original session and backup were left untouched. Restore the missing files, then open the folder again to migrate safely."
-            return
-        }
         if relocatedSessionNeedsIdentityProof {
             items = []
             resetDerivedData()
@@ -1282,8 +1497,14 @@ final class SessionStore: ObservableObject {
         if loaded.isEmpty {
             scanError = "No recognised photos or videos were found in that folder."
         } else if legacySessionNeedsConfirmation {
+            persistenceWarning = persistenceResult.recoveryMessage
+            legacySessionMigrationMissingFileCount =
+                unmatchedLegacyPhysicalFileCount
+            legacySessionMigrationUsesUnownedBackup =
+                persistenceResult.requiresPhysicalIdentityProof
             isLegacySessionMigrationConfirmationPresented = true
         } else {
+            persistenceWarning = persistenceResult.recoveryMessage
             saveSession()
         }
     }
@@ -1295,6 +1516,11 @@ final class SessionStore: ObservableObject {
               case .ready = phase,
               sourceFolder != nil else { return }
         isLegacySessionMigrationConfirmationPresented = false
+        legacySessionMigrationMissingFileCount = 0
+        legacySessionMigrationUsesUnownedBackup = false
+        // Forgetting absent legacy entries is an explicit session change, not
+        // optional maintenance of the just-opened baseline.
+        markSessionChanged()
         saveSession()
     }
 
@@ -1302,6 +1528,8 @@ final class SessionStore: ObservableObject {
     func closeLegacySessionWithoutMigrating() {
         guard isLegacySessionMigrationConfirmationPresented else { return }
         isLegacySessionMigrationConfirmationPresented = false
+        legacySessionMigrationMissingFileCount = 0
+        legacySessionMigrationUsesUnownedBackup = false
         finishClosingSession()
     }
 
@@ -1319,18 +1547,13 @@ final class SessionStore: ObservableObject {
     /// and the scan restores them by filename.
     func rescan() {
         guard !isFileOperationRunning, let folder = sourceFolder else { return }
-        cancelScheduledSave()
-        guard let request = makeSaveRequest() else {
-            openFolder(folder)
-            return
-        }
         isSessionTransitioning = true
-        let task = enqueuePersistenceSave(request)
         Task { @MainActor [weak self] in
-            let result = await task.value
             guard let self else { return }
+            let result = await self
+                .persistCurrentSessionIfNeededBeforeDiscard()
             self.isSessionTransitioning = false
-            guard result.canDiscardInMemoryState else { return }
+            guard result?.canDiscardInMemoryState != false else { return }
             guard self.sourceFolder == folder else { return }
             self.beginOpeningFolder(folder)
         }
@@ -1627,7 +1850,14 @@ final class SessionStore: ObservableObject {
     /// Whether ⌘Z has anything to undo — drives the toolbar button's state.
     /// (Not @Published, but every undo-stack change happens alongside a
     /// published mutation, so views re-evaluate it at the right moments.)
-    var canUndo: Bool { !undoStack.isEmpty }
+    var canUndo: Bool {
+        guard !isFileOperationRunning,
+              let step = undoStack.last else { return false }
+        if case .cleanUp = step {
+            return !recoveryNeedsAttention
+        }
+        return true
+    }
 
     private func pushUndo(_ step: UndoStep) {
         undoStack.append(step)
@@ -1635,7 +1865,12 @@ final class SessionStore: ObservableObject {
     }
 
     func undo() {
-        guard !isFileOperationRunning, let step = undoStack.popLast() else { return }
+        guard canUndo, let step = undoStack.last else { return }
+        // Inspect before popping: unresolved recovery blocks only a Clean Up
+        // restore. The step must remain available for a later retry, while a
+        // newer rating step above it can still be undone immediately.
+        if case .cleanUp = step, recoveryNeedsAttention { return }
+        _ = undoStack.popLast()
         // Undo moves the session back in time; a live selection would no
         // longer mean what the user built it for.
         setSelectionIndices([])
@@ -1804,7 +2039,7 @@ final class SessionStore: ObservableObject {
     /// partial failure its already-trashed files are put back. If that
     /// rollback also fails, the app reports the inconsistent pair explicitly.
     func performCleanUp(_ mode: CleanUpMode) {
-        guard !isFileOperationRunning else { return }
+        guard !isNewFileOperationBlocked else { return }
         flushPendingFilter()
         // Resolve targets first — .selection reads the live selection —
         // then drop it: indices are about to shift.
@@ -1868,6 +2103,7 @@ final class SessionStore: ObservableObject {
                 previousIndex: previousIndex
             ))
             if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
+            markSessionChanged()
             saveSession()
         }
         activeFileOperation = nil
@@ -1897,7 +2133,7 @@ final class SessionStore: ObservableObject {
         previousItemID: String?,
         previousIndex: Int
     ) {
-        guard !isFileOperationRunning else { return }
+        guard !isNewFileOperationBlocked else { return }
         let snapshots = removed.map {
             TrashedPhotoSnapshot(index: $0.index, item: $0.item, files: $0.trashedFiles)
         }
@@ -1976,6 +2212,7 @@ final class SessionStore: ObservableObject {
             fallbackIndex: previousIndex
         )
         if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
+        markSessionChanged()
         saveSession()
         activeFileOperation = nil
         cleanUpProgress = nil
@@ -1992,7 +2229,7 @@ final class SessionStore: ObservableObject {
     /// destination. Copy now receives the same Quit/update/folder-switch
     /// protection as operations that move originals.
     func exportWillStart(mode: ExportMode) -> Bool {
-        guard !isFileOperationRunning else { return false }
+        guard !isNewFileOperationBlocked else { return false }
         videoPlayback.stop()
         operationRecoveryCause = nil
         activeFileOperation = mode == .copy ? .exportCopy : .exportMove
@@ -2040,6 +2277,7 @@ final class SessionStore: ObservableObject {
             fallbackIndex: previousIndex - removedBefore
         )
         if !synchronizeFilterRangesWithAvailableData() { applyFilter() }
+        markSessionChanged()
         saveSession()
     }
 
@@ -2211,7 +2449,21 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Session persistence
 
+    private func markSessionChanged() {
+        if sessionChangeGeneration < UInt64.max {
+            sessionChangeGeneration += 1
+        }
+        // A sidecar-repair warning may truthfully describe the previous
+        // durable generation, but it becomes misleading the instant the
+        // photographer makes a new change. The scheduled save will publish a
+        // fresh warning only if that newer snapshot actually fails.
+        if retrySaveIsOptionalSidecarRepair {
+            persistenceWarning = nil
+        }
+    }
+
     private func scheduleSave() {
+        markSessionChanged()
         saveDebounce?.cancel()
         saveTrailingGeneration &+= 1
         let trailingGeneration = saveTrailingGeneration
@@ -2280,38 +2532,69 @@ final class SessionStore: ObservableObject {
         enqueuePersistenceSave(request)
     }
 
-    /// Queue the newest snapshot and return only when it has reached either
-    /// the folder sidecar or Louppe's Application Support backup. The app
-    /// delegate uses this with AppKit's asynchronous termination handshake,
-    /// so the main thread never blocks while a last-second rating is saved.
+    /// Wait for any active checkpoint, then save only when the live session is
+    /// newer than its last durable sidecar/backup snapshot. The app delegate
+    /// uses this with AppKit's asynchronous termination handshake, so clean
+    /// sessions start no redundant write and a last-second rating still
+    /// reaches disk. An already-active checkpoint is always awaited.
     func saveSessionForTermination() async -> SessionPersistence.SaveResult? {
-        cancelScheduledSave()
         // Quitting while the legacy decision is visible is equivalent to
         // Close Folder: preserve the old snapshot and write nothing.
         guard !isLegacySessionMigrationConfirmationPresented else {
             return nil
         }
+        return await persistCurrentSessionIfNeededBeforeDiscard()
+    }
+
+    /// Shared Close/Open/Rescan/Quit barrier. The caller first raises either
+    /// `isSessionTransitioning` or `isPreparingForTermination`, so no mutation
+    /// can arrive after the generation checked here.
+    private func persistCurrentSessionIfNeededBeforeDiscard() async
+        -> SessionPersistence.SaveResult? {
+        cancelScheduledSave()
+
+        // A checkpoint already in flight may contain the complete live
+        // session. Await it before deciding whether another write is needed;
+        // otherwise a transition duplicates slow removable-volume work and can show
+        // a false failure after an identical snapshot was already secured.
+        var awaitedResult: SessionPersistence.SaveResult?
+        if activePersistenceSaveCount > 0,
+           let task = pendingPersistenceTask,
+           let request = pendingPersistenceRequest {
+            // This transition owns the final coalescing decision from here. The
+            // completion observer must not enqueue a third write while this
+            // method is suspended awaiting the current one.
+            saveRequestedWhilePersistenceBusy = false
+            let result = await task.value
+            applyPersistenceResult(result, request: request)
+            awaitedResult = result
+        }
+
+        if persistenceRejectedInvalidSnapshot {
+            return .rejectedInvalidSnapshot
+        }
+
+        if currentSessionIsDurable {
+            return awaitedResult?.canDiscardInMemoryState == true
+                ? awaitedResult
+                : nil
+        }
+
         if let request = makeSaveRequest() {
             let result = await enqueuePersistenceSave(request).value
             applyPersistenceResult(result, request: request)
             return result
         }
 
-        // `closeSession` captures its snapshot before clearing UI state. If
-        // Quit follows immediately, wait for that exact queued snapshot.
-        if let task = pendingPersistenceTask,
-           let request = pendingPersistenceRequest {
-            let result = await task.value
-            applyPersistenceResult(result, request: request)
-            if result.canDiscardInMemoryState { return result }
-            if result == .rejectedInvalidSnapshot { return result }
-            let retry = refreshedSaveRequest(from: request)
-            let retried = await enqueuePersistenceSave(retry).value
-            applyPersistenceResult(retried, request: retry)
-            return retried
+        if let awaitedResult {
+            if awaitedResult.canDiscardInMemoryState
+                || awaitedResult == .rejectedInvalidSnapshot {
+                return awaitedResult
+            }
         }
 
-        if let request = retrySaveRequest {
+        if let request = retrySaveRequest,
+           !retrySaveIsOptionalSidecarRepair {
             let retry = refreshedSaveRequest(from: request)
             let result = await enqueuePersistenceSave(retry).value
             applyPersistenceResult(result, request: retry)
@@ -2349,6 +2632,7 @@ final class SessionStore: ObservableObject {
         let session: SessionFile
         let sequence: UInt64
         let access: SessionPersistence.AccessContext
+        let changeGeneration: UInt64
     }
 
     @discardableResult
@@ -2402,17 +2686,40 @@ final class SessionStore: ObservableObject {
            folder.standardizedFileURL != request.folder.standardizedFileURL {
             return
         }
+        let appliesToLiveSession =
+            persistenceGenerationAccessID == request.access.id
+        let appliesToRetainedRetry = persistenceGenerationAccessID == nil
+            && sourceFolder == nil
+            && retrySaveRequest?.access.id == request.access.id
+        guard appliesToLiveSession || appliesToRetainedRetry else { return }
         guard result != .superseded else { return }
         latestReportedSaveSequence = request.sequence
+        let liveRequestWasAlreadyDurable = appliesToLiveSession
+            && durableSessionChangeGeneration.map {
+                $0 >= request.changeGeneration
+            } == true
+        let requestWasAlreadyDurable = liveRequestWasAlreadyDurable || (
+            appliesToRetainedRetry && retrySaveIsOptionalSidecarRepair
+        )
+        let liveSessionHasNewerChanges = appliesToLiveSession
+            && sessionChangeGeneration > request.changeGeneration
 
         switch result {
         case .savedToSidecar:
+            recordDurableGeneration(for: request)
             retrySaveRequest = nil
+            retrySaveIsOptionalSidecarRepair = false
             persistenceWarning = nil
             persistenceRejectedInvalidSnapshot = false
         case .savedToBackup(let sidecarFailure):
+            recordDurableGeneration(for: request)
             retrySaveRequest = request
+            retrySaveIsOptionalSidecarRepair = true
             persistenceRejectedInvalidSnapshot = false
+            guard !liveSessionHasNewerChanges else {
+                persistenceWarning = nil
+                return
+            }
             switch sidecarFailure {
             case .permissionDenied:
                 persistenceWarning = "This folder is read-only. Your ratings are safe in Louppe's backup, "
@@ -2423,14 +2730,25 @@ final class SessionStore: ObservableObject {
             case .volumeUnavailable:
                 persistenceWarning = "The photo volume is unavailable. Your ratings are safe in Louppe's backup. "
                     + "Reconnect it, then retry."
+            case .busy:
+                persistenceWarning = "Another Louppe window is saving this folder. Your ratings are safe in Louppe's backup. Retry in a moment."
             case .encoding, .other:
                 persistenceWarning = "Your ratings are safe in Louppe's backup, but the folder session file "
                     + "couldn't be updated. Retry when the folder is available."
             }
         case .failed(let failure):
             retrySaveRequest = request
+            retrySaveIsOptionalSidecarRepair = requestWasAlreadyDurable
             persistenceRejectedInvalidSnapshot = false
-            if failure.sidecar == .outOfSpace || failure.backup == .outOfSpace {
+            if requestWasAlreadyDurable && liveSessionHasNewerChanges {
+                persistenceWarning = nil
+            } else if requestWasAlreadyDurable {
+                persistenceWarning = optionalSidecarRepairWarning(
+                    sidecarFailure: failure.sidecar
+                )
+            } else if failure.sidecar == .busy || failure.backup == .busy {
+                persistenceWarning = "Another Louppe window is saving this folder. Your latest ratings are not saved yet. Retry in a moment."
+            } else if failure.sidecar == .outOfSpace || failure.backup == .outOfSpace {
                 persistenceWarning = "Your latest ratings are not saved because the disk is full. "
                     + "Free some space and retry before closing Louppe."
             } else if failure.sidecar == .permissionDenied
@@ -2446,20 +2764,67 @@ final class SessionStore: ObservableObject {
             }
         case .rejectedInvalidSnapshot:
             retrySaveRequest = nil
+            retrySaveIsOptionalSidecarRepair = false
             persistenceRejectedInvalidSnapshot = true
             persistenceWarning = "Louppe stopped an internally inconsistent session snapshot before it could "
                 + "replace either saved copy. Keep this session open and report the problem."
         case .sourceFolderChanged:
             retrySaveRequest = request
+            retrySaveIsOptionalSidecarRepair = requestWasAlreadyDurable
             persistenceRejectedInvalidSnapshot = false
-            persistenceWarning = "The opened folder or card changed before Louppe could save. Neither session copy was touched. Reconnect the original folder, then retry saving."
+            if requestWasAlreadyDurable {
+                persistenceWarning = liveSessionHasNewerChanges
+                    ? nil
+                    : "No new ratings are waiting to be saved. The folder or card at this path changed, so its session file was left untouched. Reconnect the original folder to repair it."
+            } else {
+                persistenceWarning = "The opened folder or card changed before Louppe could save. Neither session copy was touched. Reconnect the original folder, then retry saving."
+            }
         case .sidecarChanged:
             retrySaveRequest = request
+            retrySaveIsOptionalSidecarRepair = requestWasAlreadyDurable
             persistenceRejectedInvalidSnapshot = false
-            persistenceWarning = "This folder's session file changed outside Louppe after it was opened. Louppe left both versions untouched. Restore the version you want to keep, then retry saving."
+            if requestWasAlreadyDurable {
+                persistenceWarning = liveSessionHasNewerChanges
+                    ? nil
+                    : "No new ratings are waiting to be saved. This folder's session file changed outside Louppe, so it was left untouched. Restore the version you want before repairing it."
+            } else {
+                persistenceWarning = "This folder's session file changed outside Louppe after it was opened. Louppe left both versions untouched. Restore the version you want to keep, then retry saving."
+            }
         case .superseded:
             break
         }
+    }
+
+    private func optionalSidecarRepairWarning(
+        sidecarFailure: SessionPersistence.FailureReason
+    ) -> String {
+        switch sidecarFailure {
+        case .permissionDenied:
+            return "No new ratings are waiting to be saved. The folder session file is still read-only; restore write access to repair it."
+        case .outOfSpace:
+            return "No new ratings are waiting to be saved. The folder session file couldn't be repaired because the photo volume is full."
+        case .volumeUnavailable:
+            return "No new ratings are waiting to be saved. Reconnect the photo volume to repair its folder session file."
+        case .busy:
+            return "No new ratings are waiting to be saved. Another Louppe window is using this folder; retry the sidecar repair in a moment."
+        case .encoding, .other:
+            return "No new ratings are waiting to be saved. The folder session file still couldn't be repaired."
+        }
+    }
+
+    private func recordDurableGeneration(for request: SaveRequest) {
+        guard persistenceGenerationAccessID == request.access.id else { return }
+        durableSessionChangeGeneration = max(
+            durableSessionChangeGeneration ?? 0,
+            request.changeGeneration
+        )
+    }
+
+    private var currentSessionIsDurable: Bool {
+        guard let access = persistenceAccess,
+              persistenceGenerationAccessID == access.id,
+              let durableSessionChangeGeneration else { return false }
+        return durableSessionChangeGeneration >= sessionChangeGeneration
     }
 
     private func refreshedSaveRequest(from request: SaveRequest) -> SaveRequest {
@@ -2470,7 +2835,8 @@ final class SessionStore: ObservableObject {
             folder: request.folder,
             session: session,
             sequence: saveSequence,
-            access: request.access
+            access: request.access,
+            changeGeneration: request.changeGeneration
         )
     }
 
@@ -2509,7 +2875,8 @@ final class SessionStore: ObservableObject {
             folder: folder,
             session: session,
             sequence: saveSequence,
-            access: access
+            access: access,
+            changeGeneration: sessionChangeGeneration
         )
     }
 
@@ -2538,20 +2905,15 @@ final class SessionStore: ObservableObject {
             closeLegacySessionWithoutMigrating()
             return
         }
-        cancelScheduledSave()
-        if let request = makeSaveRequest() {
-            isSessionTransitioning = true
-            let task = enqueuePersistenceSave(request)
-            Task { @MainActor [weak self] in
-                let result = await task.value
-                guard let self else { return }
-                self.isSessionTransitioning = false
-                guard result.canDiscardInMemoryState else { return }
-                self.finishClosingSession()
-            }
-            return
+        isSessionTransitioning = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await self
+                .persistCurrentSessionIfNeededBeforeDiscard()
+            self.isSessionTransitioning = false
+            guard result?.canDiscardInMemoryState != false else { return }
+            self.finishClosingSession()
         }
-        finishClosingSession()
     }
 
     private func finishClosingSession() {
@@ -2570,8 +2932,17 @@ final class SessionStore: ObservableObject {
         prefetchDebounce = nil
         scanResumeIdentity = nil
         retainedMissingSessionEntries = []
+        if retrySaveRequest == nil {
+            persistenceWarning = nil
+            persistenceRejectedInvalidSnapshot = false
+        }
         persistenceAccess = nil
+        persistenceGenerationAccessID = nil
+        durableSessionChangeGeneration = nil
+        sessionChangeGeneration = 0
         isLegacySessionMigrationConfirmationPresented = false
+        legacySessionMigrationMissingFileCount = 0
+        legacySessionMigrationUsesUnownedBackup = false
         items = []
         emptySessionReason = nil
         resetDerivedData()

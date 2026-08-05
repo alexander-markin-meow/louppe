@@ -31,6 +31,7 @@ enum DurableFileIO {
     /// must still be able to serialize a fallback save in Application Support.
     static func withExclusiveFileLock<Result>(
         at lockFile: URL,
+        timeout: TimeInterval = 2,
         beforeLock: () -> Void = {},
         perform body: () throws -> Result
     ) throws -> Result {
@@ -52,16 +53,48 @@ enum DurableFileIO {
         // This hook exists solely so the two-persistence-instance durability
         // test can prove that its second writer reached the actual lock wait.
         beforeLock()
-        var lockResult: Int32
-        repeat {
-            lockResult = louppeFlock(descriptor, LOCK_EX)
-        } while lockResult != 0 && errno == EINTR
-        guard lockResult == 0 else {
-            throw IOError.system(
-                operation: "acquire persistence lock",
-                path: lockFile.path,
-                code: errno
-            )
+        // Never let a stale or wedged second Louppe process freeze saving,
+        // folder changes, or Quit forever. The transaction remains exclusive,
+        // but a contended caller gets a normal retryable save failure after a
+        // short bounded wait.
+        let boundedTimeout: TimeInterval
+        if timeout.isFinite {
+            boundedTimeout = min(max(0, timeout), 60)
+        } else {
+            boundedTimeout = 2
+        }
+        let timeoutNanoseconds = UInt64(
+            boundedTimeout * 1_000_000_000
+        )
+        let deadline = DispatchTime.now().uptimeNanoseconds
+            + timeoutNanoseconds
+        while true {
+            if louppeFlock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+                break
+            }
+            let failure = errno
+            guard failure == EINTR
+                    || failure == EWOULDBLOCK
+                    || failure == EAGAIN else {
+                throw IOError.system(
+                    operation: "acquire persistence lock",
+                    path: lockFile.path,
+                    code: failure
+                )
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else {
+                throw IOError.system(
+                    operation: "wait for persistence lock",
+                    path: lockFile.path,
+                    code: EWOULDBLOCK
+                )
+            }
+            if failure == EINTR {
+                continue
+            }
+            let remainingMicroseconds = (deadline - now) / 1_000
+            usleep(useconds_t(max(1, min(25_000, remainingMicroseconds))))
         }
         defer {
             while louppeFlock(descriptor, LOCK_UN) != 0 && errno == EINTR {}
@@ -77,7 +110,8 @@ enum DurableFileIO {
         _ data: Data,
         to destination: URL,
         fullSync: Bool,
-        validateBeforeReplace: () throws -> Void = {}
+        validateBeforeReplace: () throws -> Void = {},
+        afterReplaceForTesting: () throws -> Void = {}
     ) throws {
         let parent = destination.deletingLastPathComponent()
         let temporary = parent.appendingPathComponent(
@@ -124,6 +158,9 @@ enum DurableFileIO {
         try validateBeforeReplace()
         try replaceByRename(from: temporary, to: destination)
         shouldRemoveTemporary = false
+        // Deterministic tests use this boundary to model an error after rename
+        // committed but before the parent-directory sync returned.
+        try afterReplaceForTesting()
         try syncDirectory(parent, fullSync: fullSync)
     }
 

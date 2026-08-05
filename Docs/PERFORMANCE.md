@@ -24,6 +24,19 @@ operations belong elsewhere:
   order current sidecar and backup copies. Save sequence numbers prevent a
   late older task from replacing a newer snapshot. Folder switching, rescan,
   and Close Session await a safe result before discarding the live item array.
+  When the exact opened path is absent because its card/drive disconnected,
+  saving advances only that stable identity's local backup under the same lock;
+  it never recreates the path, and any replacement or ambiguous path failure
+  remains a conflict. Post-rename sync errors reconcile only exact destination
+  bytes; a reconnect can adopt only the one sidecar revision that the same
+  access marked as a possible interrupted commit, never an ordinary rollback
+  to an older backup. `SessionStore` tracks a monotonic live-change generation
+  against the generation captured by each successful sidecar/backup request.
+  The just-opened scan is generation zero and is already a discard-safe
+  baseline. Quit first awaits an active checkpoint, starts no new I/O when the
+  live generation is already durable, and submits one fresh snapshot only when
+  live ratings are newer. Failure of an already-running generation-zero repair
+  does not block Quit; failure to secure a newer live generation does.
   Pairing-mode changes never
   discard it: they reproject the discovered physical-file records in memory.
   App termination uses AppKit's asynchronous terminate-later reply, so it can
@@ -230,10 +243,13 @@ their SwiftUI scroll content. It forces AppKit's `.legacy` vertical-scroller
 style with autohiding disabled, so the control remains visible and consumes a
 real gutter rather than overlaying thumbnails. Grid column-count calculations
 must subtract `PersistentVerticalScroller.gutterWidth` to match the content
-width AppKit gives the lazy grid. `configure` runs on every SwiftUI update
-pass (every store publish), so it early-returns once the scroll view is fully
-configured — keep that guard, otherwise every keystroke and drag tick pays a
-redundant `tile()` layout on both scroll views.
+width AppKit gives the lazy grid. Keep AppKit's native `NSScroller`: the former
+hand-drawn thumb competed with lazy-cell realization during a fast scroll and
+made the indicator visibly step. Once mounted, configuration resolves the
+enclosing scroll view synchronously; only the first unresolved mount lookup is
+queued and duplicate lookups are coalesced. `configure` still early-returns
+once the scroll view is fully configured, otherwise every keystroke and drag
+tick pays a redundant `tile()` layout on both scroll views.
 
 ## Filtering and derived data
 
@@ -293,12 +309,13 @@ the session after the user has left the scanning view.
 `FolderScanner.pairFiles` sorts byte-exact paths and group keys before
 projection, so filesystem enumeration and Dictionary order cannot change the
 result between rescans. A pair forms only when exactly one RAW and one JPEG
-share the key; every ambiguous group stays separate. Pair keys preserve the
-parent directory and stem as exact filesystem bytes. Only ASCII case is
+share the filename-stem key across the whole opened folder tree; every
+ambiguous group stays separate. This lets a unique RAW in one subfolder pair
+with its unique matching JPEG in another, while repeated camera filenames
+remain independent. Pair stems use exact filesystem bytes. Only ASCII case is
 folded, and only when the volume explicitly reports case-insensitive names;
 unknown behavior fails closed. Accents, composed/decomposed Unicode spellings,
-non-ASCII case mappings, and separately named parent directories therefore
-cannot collapse into one pair.
+and non-ASCII case mappings therefore cannot collapse into one pair.
 
 Physical file IDs are ASCII percent-encoded relative filesystem paths, not
 decoded Swift paths. That lossless identity continues through projection
@@ -318,19 +335,28 @@ rating or trigger an automatic overwrite of the saved session. Verified file
 and folder renames retain ratings, missing originals retain dormant entries
 across later saves, and a returning exact file recovers its decision. ctime is
 excluded only from persistence matching because Louppe-owned rename/rollback
-changes it without changing the photographed content; live transaction plans
-refresh and then enforce ctime during each operation. The source directory is
-captured before the walk and rechecked after metadata extraction, after the
-session read, and immediately before the scan is applied. Every scanned file
-is likewise restated after metadata work and once more after persistence I/O.
+  changes it without changing the photographed content; live transaction plans
+  refresh and then enforce ctime during each operation. The source directory is
+  captured before the walk and rechecked after metadata extraction, after the
+  session read, and immediately before the scan is applied. Persistence also
+  records the exact `lstat` identity of every ancestor in the opened path, so a
+  replacement directory or dangling symlink cannot be mistaken for an ejected
+  volume and inherit its backup lineage. Device numbers remain strict outside
+  the source volume. A fully captured UUID-owned source may legitimately have a
+  new device number after remount, but an absent/unreadable final folder keeps
+  strict device checks so a different blank card cannot look like an ejected
+  original. Every scanned file is likewise restated after metadata work and
+  once more after persistence I/O.
 
-Schema 1–3 cannot prove that a present filename is still the same physical
-file. If every legacy entry is present, the session is shown behind a modal
-one-time confirmation and no save, close, or quit path may migrate it until
-the photographer chooses **Use Saved Ratings**. Any missing legacy entry still
-blocks migration. Obsolete path-keyed backups are considered only when both
-the sidecar and identity-keyed backup are absent; legacy entries use the same
-confirmation, and schema-4 entries still require a physical identity match.
+Schema 1–3 cannot prove physical identity, but an ordinary legacy session in
+its original folder migrates automatically when every saved filename is still
+present. If legacy entries are missing, **Open Folder and Forget Missing
+Items** explicitly excludes only those unmatched ratings from the new
+identity-bound snapshot; Close Folder and Quit leave both legacy copies
+untouched. Obsolete path-keyed backups are considered only when both the
+sidecar and identity-keyed backup are absent; their legacy entries still use
+the explicit confirmation because that backup is not owned by the folder, and
+schema-4 entries still require a physical identity match.
 Folder traversal has no arbitrary depth cutoff; symbolic-link directories and
 package descendants are skipped explicitly, so deep archives remain complete
 without following loops.
@@ -383,8 +409,12 @@ Plan v3 stores the exact filesystem bytes for every source, destination,
 temporary, and resolved Trash path. Recovery reconstructs those bytes without
 normalizing through a Swift string; malformed, relative, noncanonical, or
 mismatched raw paths keep the journal retryable. Plan v1 and v2 remain readable
-for crash recovery. Export preflight resolves symlinks through the same raw
-POSIX boundary and passes that exact selected directory unchanged to Copy or
+for crash recovery. Intentional Trash operations reconcile forward: launch
+recovery accepts the current source state and retires their bookkeeping without
+restoring or searching for media in macOS's privacy-protected Trash. Explicit
+in-session Trash Undo remains the sole restore path. Export preflight resolves
+symlinks through the same raw POSIX boundary and passes that exact selected
+directory unchanged to Copy or
 Move; target construction must not use Foundation path standardization. Plans
 are decoded fail closed: every path must be absolute and canonical;
 source, destination, and temporary paths must be globally disjoint by exact
@@ -423,8 +453,12 @@ before final rename the journal owns the unique temporary path; afterward the
 staged identity still identifies the same inode at the destination. Trash is
 the exceptional path because macOS chooses its destination. Its `.started`
 checkpoint is written before `trashItem`; if termination happens before the
-returned URL can be recorded, recovery searches the correct volume's Trash by
-device/inode rather than guessing from the filename.
+returned URL can be recorded, recovery preserves the photographer's Trash
+decision and retires the record without searching protected Trash directories.
+If durable steps show that a paired Trash action stopped between RAW and JPEG,
+the record remains nonblocking attention until Retry or the explicit **Keep
+Files As They Are** action; that action retires only journal metadata and never
+touches media.
 
 Move currently accepts only destinations on the same known storage volume,
 revalidates the planned source immediately before touching it, and performs
@@ -440,8 +474,11 @@ plan before activation; sync operation-created copies and every affected
 rename/removal directory before advancing a step; then fully sync the
 operation-bound commit record before retiring the journal. A cross-directory
 rename flushes the destination directory before the source directory so a
-power cut prefers two recoverable names over none. A completed journal leaves
-the active namespace through an exclusive `.retired` rename and full root sync
+power cut prefers two recoverable names over none. The macOS Trash boundary is
+the exception: `FileManager.trashItem` owns that system-managed transition, and
+Louppe never makes direct open/fsync access to `.Trash` or `.Trashes` a success
+condition. A completed journal leaves the active namespace through an
+exclusive `.retired` rename and full root sync
 before bounded housekeeping can recursively remove it. Journal checkpoints
 recapture and compare the exact worker-proven identity before accepting a
 path as operation-owned. Copy/Move duplicate cleanup transfers the candidate
@@ -451,19 +488,32 @@ and backups use the same write -> sync -> atomic replace -> directory-sync
 boundary. If any flush fails after a filesystem side effect, the worker keeps
 the journal and enters conservative recovery instead of claiming success.
 
-`SessionStore` runs recovery off-main before honoring a launch folder request.
-File operations, folder/session mutation, updater installation, and Quit stay
-blocked while it runs. A missing volume or identity conflict keeps the files
-untouched and exposes Retry Recovery. After recovery of an operation that may
-have moved source files, the current folder is rescanned. Copy recovery never
-returns to a destructive pre-export state: identity-verified staged and
+`SessionStore` runs recovery off-main. While the pass is actively reconciling
+files, conflicting transitions remain blocked. If a journal remains unresolved,
+it becomes nonmodal attention: only new Copy, Move, Clean Up/Trash, and Trash
+undo wait. Reviewing, rating, navigation, opening/closing/rescanning folders,
+saving, updating, and Quit remain available, and a requested launch folder is
+still opened. Reconnection is suggested only when the report actually
+identifies an unavailable volume. After recovery of an operation that may have
+moved source files, only that exact currently open folder is rescanned. Copy
+recovery never returns to a destructive pre-export state: identity-verified staged and
 completed copies are kept, and a staged temporary is durably published under
 its planned destination name without requiring the source drive to remain
-mounted.
+mounted. Fully completed Move items likewise stay at their chosen destination;
+only an incomplete item or pair uses source-restoring rollback recovery. A
+  permanently ambiguous journal can be cleared with **Keep Files As They Are**
+  without changing any photo path. That escape accepts only a canonical UUID
+  journal name and atomically sets the record aside as `.forgotten`; it never
+  deletes the record's contents or adopts an arbitrary `.operation` file.
 Only the real `LouppeApp` entry point opts into automatic launch recovery.
 Test stores default to no automatic recovery and can inject a disposable
 journal directory, preventing test execution from ever reconciling a live
 photographer operation.
+
+Session persistence uses a separate identity-keyed advisory lock that still
+spans the complete sidecar/backup compare-and-swap transaction. Acquisition is
+nonblocking with a short deadline; contention becomes an ordinary retryable save
+failure instead of allowing Close, folder changes, or Quit to wait forever.
 
 ## Export lifecycle
 
