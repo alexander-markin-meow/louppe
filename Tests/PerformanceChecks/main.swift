@@ -62,6 +62,7 @@ struct PerformanceChecks {
         try scannerAndPreparedIndexShareDefaultOrder()
         try preparedSessionIndexKeepsStableGroupIdentity()
         try preparedSessionIndexScaleBaselines()
+        try metadataFilterSortAndExportScaleBaseline()
         try ratingMutationScaleBaseline()
         try selectionStatePreservesImplicitCurrentAndToggleRules()
         try selectionStateRangesFiltersAndRemapsByID()
@@ -73,12 +74,12 @@ struct PerformanceChecks {
         try batchRatingUndoRestoresEveryRating()
         try exportMoveRemovalUpdatesSessionState()
         if ProcessInfo.processInfo.environment["LOUPPE_SKIP_REAL_TRASH"] == "1" {
-            print("Performance checks passed (68/71; 3 real Trash checks explicitly skipped)")
+            print("Performance checks passed (69/72; 3 real Trash checks explicitly skipped)")
         } else {
             try cleanUpPairRoundTripsThroughTrash()
             try cleanUpPairFailureRollsBackFirstFile()
             try cleanUpRollbackPreservesRacingSourceReplacement()
-            print("Performance checks passed (71/71)")
+            print("Performance checks passed (72/72)")
         }
     }
 
@@ -3096,6 +3097,71 @@ struct PerformanceChecks {
         }
     }
 
+    private static func metadataFilterSortAndExportScaleBaseline() throws {
+        let itemCount = 100_000
+        let stars = StarRating.allCases
+        let colors = PhotoColorLabel.allCases
+        let items = (0..<itemCount).map { index in
+            makeItem(
+                id: String(format: "METADATA_%06d.JPG", index),
+                rating: index.isMultiple(of: 3) ? .yes
+                    : (index % 3 == 1 ? .no : .undecided),
+                stars: index.isMultiple(of: 6) ? nil : stars[index % stars.count],
+                color: index.isMultiple(of: 6) ? nil : colors[index % colors.count]
+            )
+        }
+        let clock = ContinuousClock()
+
+        var filter = PhotoFilter()
+        filter.excludedDecisionStates = [.no]
+        filter.excludedStarStates = [.unrated]
+        filter.excludedColorStates = [.none]
+        let preparedFilter = PreparedPhotoFilter(filter)
+        let filterDuration = clock.measure {
+            _ = items.count(where: preparedFilter.matches)
+        }
+
+        let sort = PhotoSort(key: .starRating, ascending: false)
+        var preparedIndex = PreparedSessionIndex()
+        let sortDuration = clock.measure {
+            preparedIndex.rebuildItems(items, sort: sort)
+        }
+        let sortedStates = preparedIndex.sortedIndices.map {
+            items[$0].starRatingState
+        }
+        let firstSpecial = sortedStates.firstIndex {
+            $0 == .unrated || $0 == .mixed
+        } ?? sortedStates.endIndex
+        try expect(
+            !sortedStates[..<firstSpecial].contains(.unrated),
+            "metadata sort should keep Unrated after every rated value"
+        )
+
+        let predicate = ExportSelectionPredicate(
+            decisions: [.yes],
+            stars: .three,
+            color: .green
+        )
+        var snapshot = ExportSelectionSnapshot.empty
+        let exportDuration = clock.measure {
+            snapshot = ExportSelectionSnapshot(items: items, predicate: predicate)
+        }
+        try expect(
+            snapshot.itemIndices.allSatisfy { predicate.matches(items[$0]) },
+            "prepared Export snapshot should contain only the AND intersection"
+        )
+        try expect(
+            snapshot.physicalFileCount == snapshot.itemCount,
+            "single-file scale fixtures should retain exact physical counts"
+        )
+        print(
+            "Metadata index \(itemCount) items: "
+                + "filter \(milliseconds(filterDuration)) ms, "
+                + "sort \(milliseconds(sortDuration)) ms, "
+                + "export selection \(milliseconds(exportDuration)) ms"
+        )
+    }
+
     /// Rating one photo is the culling hot path. Keep this separate from
     /// session preparation so a regression cannot hide behind scan/sort time.
     @MainActor
@@ -3851,7 +3917,10 @@ struct PerformanceChecks {
         videoIsPlayable: Bool = false,
         modificationDate: Date? = nil,
         fileSize: Int64 = 1,
-        pairedFileSize: Int64 = 0
+        pairedFileSize: Int64 = 0,
+        rating: Rating = .undecided,
+        stars: StarRating? = nil,
+        color: PhotoColorLabel? = nil
     ) -> PhotoItem {
         PhotoItem(
             id: id,
@@ -3868,7 +3937,10 @@ struct PerformanceChecks {
             videoIsPlayable: videoIsPlayable,
             primaryModificationDate: modificationDate,
             fileSize: fileSize,
-            pairedFileSize: pairedFileSize
+            pairedFileSize: pairedFileSize,
+            rating: rating,
+            starRating: stars,
+            colorLabel: color
         )
     }
 

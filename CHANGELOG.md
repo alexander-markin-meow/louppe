@@ -5,7 +5,7 @@ by the app are defined in `VERSION`; `build_app.sh` verifies that the marketing
 version and build number have a matching entry below before it creates a
 release bundle.
 
-## 1.7.0 (9) — 2026-08-05
+## 1.7.0 (9) — 2026-08-06
 
 - Added [louppe.eu](https://louppe.eu) to the About panel and README. PNG
   histograms now exclude fully transparent pixels instead of treating them as
@@ -15,8 +15,44 @@ release bundle.
   A pinned Adobe XMPCore Objective-C++/Swift bridge now round-trips synthetic
   Lightroom Classic, Bridge, Capture One, darktable, and universal packets
   without losing unrelated edits, keywords, or custom namespaces. The proof
-  rejects malformed packets and explicitly disables XML entity use; it does
-  not yet expose metadata controls or write sidecars in the app.
+  rejects malformed packets and explicitly disables XML entity use. Louppe now
+  also keeps independent Yes/No decisions, 0–5 stars, and five color labels per
+  physical file in schema-5 sessions, including mixed RAW+JPEG states, batch
+  editing, dimension-specific undo, Info-panel controls, thumbnail indicators,
+  VoiceOver actions, and 0–5 shortcuts. Decision, star, and color facets now
+  filter the normal session independently; each dimension can also sort and
+  form stable Browser/Grid groups. Export applies decision + star + color as
+  one prepared AND selection with exact item and physical-file counts. The
+  pinned parser now also ships as an audited source target with complete
+  license resources. Typed Universal, Lightroom, Bridge, Capture One, and
+  darktable mappings preserve foreign edits and keywords; exact-path sidecar
+  planning detects shared-stem, casing, and Unicode conflicts; and the bounded
+  actor store rejects unsafe files and external edits before a flushed,
+  atomic, verified replacement. Export now includes the explicit
+  **Metadata (XMP)** mode with Universal, Lightroom Classic, Bridge, Capture
+  One, and darktable presets. It preflights immutable same-stem plans, warns
+  about changed values and best-effort non-RAW formats, reports each conflict,
+  requires explicit confirmation before replacing or removing external color
+  labels, writes through three bounded background lanes, and shows separate
+  Created, Updated, Already current, Skipped, Conflict, and Failed results. Stop,
+  Open/Close Folder, Rescan, and Quit all await a safe atomic boundary, and a
+  late external packet change is never overwritten. Ordinary session saving
+  still never writes XMP sidecars. Copy and Move now conditionally include XMP:
+  the option defaults from exact associated packets in the selected scope and
+  respects a manual choice for the sheet lifetime. Destination stem packets are
+  merged without changing Copy sources, application-private packets transfer
+  byte-for-byte, shared same-stem packets stay behind when one member remains,
+  and a complete-family Move transfers its packet. Media and XMP use one
+  versioned crash-recovery plan with common collision naming, exact identities,
+  packet digests, and interruption-tested rollback/forward recovery.
+  Copy/Move now confirms that immutable plan with separate create, update,
+  already-current, unchanged-application-packet, unsupported, conflict, and
+  failure counts before touching files, and reports media and sidecar outcomes
+  separately afterward. Conflicted shared packets are skipped without blocking
+  the media export or safe application-private packets. Video sidecars remain
+  outside this first XMP release and do not turn the option on automatically.
+  Preflight also detects exact associated Lightroom Classic `.acr` heavy-edit
+  companions and warns that Louppe will leave them untouched at the source.
 
 - Restored full-size Grid tiles after the native immediate-click surface made
   cells adopt the preview image's intrinsic size, and made pairing group an

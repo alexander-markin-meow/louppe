@@ -5,7 +5,8 @@ import AppKit
 /// toolbar, the export sheet, and all single-key hotkeys.
 ///
 /// Hotkey map (README's table must stay in sync with `handleKey`):
-///   F yes · D no · S 100% zoom · A phone-size zoom · R clear all
+///   F yes · D no · 0–5 stars · S 100% zoom · A phone-size zoom
+///   R clear all decisions
 ///   Q browser · W info panel · X clipping warnings · E export
 ///   Space video play/pause (photo: next)
 ///   ←/→ prev/next
@@ -33,8 +34,8 @@ struct SessionView: View {
             .sheet(isPresented: $store.isExportPresented) {
                 ExportView(store: store)
             }
-            .alert("Clear All Ratings?", isPresented: $store.isClearAllRatingsConfirmationPresented) {
-                Button("Clear All Ratings", role: .destructive) {
+            .alert("Clear All Decisions?", isPresented: $store.isClearAllRatingsConfirmationPresented) {
+                Button("Clear All Decisions", role: .destructive) {
                     store.clearAllRatings()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -52,7 +53,7 @@ struct SessionView: View {
                     }
                     .keyboardShortcut(.defaultAction)
                 } else {
-                    Button("Use Saved Ratings") {
+                    Button("Use Saved Decisions") {
                         store.confirmLegacySessionMigration()
                     }
                     .keyboardShortcut(.defaultAction)
@@ -90,7 +91,7 @@ struct SessionView: View {
     private var clearAllRatingsMessage: String {
         let count = store.ratedCount
         let items = count == 1 ? "1 item" : "\(count) items"
-        return "This will remove the Yes or No rating from \(items). You can undo it with ⌘Z."
+        return "This will remove the Yes or No decision from \(items). Stars and color labels will stay unchanged. You can undo it with ⌘Z."
     }
 
     private var isCleanUpConfirmPresented: Binding<Bool> {
@@ -113,7 +114,7 @@ struct SessionView: View {
     private var legacyMigrationTitle: String {
         switch store.legacySessionMigrationMissingFileCount {
         case 0:
-            return "Use Saved Ratings?"
+            return "Use Saved Decisions?"
         case 1:
             return "A Saved File Is Missing"
         default:
@@ -130,9 +131,9 @@ struct SessionView: View {
     private var legacyMigrationMessage: String {
         let count = store.legacySessionMigrationMissingFileCount
         guard count > 0 else {
-            return "This folder contains ratings saved by an older version of Louppe. "
+            return "This folder contains decisions saved by an older version of Louppe. "
                 + "Every saved filename is present, but the older session cannot prove that the files are the exact originals. "
-                + "Use Saved Ratings upgrades the session and binds each rating to its physical file. "
+                + "Use Saved Decisions upgrades the session and binds each decision to its physical file. "
                 + "Close Folder leaves the existing session untouched."
         }
         let files = count == 1
@@ -141,15 +142,15 @@ struct SessionView: View {
         let availability = count == 1
             ? "it was deleted intentionally or is temporarily unavailable"
             : "they were deleted intentionally or are temporarily unavailable"
-        let ratings = count == 1
-            ? "that old saved rating"
-            : "those old saved ratings"
-        var message = "This older Louppe session has saved ratings for \(files) no longer in the folder. "
+        let decisions = count == 1
+            ? "that old saved decision"
+            : "those old saved decisions"
+        var message = "This older Louppe session has saved decisions for \(files) no longer in the folder. "
             + "Louppe cannot tell whether \(availability). "
-            + "Open Folder and Forget Missing \(count == 1 ? "Item" : "Items") removes only \(ratings), keeps the ratings for files still here, and upgrades the session. "
+            + "Open Folder and Forget Missing \(count == 1 ? "Item" : "Items") removes only \(decisions), keeps the decisions for files still here, and upgrades the session. "
             + "Close Folder changes nothing."
         if store.legacySessionMigrationUsesUnownedBackup {
-            message += " These ratings also came from an older local backup that is not tied to this exact folder; opening will bind the surviving same-name ratings to the files currently here."
+            message += " These decisions also came from an older local backup that is not tied to this exact folder; opening will bind the surviving same-name decisions to the files currently here."
         }
         return message
     }
@@ -258,7 +259,7 @@ struct SessionView: View {
                         && !store.isChangingRawJPEGPairingMode
                 )
         }
-        .help("Review progress and rating totals")
+        .help("Review progress and decision totals")
     }
 
     private var mainContent: some View {
@@ -396,15 +397,15 @@ struct SessionView: View {
             }
             .disabled(store.isFileOperationRunning || !store.canUndo)
             .accessibilityLabel("Undo")
-            .help("Undo the last rating or clean-up (Z or ⌘Z)")
+            .help("Undo the last decision, stars, color label, or clean-up (Z or ⌘Z)")
             Button {
                 store.requestClearAllRatings()
             } label: {
                 Image(systemName: "eraser")
             }
             .disabled(store.isFileOperationRunning || store.ratedCount == 0)
-            .accessibilityLabel("Clear All Ratings")
-            .help("Clear all ratings (R)")
+            .accessibilityLabel("Clear All Decisions")
+            .help("Clear all Yes/No decisions (R)")
         }
 
         if #available(macOS 26.0, *) {
@@ -482,8 +483,8 @@ struct SessionView: View {
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .tint(Color.louppeAccent)
-            .accessibilityLabel("Export Media")
-            .help("Export media by rating — copy or move it to a folder (E or ⌘E)")
+            .accessibilityLabel("Export")
+            .help("Copy or move selected media, or write Metadata (XMP) sidecars (E or ⌘E)")
         }
     }
 
@@ -623,7 +624,7 @@ struct SessionView: View {
             }
         }
 
-        // ⌘Z — undo the last rating (or a whole "clear all" / clean-up).
+        // ⌘Z — undo the last review-metadata action (or clean-up).
         if acceptsAppCommand,
            modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "z" {
@@ -715,6 +716,21 @@ struct SessionView: View {
             store.clearSelection()
             return true
         default: break
+        }
+
+        // Unmodified 0–5 assign portable XMP stars without changing the
+        // independent Yes/No decision or advancing the current item.
+        if modifiers.isEmpty,
+           let character = event.charactersIgnoringModifiers {
+            switch character {
+            case "0": store.setStarRating(nil); return true
+            case "1": store.setStarRating(.one); return true
+            case "2": store.setStarRating(.two); return true
+            case "3": store.setStarRating(.three); return true
+            case "4": store.setStarRating(.four); return true
+            case "5": store.setStarRating(.five); return true
+            default: break
+            }
         }
 
         // The remaining shortcuts are letters. Shift and ordinary Caps Lock

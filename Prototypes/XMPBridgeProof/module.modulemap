@@ -1,0 +1,4 @@
+module XMPBridge {
+    header "include/XMPBridge.h"
+    export *
+}

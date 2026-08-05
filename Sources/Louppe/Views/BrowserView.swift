@@ -84,7 +84,7 @@ struct BrowserView: View {
 /// One Browser strip row. It observes the store directly: the LazyVStack's
 /// diff of already-created rows is not a reliable invalidation path on macOS
 /// (rows froze their badges and current-photo frame until the view was
-/// recreated, most visibly after Clear All Ratings), so a row must never
+/// recreated, most visibly after Clear All Decisions), so a row must never
 /// depend on the container to learn about store changes. Do not turn this
 /// back into a plain value subtree.
 private struct BrowserRow: View {
@@ -120,9 +120,22 @@ private struct BrowserRow: View {
                 ThumbnailView(
                     item: item,
                     isCurrent: item.id == store.currentItem?.id,
-                    isSelected: store.selectedIndices.contains(index)
+                    isSelected: store.selectedIndices.contains(index),
+                    // Read the decision in this observed row instead of
+                    // hiding it inside a child whose PhotoItem storage
+                    // identity does not change when the decision changes.
+                    showsRatingBadge: false
                 )
                 .frame(width: 102, height: 102)
+                .overlay(alignment: .topTrailing) {
+                    RatingBadge(
+                        rating: item.rating,
+                        isMixed: item.hasMixedRatings,
+                        size: 18
+                    )
+                    .frame(width: 28, height: 28)
+                    .padding(3)
+                }
                 .onTapGesture {
                     // ⇧-click: range · ⌘-click: add/remove · click: jump.
                     store.handleThumbnailClick(at: index, plainClick: onPlainClick)
@@ -137,6 +150,12 @@ private struct BrowserRow: View {
                     canRate: store.canRate,
                     rate: { rating in
                         store.rate(rating, at: index)
+                    },
+                    setStars: { stars in
+                        store.setStarRating(stars, at: index)
+                    },
+                    setColor: { label in
+                        store.setColorLabel(label, at: index)
                     },
                     toggleSelection: {
                         store.toggleSelection(of: index)

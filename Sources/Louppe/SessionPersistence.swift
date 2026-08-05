@@ -1242,6 +1242,11 @@ actor SessionPersistence: SessionPersistenceClient {
                     requiresCanonicalPercentEncoding: usesExactIDs
                   ),
                   Rating(rawValue: entry.rating) != nil,
+                  session.version >= 5
+                    || (entry.stars == nil
+                        && entry.starsChangedAt == nil
+                        && entry.colorLabel == nil
+                        && entry.colorChangedAt == nil),
                   session.version < 4 || entry.pairedFilename == nil,
                   session.version < 4
                     || entry.fileIdentity.map(

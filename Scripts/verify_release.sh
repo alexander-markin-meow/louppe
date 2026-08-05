@@ -59,6 +59,12 @@ verify_app_bundle() {
         || fail "$label does not verify updates before extraction."
     [[ -d "$bundle/Contents/Frameworks/Sparkle.framework" ]] \
         || fail "$label does not embed Sparkle.framework."
+    cmp -s ThirdPartyLicenses/XMPCore-BSD-3-Clause.txt \
+        "$bundle/Contents/Resources/XMPCore License.txt" \
+        || fail "$label does not contain the reviewed XMPCore license."
+    cmp -s ThirdPartyLicenses/Expat-MIT.txt \
+        "$bundle/Contents/Resources/Expat License.txt" \
+        || fail "$label does not contain the reviewed Expat license."
     otool -L "$bundle/Contents/MacOS/Louppe" | grep -Fq "@rpath/Sparkle.framework" \
         || fail "$label executable is not linked to embedded Sparkle."
 }

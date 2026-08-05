@@ -13,6 +13,11 @@ struct ThumbnailView: View {
     /// Grid supplies its own interactive badge above the tile's click target.
     var showsRatingBadge: Bool = true
     var videoPlayback: VideoPlaybackController?
+    /// Scalar projections make metadata changes visible to SwiftUI even
+    /// though the PhotoItem's lock-backed storage reference stays identical.
+    private let ratingState: PhotoItemRatingState
+    private let starRatingState: PhotoItemStarRatingState
+    private let colorLabelState: PhotoItemColorLabelState
 
     @State private var image: NSImage?
     @State private var imageRevision: PhotoContentRevision
@@ -29,6 +34,9 @@ struct ThumbnailView: View {
         self.isSelected = isSelected
         self.showsRatingBadge = showsRatingBadge
         self.videoPlayback = videoPlayback
+        self.ratingState = item.ratingState
+        self.starRatingState = item.starRatingState
+        self.colorLabelState = item.colorLabelState
         let revision = item.contentRevision
         self._imageRevision = State(initialValue: revision)
         // Reappearing lazy cells should render their memory-cached image on
@@ -81,8 +89,8 @@ struct ThumbnailView: View {
         .overlay(alignment: .topTrailing) {
             if showsRatingBadge {
                 RatingBadge(
-                    rating: item.rating,
-                    isMixed: item.hasMixedRatings
+                    rating: ratingState.effectiveRating,
+                    isMixed: ratingState == .mixed
                 )
                 .padding(4)
             }
@@ -92,6 +100,13 @@ struct ThumbnailView: View {
                 VideoDurationBadge(duration: item.duration)
                     .padding(4)
             }
+        }
+        .overlay(alignment: .bottomLeading) {
+            MetadataBadgeStrip(
+                starRatingState: starRatingState,
+                colorLabelState: colorLabelState
+            )
+                .padding(4)
         }
         .task(id: revision) {
             let requestedItem = item
@@ -172,7 +187,7 @@ struct UnsupportedThumbnail: View {
     }
 }
 
-/// The ✓ / ✗ / undecided / Mixed mark shown on thumbnails and in the info panel.
+/// The ✓ / ✗ / undecided / Mixed decision shown on thumbnails and in the Info panel.
 struct RatingBadge: View {
     let rating: Rating
     var isMixed = false

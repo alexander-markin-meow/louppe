@@ -29,6 +29,7 @@ swiftc \
     Sources/Louppe/ExportWorker.swift \
     Sources/Louppe/ExportDestinationValidator.swift \
     Sources/Louppe/SessionPersistence.swift \
+    Tests/PerformanceChecks/XMPPublicationStubs.swift \
     Sources/Louppe/SessionStore.swift \
     Tests/PerformanceChecks/main.swift \
     -o .build/performance-checks/LouppePerformanceChecks

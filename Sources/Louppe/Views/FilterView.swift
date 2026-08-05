@@ -5,6 +5,9 @@ import SwiftUI
 struct FilterView: View {
     @ObservedObject var store: SessionStore
 
+    @State private var decisionExpanded = true
+    @State private var starsExpanded = true
+    @State private var colorExpanded = true
     @State private var dateExpanded = true
     @State private var mediaExpanded = true
     @State private var durationExpanded = false
@@ -40,6 +43,12 @@ struct FilterView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     dateSection
+                    Divider()
+                    decisionSection
+                    Divider()
+                    starsSection
+                    Divider()
+                    colorSection
 
                     if store.availableMediaKinds.count > 1 {
                         Divider()
@@ -93,6 +102,111 @@ struct FilterView: View {
             if let previous, previous != current {
                 restoreInvalidDraft(for: previous)
             }
+        }
+    }
+
+    // MARK: - Review metadata
+
+    private var decisionSection: some View {
+        FilterDisclosureSection(title: "Decision", isExpanded: $decisionExpanded) {
+            VStack(alignment: .leading, spacing: 7) {
+                metadataToggle(
+                    "Yes",
+                    count: store.yesCount,
+                    value: PhotoItemRatingState.yes,
+                    set: \.excludedDecisionStates
+                )
+                metadataToggle(
+                    "No",
+                    count: store.noCount,
+                    value: PhotoItemRatingState.no,
+                    set: \.excludedDecisionStates
+                )
+                metadataToggle(
+                    "Undecided",
+                    count: store.plainUndecidedCount,
+                    value: PhotoItemRatingState.undecided,
+                    set: \.excludedDecisionStates
+                )
+                metadataToggle(
+                    "Mixed",
+                    count: store.mixedCount,
+                    value: PhotoItemRatingState.mixed,
+                    set: \.excludedDecisionStates
+                )
+            }
+        }
+    }
+
+    private var starsSection: some View {
+        FilterDisclosureSection(title: "Star rating", isExpanded: $starsExpanded) {
+            VStack(alignment: .leading, spacing: 7) {
+                metadataToggle(
+                    "Unrated",
+                    count: store.unratedStarCount,
+                    value: PhotoItemStarRatingState.unrated,
+                    set: \.excludedStarStates
+                )
+                ForEach(StarRating.allCases, id: \.self) { rating in
+                    metadataToggle(
+                        rating == .one ? "1 star" : "\(rating.count) stars",
+                        count: store.starCount(rating),
+                        value: PhotoItemStarRatingState.stars(rating),
+                        set: \.excludedStarStates
+                    )
+                }
+                metadataToggle(
+                    "Mixed",
+                    count: store.mixedStarCount,
+                    value: PhotoItemStarRatingState.mixed,
+                    set: \.excludedStarStates
+                )
+            }
+        }
+    }
+
+    private var colorSection: some View {
+        FilterDisclosureSection(title: "Color label", isExpanded: $colorExpanded) {
+            VStack(alignment: .leading, spacing: 7) {
+                metadataToggle(
+                    "None",
+                    count: store.noColorCount,
+                    value: PhotoItemColorLabelState.none,
+                    set: \.excludedColorStates
+                )
+                ForEach(PhotoColorLabel.allCases, id: \.self) { label in
+                    Toggle(
+                        isOn: metadataExclusionBinding(
+                            PhotoItemColorLabelState.label(label),
+                            \.excludedColorStates
+                        )
+                    ) {
+                        HStack(spacing: 7) {
+                            Circle()
+                                .fill(label.swatchColor)
+                                .frame(width: 10, height: 10)
+                            labeledCount(label.displayName, store.colorCount(label))
+                        }
+                    }
+                }
+                metadataToggle(
+                    "Mixed",
+                    count: store.mixedColorCount,
+                    value: PhotoItemColorLabelState.mixed,
+                    set: \.excludedColorStates
+                )
+            }
+        }
+    }
+
+    private func metadataToggle<Value: Hashable>(
+        _ label: String,
+        count: Int,
+        value: Value,
+        set: WritableKeyPath<PhotoFilter, Set<Value>>
+    ) -> some View {
+        Toggle(isOn: metadataExclusionBinding(value, set)) {
+            labeledCount(label, count)
         }
     }
 
@@ -516,6 +630,23 @@ struct FilterView: View {
             } else {
                 store.filter[keyPath: set].insert(label)
             }
+        }
+    }
+
+    private func metadataExclusionBinding<Value: Hashable>(
+        _ value: Value,
+        _ set: WritableKeyPath<PhotoFilter, Set<Value>>
+    ) -> Binding<Bool> {
+        Binding {
+            !store.filter[keyPath: set].contains(value)
+        } set: { isIncluded in
+            var filter = store.filter
+            if isIncluded {
+                filter[keyPath: set].remove(value)
+            } else {
+                filter[keyPath: set].insert(value)
+            }
+            store.filter = filter
         }
     }
 

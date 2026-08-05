@@ -12,7 +12,7 @@ final class AccessibilityTests: XCTestCase {
                 isCurrent: true,
                 isSelected: true
             ),
-            "RAW and JPEG photo, Mixed rating, Current item, Selected"
+            "RAW and JPEG photo, Mixed decision, No stars, No color label, Current item, Selected"
         )
     }
 
@@ -26,11 +26,11 @@ final class AccessibilityTests: XCTestCase {
         )
         XCTAssertTrue(
             MediaTileAccessibility.actionHint(canRate: true)
-                .contains("rate")
+                .contains("stars")
         )
         XCTAssertFalse(
             MediaTileAccessibility.actionHint(canRate: false)
-                .contains("rate")
+                .contains("stars")
         )
     }
 

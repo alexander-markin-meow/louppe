@@ -594,7 +594,7 @@ enum FolderScanner {
     }
 
     private static func enrichMetadata(for file: PhotoFile) -> PhotoFile {
-        let rating = file.ratingSnapshot
+        let metadata = file.metadataSnapshot
         let isVideo = isVideoExtension(file.url.pathExtension)
         let info = isVideo
             ? MetadataExtractor.ScanInfo()
@@ -622,8 +622,12 @@ enum FolderScanner {
             fileSize: file.fileSize,
             scannedIdentity: file.scannedIdentity,
             metadataIsLoaded: true,
-            rating: rating.rating,
-            ratedAt: rating.ratedAt
+            rating: metadata.rating,
+            ratedAt: metadata.ratedAt,
+            starRating: metadata.starRating,
+            starsChangedAt: metadata.starsChangedAt,
+            colorLabel: metadata.colorLabel,
+            colorChangedAt: metadata.colorChangedAt
         )
     }
 

@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 
 /// Filesystem-only Export implementation, CleanUpWorker's shape: it owns no
@@ -30,6 +31,7 @@ enum ExportWorker {
         let requiresRecovery: Bool
         /// A concise, user-facing reason for the first failure in the batch.
         let failureMessage: String?
+        let xmpSummary: XMPResultSummary?
     }
 
     struct MoveResult: Sendable {
@@ -44,22 +46,106 @@ enum ExportWorker {
         let journalFailure: Bool
         let requiresRecovery: Bool
         let failureMessage: String?
+        let xmpSummary: XMPResultSummary?
+    }
+
+    struct XMPResultSummary: Equatable, Sendable {
+        var mediaFiles = 0
+        var created = 0
+        var updated = 0
+        var alreadyCurrent = 0
+        var copiedUnchanged = 0
+        var unsupported = 0
+        var skipped = 0
+        var conflicts = 0
+        var failed = 0
+
+        init(plan: XMPExportPreparedPlan) {
+            for family in plan.issueFamilies {
+                if family.category == .unsupportedMedia {
+                    unsupported += 1
+                } else if family.category.isConflict {
+                    conflicts += 1
+                } else if family.category.isFailure {
+                    failed += 1
+                } else {
+                    skipped += 1
+                }
+            }
+        }
+
+        mutating func record(_ file: PlannedFile) {
+            switch file.role {
+            case .media:
+                mediaFiles += 1
+            case .applicationXMP:
+                copiedUnchanged += 1
+            case .preparedXMP:
+                switch file.xmpCategory {
+                case .create: created += 1
+                case .update: updated += 1
+                case .alreadyCurrent: alreadyCurrent += 1
+                default: skipped += 1
+                }
+            case .retiredXMPSource:
+                break
+            }
+        }
+
+        mutating func recordFailures(in items: some Sequence<PlannedItem>) {
+            failed += items.reduce(0) { count, item in
+                count + item.files.count(where: {
+                    $0.role == .preparedXMP
+                        || $0.role == .applicationXMP
+                })
+            }
+        }
     }
 
     struct PlannedFile: Sendable, Equatable {
         let source: URL
         let target: URL
         let scannedIdentity: FileOperationJournal.FileIdentity?
+        let role: FileOperationJournal.PlannedFileRole
+        let expectedSourceDigest: Data?
+        let preparedContents: Data?
+        let xmpCategory: XMPPublicationCategory?
+
+        init(
+            source: URL,
+            target: URL,
+            scannedIdentity: FileOperationJournal.FileIdentity?,
+            role: FileOperationJournal.PlannedFileRole = .media,
+            expectedSourceDigest: Data? = nil,
+            preparedContents: Data? = nil,
+            xmpCategory: XMPPublicationCategory? = nil
+        ) {
+            self.source = source
+            self.target = target
+            self.scannedIdentity = scannedIdentity
+            self.role = role
+            self.expectedSourceDigest = expectedSourceDigest
+            self.preparedContents = preparedContents
+            self.xmpCategory = xmpCategory
+        }
     }
 
     struct PlannedItem: Sendable, Equatable {
         let itemID: String
+        let movedItemIDs: [String]
         let files: [PlannedFile]
     }
 
     struct Plan: Sendable, Equatable {
         let items: [PlannedItem]
         var totalFiles: Int { items.reduce(0) { $0 + $1.files.count } }
+
+        func photoCount(from itemOffset: Int) -> Int {
+            guard itemOffset < items.count else { return 0 }
+            return items[itemOffset...].reduce(0) {
+                $0 + $1.movedItemIDs.count
+            }
+        }
     }
 
     /// A cross-thread cancellation signal owned by ExportManager. It is used
@@ -88,21 +174,67 @@ enum ExportWorker {
     /// source subfolders colliding with each other in the same export batch.
     static func makePlan(
         for items: [PhotoItem],
-        in destination: URL
+        in destination: URL,
+        xmpPlan: XMPExportPreparedPlan? = nil,
+        mode: ExportMode = .copy
     ) throws -> Plan {
         var reservedPaths: Set<String> = []
         var plannedItems: [PlannedItem] = []
         plannedItems.reserveCapacity(items.count)
 
+        let familyByMediaPath = xmpPlan?.familyByMediaPath ?? [:]
+        let familiesByID = Dictionary(
+            uniqueKeysWithValues: (xmpPlan?.families ?? []).map { ($0.id, $0) }
+        )
+        var groupedItems: [(key: String, items: [PhotoItem])] = []
+        var groupIndex: [String: Int] = [:]
         for item in items {
-            let sources = item.individualFiles
+            let familyIDs = Set(item.individualFiles.compactMap { file in
+                (try? XMPExactFileSystemPath(url: file.url))
+                    .flatMap { familyByMediaPath[$0]?.id }
+            })
+            let key = familyIDs.count == 1
+                ? "xmp:\(familyIDs.first!)"
+                : "item:\(item.id)"
+            if let index = groupIndex[key] {
+                groupedItems[index].items.append(item)
+            } else {
+                groupIndex[key] = groupedItems.count
+                groupedItems.append((key, [item]))
+            }
+        }
+
+        for group in groupedItems {
+            let sourceFiles = group.items.flatMap(\.individualFiles)
+            let family = group.key.hasPrefix("xmp:")
+                ? familiesByID[String(group.key.dropFirst(4))]
+                : nil
             var suffix = 0
             while true {
-                let targetNames = sources.map {
+                let mediaNames = sourceFiles.map {
                     suffixedFilename(
                         $0.url.lastPathComponent,
                         suffix: suffix
                     )
+                }
+                var targetNames = mediaNames
+                if let family, let firstMediaName = mediaNames.first {
+                    if family.finalPacket != nil {
+                        targetNames.append(canonicalXMPFilename(
+                            for: firstMediaName,
+                            existing: family.canonicalSource
+                        ))
+                    }
+                    for packet in family.applicationPackets {
+                        guard let ownerIndex = sourceFiles.firstIndex(where: {
+                            (try? XMPExactFileSystemPath(url: $0.url))
+                                == packet.ownerMediaPath
+                        }) else { continue }
+                        targetNames.append(
+                            mediaNames[ownerIndex]
+                                + xmpExtension(of: packet.source)
+                        )
+                    }
                 }
                 let targets = try targetNames.map {
                     try FileOperationJournal.appendingPathComponentExactly(
@@ -117,15 +249,71 @@ enum ExportWorker {
                 }
                 if areAvailable {
                     reservedPaths.formUnion(normalizedPaths)
-                    plannedItems.append(PlannedItem(
-                        itemID: item.id,
-                        files: zip(sources, targets).map {
-                            PlannedFile(
-                                source: $0.0.url,
-                                target: $0.1,
-                                scannedIdentity: $0.0.scannedIdentity
-                            )
+                    let mediaTargets = Array(targets.prefix(mediaNames.count))
+                    var files = zip(sourceFiles, mediaTargets).map {
+                        PlannedFile(
+                            source: $0.0.url,
+                            target: $0.1,
+                            scannedIdentity: $0.0.scannedIdentity
+                        )
+                    }
+                    if let family {
+                        var nextTargetIndex = mediaNames.count
+                        if let finalPacket = family.finalPacket,
+                           targets.indices.contains(nextTargetIndex) {
+                            let canonicalTarget = targets[nextTargetIndex]
+                            nextTargetIndex += 1
+                            let anchorFile = sourceFiles[0]
+                            let preparedSource = family.canonicalSource?.url
+                                ?? anchorFile.url
+                            let preparedIdentity = family.canonicalSourceIdentity
+                                ?? anchorFile.scannedIdentity
+                            files.append(PlannedFile(
+                                source: preparedSource,
+                                target: canonicalTarget,
+                                scannedIdentity: preparedIdentity,
+                                role: .preparedXMP,
+                                expectedSourceDigest:
+                                    family.canonicalSourceDigest,
+                                preparedContents: finalPacket,
+                                xmpCategory: family.category
+                            ))
                         }
+
+                        for packet in family.applicationPackets {
+                            guard targets.indices.contains(nextTargetIndex) else {
+                                break
+                            }
+                            files.append(PlannedFile(
+                                source: packet.source.url,
+                                target: targets[nextTargetIndex],
+                                scannedIdentity: packet.identity,
+                                role: .applicationXMP,
+                                expectedSourceDigest: packet.sourceDigest
+                            ))
+                            nextTargetIndex += 1
+                        }
+
+                        let retiresCanonical = mode == .move
+                            && family.finalPacket != nil
+                            && family.allFamilyMediaSelected
+                            && family.canonicalSource != nil
+                        if retiresCanonical,
+                           let source = family.canonicalSource,
+                           let identity = family.canonicalSourceIdentity {
+                            files.append(PlannedFile(
+                                source: source.url,
+                                target: try retirementURL(beside: source.url),
+                                scannedIdentity: identity,
+                                role: .retiredXMPSource,
+                                expectedSourceDigest: family.canonicalSourceDigest
+                            ))
+                        }
+                    }
+                    plannedItems.append(PlannedItem(
+                        itemID: group.key,
+                        movedItemIDs: group.items.map(\.id),
+                        files: files
                     ))
                     break
                 }
@@ -138,6 +326,7 @@ enum ExportWorker {
     static func copy(
         _ items: [PhotoItem],
         to destination: URL,
+        xmpPlan: XMPExportPreparedPlan? = nil,
         journalDirectory: URL? = nil,
         isCancelled: @escaping @Sendable () -> Bool = { false },
         fileCopier: @escaping FileCopier = { source, destination in
@@ -147,9 +336,15 @@ enum ExportWorker {
         progress: @escaping Progress
     ) -> CopyResult {
         let fm = FileManager()
+        var xmpSummary = xmpPlan.map(XMPResultSummary.init(plan:))
         let plan: Plan
         do {
-            plan = try makePlan(for: items, in: destination)
+            plan = try makePlan(
+                for: items,
+                in: destination,
+                xmpPlan: xmpPlan,
+                mode: .copy
+            )
         } catch {
             return CopyResult(
                 copiedFiles: 0,
@@ -161,7 +356,8 @@ enum ExportWorker {
                 failureMessage: copyFailureMessage(
                     for: error,
                     phase: .planning
-                )
+                ),
+                xmpSummary: xmpSummary
             )
         }
         guard plan.items.allSatisfy({ item in
@@ -174,7 +370,8 @@ enum ExportWorker {
                 cancelled: false,
                 journalFailure: true,
                 requiresRecovery: false,
-                failureMessage: "One or more source files could not be verified before copying"
+                failureMessage: "One or more source files could not be verified before copying",
+                xmpSummary: xmpSummary
             )
         }
         let writer: FileOperationJournal.Writer
@@ -187,7 +384,12 @@ enum ExportWorker {
                             itemID: item.itemID,
                             source: $0.source,
                             destination: $0.target,
-                            expectedIdentity: $0.scannedIdentity
+                            expectedIdentity: $0.scannedIdentity,
+                            role: $0.role,
+                            expectedSourceDigest: $0.expectedSourceDigest,
+                            preparedContentDigest: $0.preparedContents.map {
+                                Data(SHA256.hash(data: $0))
+                            }
                         )
                     }
                 },
@@ -205,7 +407,8 @@ enum ExportWorker {
                 failureMessage: copyFailureMessage(
                     for: error,
                     phase: .safetyRecord
-                )
+                ),
+                xmpSummary: xmpSummary
             )
         }
         var reporter = ThrottledProgress(total: plan.totalFiles, callback: progress)
@@ -263,14 +466,23 @@ enum ExportWorker {
                 }
                 if !failed {
                     do {
-                        try copySourceWithReconnectRetry(
-                            writer: writer,
-                            fileIndex: fileIndex,
-                            source: file.source,
-                            temporary: temporary,
-                            isCancelled: isCancelled,
-                            fileCopier: fileCopier
-                        )
+                        if let preparedContents = file.preparedContents {
+                            try writer.requireUnchangedSource(at: fileIndex)
+                            try DurableFileIO.writeNewFile(
+                                preparedContents,
+                                to: temporary,
+                                fullSync: true
+                            )
+                        } else {
+                            try copySourceWithReconnectRetry(
+                                writer: writer,
+                                fileIndex: fileIndex,
+                                source: file.source,
+                                temporary: temporary,
+                                isCancelled: isCancelled,
+                                fileCopier: fileCopier
+                            )
+                        }
                         touched.location = .temporary(temporary)
                         touched.identity = try FileOperationJournal
                             .captureIdentity(at: temporary)
@@ -282,17 +494,23 @@ enum ExportWorker {
                             temporary.deletingLastPathComponent(),
                             fullSync: true
                         )
-                        // Detect an in-place source rewrite that raced with
-                        // the copy. Rollback will only remove the duplicate
-                        // after proving the source still is the scanned file
-                        // and both files remain byte-for-byte equal.
-                        try requireSourceAfterReconnect(
-                            writer: writer,
-                            fileIndex: fileIndex,
-                            source: file.source,
-                            allowCancellation: false,
-                            isCancelled: isCancelled
-                        )
+                        if file.preparedContents != nil {
+                            try writer.requirePreparedContent(
+                                at: fileIndex,
+                                fileURL: temporary
+                            )
+                        } else {
+                            // Detect an in-place source rewrite that raced with
+                            // the copy. Rollback removes a duplicate only after
+                            // proving both files remain byte-for-byte equal.
+                            try requireSourceAfterReconnect(
+                                writer: writer,
+                                fileIndex: fileIndex,
+                                source: file.source,
+                                allowCancellation: false,
+                                isCancelled: isCancelled
+                            )
+                        }
                     } catch {
                         if case SourceReconnectError.cancelled = error {
                             cancelled = true
@@ -344,6 +562,12 @@ enum ExportWorker {
                             at: temporary,
                             includeStatusChange: false
                         )
+                        if file.preparedContents != nil {
+                            try writer.requirePreparedContent(
+                                at: fileIndex,
+                                fileURL: temporary
+                            )
+                        }
                         try writer.mark(
                             .staged,
                             fileAt: fileIndex,
@@ -385,6 +609,12 @@ enum ExportWorker {
                             matching: identity,
                             at: file.target
                         )
+                        if file.preparedContents != nil {
+                            try writer.requirePreparedContent(
+                                at: fileIndex,
+                                fileURL: file.target
+                            )
+                        }
                     } catch {
                         failureMessage = failureMessage ?? copyFailureMessage(
                             for: error,
@@ -445,6 +675,9 @@ enum ExportWorker {
             }
 
             if failed {
+                if !cancelled {
+                    xmpSummary?.recordFailures(in: [item])
+                }
                 var rollbackFailed = false
                 for touched in touchedForItem.reversed() {
                     if !rollbackCopy(
@@ -457,19 +690,30 @@ enum ExportWorker {
                         journalFailure = true
                     }
                 }
-                if !cancelled { failedPhotos += 1 }
+                if !cancelled {
+                    failedPhotos += item.movedItemIDs.count
+                }
                 if rollbackFailed { inconsistentPhotos += 1 }
                 if cancelled { break }
                 if sourceUnavailable {
-                    failedPhotos += plan.items.count - itemOffset - 1
+                    xmpSummary?.recordFailures(
+                        in: plan.items.suffix(from: itemOffset + 1)
+                    )
+                    failedPhotos += plan.photoCount(from: itemOffset + 1)
                     break itemLoop
                 }
                 if rollbackFailed || journalFailure {
-                    failedPhotos += plan.items.count - itemOffset - 1
+                    xmpSummary?.recordFailures(
+                        in: plan.items.suffix(from: itemOffset + 1)
+                    )
+                    failedPhotos += plan.photoCount(from: itemOffset + 1)
                     break itemLoop
                 }
             } else {
                 copied += touchedForItem.count
+                for touched in touchedForItem {
+                    xmpSummary?.record(touched.file)
+                }
             }
         }
         if !cancelled { reporter.finish() }
@@ -489,16 +733,19 @@ enum ExportWorker {
             cancelled: cancelled,
             journalFailure: journalFailure,
             requiresRecovery: inconsistentPhotos > 0 || !journalFinalized,
-            failureMessage: failureMessage
+            failureMessage: failureMessage,
+            xmpSummary: xmpSummary
         )
     }
 
     static func move(
         _ items: [PhotoItem],
         to destination: URL,
+        xmpPlan: XMPExportPreparedPlan? = nil,
         journalDirectory: URL? = nil,
         progress: @escaping Progress
     ) -> MoveResult {
+        var xmpSummary = xmpPlan.map(XMPResultSummary.init(plan:))
         // Defense in depth: the dialog preflight explains this limitation,
         // while the worker independently refuses any caller that would make
         // FileManager perform an implicit, uncheckpointed copy/delete move.
@@ -513,7 +760,8 @@ enum ExportWorker {
                 inconsistentPhotos: 0,
                 journalFailure: false,
                 requiresRecovery: false,
-                failureMessage: "Move requires the source and destination to be on the same storage volume"
+                failureMessage: "Move requires the source and destination to be on the same storage volume",
+                xmpSummary: xmpSummary
             )
         }
         let fm = FileManager()
@@ -536,12 +784,18 @@ enum ExportWorker {
                 inconsistentPhotos: 0,
                 journalFailure: true,
                 requiresRecovery: false,
-                failureMessage: "Louppe could not preserve the exact source paths safely"
+                failureMessage: "Louppe could not preserve the exact source paths safely",
+                xmpSummary: xmpSummary
             )
         }
         let plan: Plan
         do {
-            plan = try makePlan(for: items, in: destination)
+            plan = try makePlan(
+                for: items,
+                in: destination,
+                xmpPlan: xmpPlan,
+                mode: .move
+            )
         } catch {
             return MoveResult(
                 movedItemIDs: [],
@@ -553,7 +807,8 @@ enum ExportWorker {
                 failureMessage: copyFailureMessage(
                     for: error,
                     phase: .planning
-                )
+                ),
+                xmpSummary: xmpSummary
             )
         }
         guard plan.items.allSatisfy({ item in
@@ -566,7 +821,8 @@ enum ExportWorker {
                 inconsistentPhotos: 0,
                 journalFailure: true,
                 requiresRecovery: false,
-                failureMessage: "One or more source files could not be verified before moving"
+                failureMessage: "One or more source files could not be verified before moving",
+                xmpSummary: xmpSummary
             )
         }
         let writer: FileOperationJournal.Writer
@@ -579,7 +835,12 @@ enum ExportWorker {
                             itemID: item.itemID,
                             source: $0.source,
                             destination: $0.target,
-                            expectedIdentity: $0.scannedIdentity
+                            expectedIdentity: $0.scannedIdentity,
+                            role: $0.role,
+                            expectedSourceDigest: $0.expectedSourceDigest,
+                            preparedContentDigest: $0.preparedContents.map {
+                                Data(SHA256.hash(data: $0))
+                            }
                         )
                     }
                 },
@@ -597,7 +858,8 @@ enum ExportWorker {
                 failureMessage: copyFailureMessage(
                     for: error,
                     phase: .safetyRecord
-                )
+                ),
+                xmpSummary: xmpSummary
             )
         }
         var reporter = ThrottledProgress(total: plan.totalFiles, callback: progress)
@@ -648,36 +910,80 @@ enum ExportWorker {
                     failed = true
                 }
                 if !failed {
-                    var renamedToTemporary = false
-                    do {
-                        try writer.requireUnchangedSource(at: fileIndex)
-                        try atomicExclusiveRename(
-                            from: file.source,
-                            to: temporary
-                        )
-                        renamedToTemporary = true
-                        touched.location = .temporary(temporary)
-                        try DurableFileIO.syncRenameDirectories(
-                            from: file.source,
-                            to: temporary,
-                            fullSync: true
-                        )
-                        touched.identity = try verifiedIdentity(
-                            matching: writer.plannedIdentity(at: fileIndex),
-                            at: temporary
-                        )
-                    } catch {
-                        if renamedToTemporary {
-                            let reconciled = reconcileFirstMoveRename(
-                                writer: writer,
-                                fileIndex: fileIndex,
-                                source: file.source,
-                                temporary: temporary
+                    if let preparedContents = file.preparedContents {
+                        do {
+                            if pathEntryExists(file.source) {
+                                try writer.requireUnchangedSource(at: fileIndex)
+                            } else if file.expectedSourceDigest != nil {
+                                throw ExportWorkerError.copiedFileChanged
+                            }
+                            try DurableFileIO.writeNewFile(
+                                preparedContents,
+                                to: temporary,
+                                fullSync: true
                             )
-                            touched.location = reconciled.location
-                            touched.identity = reconciled.identity
+                            touched.location = .temporary(temporary)
+                            touched.identity = try FileOperationJournal
+                                .captureIdentity(at: temporary)
+                            try writer.requirePreparedContent(
+                                at: fileIndex,
+                                fileURL: temporary
+                            )
+                        } catch {
+                            if case .none = touched.location,
+                               pathEntryExists(temporary) {
+                                do {
+                                    let partialIdentity = try FileOperationJournal
+                                        .captureIdentity(at: temporary)
+                                    try writer.mark(
+                                        .started,
+                                        fileAt: fileIndex,
+                                        identityAt: temporary,
+                                        expectedIdentity: partialIdentity,
+                                        includeStatusChange: false
+                                    )
+                                    touched.location = .temporary(temporary)
+                                    touched.identity = partialIdentity
+                                    touched.isIncompleteCopy = true
+                                } catch {
+                                    journalFailure = true
+                                    touched.location = .ambiguous
+                                }
+                            }
+                            failed = true
                         }
-                        failed = true
+                    } else {
+                        var renamedToTemporary = false
+                        do {
+                            try writer.requireUnchangedSource(at: fileIndex)
+                            try atomicExclusiveRename(
+                                from: file.source,
+                                to: temporary
+                            )
+                            renamedToTemporary = true
+                            touched.location = .temporary(temporary)
+                            try DurableFileIO.syncRenameDirectories(
+                                from: file.source,
+                                to: temporary,
+                                fullSync: true
+                            )
+                            touched.identity = try verifiedIdentity(
+                                matching: writer.plannedIdentity(at: fileIndex),
+                                at: temporary
+                            )
+                        } catch {
+                            if renamedToTemporary {
+                                let reconciled = reconcileFirstMoveRename(
+                                    writer: writer,
+                                    fileIndex: fileIndex,
+                                    source: file.source,
+                                    temporary: temporary
+                                )
+                                touched.location = reconciled.location
+                                touched.identity = reconciled.identity
+                            }
+                            failed = true
+                        }
                     }
                 }
                 if !failed {
@@ -688,13 +994,20 @@ enum ExportWorker {
                         try requireIdentity(
                             identity,
                             at: temporary,
-                            includeStatusChange: true
+                            includeStatusChange: file.role != .preparedXMP
                         )
+                        if file.role == .preparedXMP {
+                            try writer.requirePreparedContent(
+                                at: fileIndex,
+                                fileURL: temporary
+                            )
+                        }
                         try writer.mark(
                             .staged,
                             fileAt: fileIndex,
                             identityAt: temporary,
-                            expectedIdentity: identity
+                            expectedIdentity: identity,
+                            includeStatusChange: file.role != .preparedXMP
                         )
                     } catch {
                         journalFailure = true
@@ -710,7 +1023,7 @@ enum ExportWorker {
                         try requireIdentity(
                             identity,
                             at: temporary,
-                            includeStatusChange: true
+                            includeStatusChange: file.role != .preparedXMP
                         )
                         try atomicExclusiveRename(
                             from: temporary,
@@ -727,6 +1040,12 @@ enum ExportWorker {
                             matching: identity,
                             at: file.target
                         )
+                        if file.role == .preparedXMP {
+                            try writer.requirePreparedContent(
+                                at: fileIndex,
+                                fileURL: file.target
+                            )
+                        }
                     } catch {
                         if renamedToDestination,
                            let identity = touched.identity {
@@ -753,13 +1072,14 @@ enum ExportWorker {
                         try requireIdentity(
                             identity,
                             at: file.target,
-                            includeStatusChange: true
+                            includeStatusChange: file.role != .preparedXMP
                         )
                         try writer.mark(
                             .completed,
                             fileAt: fileIndex,
                             identityAt: file.target,
-                            expectedIdentity: identity
+                            expectedIdentity: identity,
+                            includeStatusChange: file.role != .preparedXMP
                         )
                     } catch {
                         journalFailure = true
@@ -775,10 +1095,18 @@ enum ExportWorker {
             }
 
             if failed {
+                xmpSummary?.recordFailures(in: [item])
                 // Put a partially moved pair back exactly where it came from.
                 var rollbackFailed = false
                 for touched in touchedForItem.reversed() {
-                    if !rollbackMove(touched, fileManager: fm) {
+                    let rolledBack = touched.file.role == .preparedXMP
+                        ? rollbackCopy(
+                            touched,
+                            temporary: writer.temporaryURL(at: touched.index),
+                            fileManager: fm
+                        )
+                        : rollbackMove(touched, fileManager: fm)
+                    if !rolledBack {
                         rollbackFailed = true
                     } else {
                         if touched.needsSourceIdentityRefresh {
@@ -798,15 +1126,37 @@ enum ExportWorker {
                         }
                     }
                 }
-                failedPhotos += 1
+                failedPhotos += item.movedItemIDs.count
                 if rollbackFailed { inconsistentPhotos += 1 }
                 if rollbackFailed || journalFailure {
-                    failedPhotos += plan.items.count - itemOffset - 1
+                    xmpSummary?.recordFailures(
+                        in: plan.items.suffix(from: itemOffset + 1)
+                    )
+                    failedPhotos += plan.photoCount(from: itemOffset + 1)
                     break itemLoop
                 }
             } else {
-                movedItemIDs.append(item.itemID)
-                movedFiles += touchedForItem.count
+                let retirementCleanupFailed = touchedForItem
+                    .filter { $0.file.role == .retiredXMPSource }
+                    .contains { touched in
+                        !removeRetiredXMPSource(
+                            touched,
+                            temporary: writer.temporaryURL(at: touched.index)
+                        )
+                    }
+                if retirementCleanupFailed {
+                    inconsistentPhotos += 1
+                    journalFailure = true
+                    failedPhotos += plan.photoCount(from: itemOffset)
+                    break itemLoop
+                }
+                movedItemIDs.append(contentsOf: item.movedItemIDs)
+                movedFiles += touchedForItem.count(where: {
+                    $0.file.role != .retiredXMPSource
+                })
+                for touched in touchedForItem {
+                    xmpSummary?.record(touched.file)
+                }
             }
         }
         reporter.finish()
@@ -826,7 +1176,8 @@ enum ExportWorker {
             requiresRecovery: inconsistentPhotos > 0 || !journalFinalized,
             failureMessage: failedPhotos > 0 || journalFailure
                 ? "A source, destination, or file-safety checkpoint became unavailable during the move"
-                : nil
+                : nil,
+            xmpSummary: xmpSummary
         )
     }
 
@@ -845,6 +1196,7 @@ enum ExportWorker {
         var isIncompleteCopy = false
 
         var needsSourceIdentityRefresh: Bool {
+            guard file.role == .media else { return false }
             switch location {
             case .none, .ambiguous:
                 return false
@@ -852,6 +1204,28 @@ enum ExportWorker {
                 return true
             }
         }
+    }
+
+    /// Once every member in a Move family has a durable completed checkpoint,
+    /// retire the old canonical source packet. Its merged replacement is
+    /// already at the export destination. The journal's other reserved path
+    /// closes the unlink race, and launch recovery repeats this exact cleanup
+    /// if the process stops at any point.
+    private static func removeRetiredXMPSource(
+        _ touched: TouchedExportFile,
+        temporary: URL?
+    ) -> Bool {
+        guard touched.file.role == .retiredXMPSource,
+              case .destination = touched.location,
+              let temporary,
+              let identity = touched.identity else {
+            return false
+        }
+        return removeRecordedPartialCopy(
+            artifact: touched.file.target,
+            quarantine: temporary,
+            artifactIdentity: identity
+        )
     }
 
     private static func rollbackCopy(
@@ -880,7 +1254,7 @@ enum ExportWorker {
               let sourceIdentity = touched.file.scannedIdentity else {
             return false
         }
-        if touched.isIncompleteCopy {
+        if touched.isIncompleteCopy || touched.file.role == .preparedXMP {
             return removeRecordedPartialCopy(
                 artifact: artifact,
                 quarantine: quarantine,
@@ -1436,6 +1810,7 @@ enum ExportWorker {
     private enum ExportWorkerError: Error {
         case missingTouchedIdentity
         case copiedFileChanged
+        case couldNotReserveRetirementPath
     }
 
     /// Exclusive POSIX rename is the Move correctness boundary: unlike
@@ -1463,6 +1838,34 @@ enum ExportWorker {
             if !fm.fileExists(atPath: candidate.path) { return candidate }
             counter += 1
         }
+    }
+
+    private static func canonicalXMPFilename(
+        for mediaFilename: String,
+        existing: XMPExactFileSystemPath?
+    ) -> String {
+        let stem = (mediaFilename as NSString).deletingPathExtension
+        let extensionText = existing.map(xmpExtension(of:)) ?? ".xmp"
+        return stem + extensionText
+    }
+
+    private static func xmpExtension(
+        of path: XMPExactFileSystemPath
+    ) -> String {
+        path.url.lastPathComponent.hasSuffix(".XMP") ? ".XMP" : ".xmp"
+    }
+
+    private static func retirementURL(beside source: URL) throws -> URL {
+        for _ in 0..<16 {
+            let name = ".louppe-xmp-\(UUID().uuidString.lowercased()).retired"
+            let candidate = try FileOperationJournal
+                .appendingPathComponentExactly(
+                    name,
+                    to: source.deletingLastPathComponent()
+                )
+            if !pathEntryExists(candidate) { return candidate }
+        }
+        throw ExportWorkerError.couldNotReserveRetirementPath
     }
 
     private static func suffixedFilename(_ filename: String, suffix: Int) -> String {

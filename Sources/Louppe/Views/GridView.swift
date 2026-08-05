@@ -315,6 +315,12 @@ private struct GridCell: View {
                                 rate: { rating in
                                     store.rate(rating, at: index)
                                 },
+                                setStars: { stars in
+                                    store.setStarRating(stars, at: index)
+                                },
+                                setColor: { label in
+                                    store.setColorLabel(label, at: index)
+                                },
                                 toggleSelection: {
                                     store.toggleSelection(of: index)
                                 }
@@ -364,8 +370,8 @@ private struct GridCell: View {
                     .buttonStyle(.plain)
                     .disabled(!store.canRate)
                     .padding(2)
-                    .help("Change rating")
-                    .accessibilityLabel("Change rating for \(item.displayName)")
+                    .help("Change Yes/No decision")
+                    .accessibilityLabel("Change decision for \(item.displayName)")
                     .accessibilityValue(
                         MediaTileAccessibility.ratingDescription(
                             for: item.ratingState

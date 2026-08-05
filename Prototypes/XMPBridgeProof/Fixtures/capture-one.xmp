@@ -1,0 +1,23 @@
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Synthetic Capture One fixture">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
+      xmlns:com="http://ns.phaseone.com/captureone/1.0/"
+      xmp:Rating="1"
+      xmp:Label="Red"
+      com:Untouched="Capture One custom sentinel">
+      <dc:subject>
+        <rdf:Bag>
+          <rdf:li>Existing Capture One Keyword</rdf:li>
+        </rdf:Bag>
+      </dc:subject>
+      <lr:hierarchicalSubject>
+        <rdf:Bag>
+          <rdf:li>Places|Coast|Møns Klint</rdf:li>
+        </rdf:Bag>
+      </lr:hierarchicalSubject>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>

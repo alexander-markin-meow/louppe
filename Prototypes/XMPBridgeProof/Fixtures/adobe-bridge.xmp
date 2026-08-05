@@ -1,0 +1,24 @@
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Synthetic Adobe Bridge fixture">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
+      xmp:Rating="3"
+      xmp:Label="Yellow"
+      crs:Exposure2012="Bridge Camera Raw sentinel -0.35"
+      photoshop:Urgency="4">
+      <dc:subject>
+        <rdf:Bag>
+          <rdf:li>Existing Bridge Keyword</rdf:li>
+        </rdf:Bag>
+      </dc:subject>
+      <dc:rights>
+        <rdf:Alt>
+          <rdf:li xml:lang="x-default">Bridge copyright sentinel</rdf:li>
+        </rdf:Alt>
+      </dc:rights>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>

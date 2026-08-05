@@ -7,9 +7,9 @@ import SwiftUI
 /// alternatives to the click, double-click, and modifier-click gestures.
 enum MediaTileAccessibility {
     enum RatingAction: String, CaseIterable, Equatable {
-        case yes = "Rate Yes"
-        case no = "Rate No"
-        case clear = "Clear Rating"
+        case yes = "Decide Yes"
+        case no = "Decide No"
+        case clear = "Clear Decision"
 
         var rating: Rating {
             switch self {
@@ -27,21 +27,43 @@ enum MediaTileAccessibility {
     ) -> String {
         var parts = [
             mediaDescription(for: item),
-            ratingDescription(for: item.ratingState),
+            decisionDescription(for: item.ratingState),
+            starDescription(for: item.starRatingState),
+            colorDescription(for: item.colorLabelState),
         ]
         if isCurrent { parts.append("Current item") }
         if isSelected { parts.append("Selected") }
         return parts.joined(separator: ", ")
     }
 
-    static func ratingDescription(
+    static func decisionDescription(
         for state: PhotoItemRatingState
     ) -> String {
         switch state {
-        case .yes: return "Rated Yes"
-        case .no: return "Rated No"
+        case .yes: return "Decision Yes"
+        case .no: return "Decision No"
         case .undecided: return "Undecided"
-        case .mixed: return "Mixed rating"
+        case .mixed: return "Mixed decision"
+        }
+    }
+
+    static func ratingDescription(for state: PhotoItemRatingState) -> String {
+        decisionDescription(for: state)
+    }
+
+    static func starDescription(for state: PhotoItemStarRatingState) -> String {
+        switch state {
+        case .unrated: return "No stars"
+        case .stars(let rating): return "\(rating.count) stars"
+        case .mixed: return "Mixed stars"
+        }
+    }
+
+    static func colorDescription(for state: PhotoItemColorLabelState) -> String {
+        switch state {
+        case .none: return "No color label"
+        case .label(let label): return "\(label.displayName) color label"
+        case .mixed: return "Mixed color labels"
         }
     }
 
@@ -51,7 +73,7 @@ enum MediaTileAccessibility {
 
     static func actionHint(canRate: Bool) -> String {
         canRate
-            ? "Use actions to show, open, rate, or select this item."
+            ? "Use actions to show, open, change decision, stars, or color label, or select this item."
             : "Use actions to show, open, or select this item."
     }
 
@@ -74,6 +96,8 @@ private struct MediaTileAccessibilityModifier: ViewModifier {
     let open: () -> Void
     let canRate: Bool
     let rate: (Rating) -> Void
+    let setStars: (StarRating?) -> Void
+    let setColor: (PhotoColorLabel?) -> Void
     let toggleSelection: () -> Void
 
     func body(content: Content) -> some View {
@@ -105,12 +129,46 @@ private struct MediaTileAccessibilityModifier: ViewModifier {
                     rate: rate
                 )
             )
+            .modifier(
+                MediaTileMetadataActionsModifier(
+                    isEnabled: canRate,
+                    setStars: setStars,
+                    setColor: setColor
+                )
+            )
             .accessibilityAction(
                 named: Text(
                     isSelected ? "Remove from Selection" : "Add to Selection"
                 ),
                 toggleSelection
             )
+    }
+}
+
+private struct MediaTileMetadataActionsModifier: ViewModifier {
+    let isEnabled: Bool
+    let setStars: (StarRating?) -> Void
+    let setColor: (PhotoColorLabel?) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content
+                .accessibilityAction(named: Text("Clear Stars")) { setStars(nil) }
+                .accessibilityAction(named: Text("Set 1 Star")) { setStars(.one) }
+                .accessibilityAction(named: Text("Set 2 Stars")) { setStars(.two) }
+                .accessibilityAction(named: Text("Set 3 Stars")) { setStars(.three) }
+                .accessibilityAction(named: Text("Set 4 Stars")) { setStars(.four) }
+                .accessibilityAction(named: Text("Set 5 Stars")) { setStars(.five) }
+                .accessibilityAction(named: Text("Clear Color Label")) { setColor(nil) }
+                .accessibilityAction(named: Text("Set Red Label")) { setColor(.red) }
+                .accessibilityAction(named: Text("Set Yellow Label")) { setColor(.yellow) }
+                .accessibilityAction(named: Text("Set Green Label")) { setColor(.green) }
+                .accessibilityAction(named: Text("Set Blue Label")) { setColor(.blue) }
+                .accessibilityAction(named: Text("Set Purple Label")) { setColor(.purple) }
+        } else {
+            content
+        }
     }
 }
 
@@ -162,6 +220,8 @@ extension View {
         open: @escaping () -> Void,
         canRate: Bool,
         rate: @escaping (Rating) -> Void,
+        setStars: @escaping (StarRating?) -> Void,
+        setColor: @escaping (PhotoColorLabel?) -> Void,
         toggleSelection: @escaping () -> Void
     ) -> some View {
         modifier(
@@ -174,6 +234,8 @@ extension View {
                 open: open,
                 canRate: canRate,
                 rate: rate,
+                setStars: setStars,
+                setColor: setColor,
                 toggleSelection: toggleSelection
             )
         )

@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The info panel: filename and rating, photo histogram, camera/lens, shooting
-/// settings, then the remaining EXIF fields.
+/// The info panel: filename and review metadata, photo histogram, camera/lens,
+/// shooting settings, then the remaining EXIF fields.
 struct MetadataPanel: View {
     /// EXIF detail and histogram analysis are secondary to the visible photo.
     /// A short dwell prevents key repeat from opening every transient file.
@@ -185,22 +185,12 @@ struct MetadataPanel: View {
 
             Spacer(minLength: 4)
 
-            Button {
-                store.toggleRating(at: store.currentIndex)
-            } label: {
-                RatingBadge(
-                    rating: item.rating,
-                    isMixed: item.hasMixedRatings,
-                    size: 27
-                )
-                    .frame(width: 32, height: 32)
-            }
-            .buttonStyle(.plain)
-            .disabled(!store.canRate)
-            .accessibilityLabel("Change Rating")
-            .accessibilityValue(ratingDescription)
-            .help("Change rating")
+            MetadataDecisionButton(store: store, size: 27)
         }
+
+        MetadataEditingControls(store: store, showsDecision: false)
+
+        Divider()
 
         if showsHistogram {
             HistogramSection(
@@ -255,6 +245,8 @@ struct MetadataPanel: View {
     private func multiSelectionContent(_ summary: PhotoSelectionSummary) -> some View {
         Text(selectionTitle(for: summary))
             .font(.title3.weight(.semibold))
+
+        MetadataEditingControls(store: store)
 
         Divider()
 
@@ -399,12 +391,4 @@ struct MetadataPanel: View {
         return .red.opacity(0.72)
     }
 
-    private var ratingDescription: String {
-        if item.hasMixedRatings { return "Mixed" }
-        switch item.rating {
-        case .yes: return "Yes"
-        case .no: return "No"
-        case .undecided: return "Undecided"
-        }
-    }
 }

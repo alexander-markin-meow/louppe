@@ -45,6 +45,28 @@ final class HotkeyTests: XCTestCase {
         XCTAssertEqual(store.currentIndex, 2)
     }
 
+    func testNumericHotkeysSetStarsWithoutChangingDecisionOrAdvancing() {
+        let store = readyStore(itemCount: 2, firstItemIsVideo: false)
+        let view = SessionView(store: store)
+        store.rate(.yes, at: 0)
+
+        XCTAssertTrue(view.handleKey(keyEvent(code: 21, characters: "4")))
+        XCTAssertEqual(store.items[0].starRatingState, .stars(.four))
+        XCTAssertEqual(store.items[0].rating, .yes)
+        XCTAssertEqual(store.currentIndex, 0)
+
+        XCTAssertTrue(view.handleKey(keyEvent(code: 29, characters: "0")))
+        XCTAssertEqual(store.items[0].starRatingState, .unrated)
+        XCTAssertEqual(store.items[0].rating, .yes)
+
+        XCTAssertFalse(
+            view.handleKey(
+                keyEvent(code: 23, characters: "5", modifiers: [.command])
+            )
+        )
+        XCTAssertEqual(store.items[0].starRatingState, .unrated)
+    }
+
     func testSpaceTogglesVideoButAdvancesFromPhoto() {
         let videoStore = readyStore(itemCount: 3, firstItemIsVideo: true)
         let videoView = SessionView(store: videoStore)

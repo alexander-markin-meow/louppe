@@ -11,6 +11,9 @@ struct SortView: View {
             section("Sort by") {
                 keyRow("Date taken", .captureDate)
                 keyRow("Name", .name)
+                keyRow("Decision", .decision)
+                keyRow("Star rating", .starRating)
+                keyRow("Color label", .colorLabel)
                 keyRow("Subfolder", .subfolder, disabled: store.availableSubfolders.count <= 1)
                 keyRow("File type", .fileType)
                 keyRow("Media type", .mediaKind, disabled: store.availableMediaKinds.count <= 1)

@@ -49,6 +49,25 @@ operations belong elsewhere:
   inside its detached task. Trash and restore roll back RAW+JPEG pairs after a
   partial failure and explicitly warn if rollback itself fails. `SessionStore`
   applies the returned batch once.
+- `XMPMetadataStore` is a non-main actor and the only owner of XMPCore packet
+  parsing plus XMP read/merge/CAS/atomic publication. Standalone Metadata
+  (XMP) preflight and publication each use exactly three long-lived worker
+  tasks with one serial store per worker; they never create one task per photo
+  or retain a batch of complete packets. The immutable preflight plan keeps
+  only exact paths, metadata snapshots, file revisions, and SHA-256 packet
+  fingerprints. Each worker reparses one packet immediately before commit, so
+  a change after confirmation becomes a visible conflict. Reads refuse leaf
+  symlinks and non-regular
+  files, stop at 64 MiB, and retain the exact bytes plus device/inode/time
+  revision. The final validation immediately precedes a flushed same-directory
+  temporary rename through `DurableFileIO`; creates use an exclusive rename,
+  updates compare the live raw bytes and identity, and committed bytes are
+  reparsed before success. Exact filesystem bytes remain plan authority.
+  `SessionStore` owns the one XMP publication generation and cancellation
+  flag separately from `activeFileOperation`: rating/navigation may continue,
+  while a second file mutation is blocked. Open/Close Folder, Rescan, and Quit
+  request cancellation and await the worker's between-file or completed atomic
+  boundary; a late completion is applied only to the same scan/folder token.
 - `ImagePipeline` uses two bounded `OperationQueue`s: full-size decodes stay
   limited to two (peak-memory bound for 4096 px images), while thumbnails get
   their own lane of `min(4, cores/2)` because 320 px decodes are small and a
@@ -84,19 +103,22 @@ operations belong elsewhere:
 
 Do not move filesystem loops or JSON encoding back onto `SessionStore`.
 
-## Shared rating storage
+## Shared review-metadata storage
 
 `PhotoItem` is mostly immutable scan metadata. Copying the complete
 `@Published [PhotoItem]` array for one F/D decision made rating latency grow
 with the folder size: the 100,000-item check measured 20.5 ms for one rating.
-Each physical `PhotoFile` therefore keeps only its `Rating`/`ratedAt` pair in a
-small shared, lock-protected storage object. `SessionStore` sends one
-`objectWillChange`, updates the touched file or RAW+JPEG pair, and adjusts the
-cached tally without replacing `items`; the same check is about 0.2 ms.
+Each physical `PhotoFile` therefore keeps its decision, stars, color, and
+change dates in one small shared, lock-protected storage object. A read captures
+the complete per-file snapshot. Pair projection, filtering, persistence, and
+Export planning therefore cannot combine mutable fields observed at different
+moments. `SessionStore` sends one `objectWillChange`, updates the touched file
+or RAW+JPEG pair, and adjusts the cached tallies without replacing `items`; the
+same check is about 0.2 ms.
 
-Value copies of a `PhotoItem` intentionally share that physical-file rating
-storage. This preserves independent RAW and JPEG decisions through pairing
-projection and gives detached readers an atomic rating/date snapshot. Do not
+Value copies of a `PhotoItem` intentionally share that physical-file metadata
+storage. This preserves independent RAW and JPEG metadata through pairing
+projection and gives detached readers a coherent snapshot. Do not
 put the mutable fields back directly into the large value array. Clear All
 remains O(N), but it mutates only the small rating records and publishes once;
 normal single-photo culling is O(1). The large-session rating, clear-all, batch
@@ -262,7 +284,11 @@ the cached `captureDay` buckets directly — do not reintroduce
 `Calendar.current` calls per adjacent pair in `sameGroup`; a group rebuild
 walks every visible photo. Each filter change creates
 one `PreparedPhotoFilter`, so query normalization, whole-day date bounds, and
-numeric ranges are prepared before walking the photo list. Search typing is
+numeric ranges are prepared before walking the photo list. Decision, star, and
+color exclusions are evaluated explicitly from one coherent mutable-metadata
+snapshot; they are never appended to immutable `searchableText`. Metadata sort
+preparation likewise captures one snapshot per item before comparing, avoiding
+lock acquisition during every O(N log N) comparison. Search typing is
 debounced by 150 ms. Camera-setting text edits use the same delay and commit
 all valid drafts in one filter assignment, avoiding repeated full-list walks
 while a value is being typed.
@@ -289,6 +315,7 @@ the session after the user has left the scanning view.
 `SessionStore` maintains:
 
 - incremental Yes/No/undecided totals;
+- incremental Unrated/1–5/Mixed star and None/five-color/Mixed totals;
 - cached type/camera/lens counts and labels;
 - cached calendar-day counts and folder-wide aperture/shutter/ISO ranges;
 - a sorted index list reused by filter-only changes;
@@ -411,7 +438,13 @@ Plan v3 stores the exact filesystem bytes for every source, destination,
 temporary, and resolved Trash path. Recovery reconstructs those bytes without
 normalizing through a Swift string; malformed, relative, noncanonical, or
 mismatched raw paths keep the journal retryable. Plan v1 and v2 remain readable
-for crash recovery. Intentional Trash operations reconcile forward: launch
+for crash recovery. XMP-aware Copy/Move uses the version-4 extension: each
+record explicitly identifies ordinary media, an unchanged application packet,
+a generated destination packet, or a fully selected family's retired source
+packet. It seals source and prepared-packet SHA-256 digests into the immutable
+plan while retaining the same exact-path and identity authority. Version-1,
+version-2, and version-3 plans remain readable with their original recovery
+semantics. Intentional Trash operations reconcile forward: launch
 recovery accepts the current source state and retires their bookkeeping without
 restoring or searching for media in macOS's privacy-protected Trash. Explicit
 in-session Trash Undo remains the sole restore path. Export preflight resolves
@@ -461,6 +494,17 @@ If durable steps show that a paired Trash action stopped between RAW and JPEG,
 the record remains nonblocking attention until Retry or the explicit **Keep
 Files As They Are** action; that action retires only journal metadata and never
 touches media.
+
+Generated XMP packets use that same planned temporary instead of an untracked
+atomic-write filename. Their intended digest replaces the ordinary Copy byte
+comparison because the merged destination deliberately differs from its source
+packet. A started complete packet can be published only when every byte matches
+the sealed digest; an incomplete packet is removed only when its exact inode was
+checkpointed. Move recovery removes a checkpointed generated packet when its
+family rolls back, preserves it when the entire family completed, restores an
+incomplete source-packet retirement, and completes a fully checkpointed
+retirement forward. The old canonical packet is not retired until all media,
+generated, and application-packet records in that family are complete.
 
 Move currently accepts only destinations on the same known storage volume,
 revalidates the planned source immediately before touching it, and performs
@@ -519,16 +563,25 @@ failure instead of allowing Close, folder changes, or Quit to wait forever.
 
 ## Export lifecycle
 
-Export shares Clean Up's three-phase shape: the main actor snapshots the
-photos with the chosen ratings, `ExportWorker` runs the copy or move loop
+Export shares Clean Up's three-phase shape: the main actor evaluates one pure
+decision + stars + color AND predicate and snapshots matching items plus exact
+physical-file counts. `ExportWorker` runs the copy or move loop
 off-main (reusing `ThrottledProgress`), and the main actor applies one result.
 `ExportWorker.makePlan` reserves every destination name first and chooses one
-collision suffix per photo, keeping RAW+JPEG basenames matched. Copy rolls back
+collision suffix per photo or same-stem XMP family, keeping RAW+JPEG, canonical
+XMP, and extension-qualified application-packet basenames matched. When XMP is
+enabled, `XMPExportPlanner` resolves the complete live stem family and prepares
+merged destination bytes off-main before `FileOperationJournal` activation.
+The activated version-4 plan covers every media and XMP source, temporary,
+destination, identity, role, and digest before the worker's first filesystem
+change. Copy rolls back
 members of a partially failed or cancelled pair; photos completed before a
 cancel remain at the destination. Once a Copy has been flushed and staged, a
 later source-drive disconnect cannot invalidate it; recovery preserves that
 copy instead of deleting completed work. Move uses the same plan and retains
-its source rollback.
+its source rollback. A fully selected canonical XMP is transferred only after
+its merged destination is durable; a packet shared with an unselected same-stem
+member is copied and retained at the source.
 
 `SessionStore.activeFileOperation` is the only in-flight authority for Clean
 Up, Copy, and Move. It blocks folder switching, rescan, rating/selection

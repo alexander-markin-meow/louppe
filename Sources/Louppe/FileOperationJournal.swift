@@ -24,6 +24,16 @@ enum FileOperationJournal {
         case rolledBack
     }
 
+    /// Version-4 plans distinguish ordinary files from generated XMP packets
+    /// and the source packet retired by a fully selected Move family. Missing
+    /// values in installed version-1/2/3 journals mean ordinary media.
+    enum PlannedFileRole: String, Codable, Sendable {
+        case media
+        case applicationXMP
+        case preparedXMP
+        case retiredXMPSource
+    }
+
     struct Seed: Sendable {
         let itemID: String
         let source: URL
@@ -33,6 +43,12 @@ enum FileOperationJournal {
         /// carry it so operation activation cannot silently adopt a later
         /// same-path replacement.
         let expectedIdentity: FileIdentity?
+        let role: PlannedFileRole
+        /// Optional raw-byte CAS for XMP inputs prepared before activation.
+        let expectedSourceDigest: Data?
+        /// SHA-256 of a generated destination packet. Recovery uses this in
+        /// place of comparing it with the (deliberately different) source.
+        let preparedContentDigest: Data?
         /// The file whose stable volume/inode identity should be captured.
         /// Trash restore moves from `destination` back to `source`, so its
         /// identity URL differs from the desired source-state URL.
@@ -43,13 +59,19 @@ enum FileOperationJournal {
             source: URL,
             destination: URL?,
             expectedIdentity: FileIdentity? = nil,
-            identityURL: URL? = nil
+            identityURL: URL? = nil,
+            role: PlannedFileRole = .media,
+            expectedSourceDigest: Data? = nil,
+            preparedContentDigest: Data? = nil
         ) {
             self.itemID = itemID
             self.source = source
             self.destination = destination
             self.expectedIdentity = expectedIdentity
             self.identityURL = identityURL ?? source
+            self.role = role
+            self.expectedSourceDigest = expectedSourceDigest
+            self.preparedContentDigest = preparedContentDigest
         }
     }
 
@@ -94,6 +116,9 @@ enum FileOperationJournal {
         let sourcePathBytes: Data?
         let destinationPathBytes: Data?
         let temporaryPathBytes: Data?
+        let role: PlannedFileRole?
+        let expectedSourceDigest: Data?
+        let preparedContentDigest: Data?
 
         init(
             itemID: String,
@@ -103,7 +128,10 @@ enum FileOperationJournal {
             identity: FileIdentity,
             sourcePathBytes: Data? = nil,
             destinationPathBytes: Data? = nil,
-            temporaryPathBytes: Data? = nil
+            temporaryPathBytes: Data? = nil,
+            role: PlannedFileRole? = nil,
+            expectedSourceDigest: Data? = nil,
+            preparedContentDigest: Data? = nil
         ) {
             self.itemID = itemID
             self.sourcePath = sourcePath
@@ -113,7 +141,12 @@ enum FileOperationJournal {
             self.sourcePathBytes = sourcePathBytes
             self.destinationPathBytes = destinationPathBytes
             self.temporaryPathBytes = temporaryPathBytes
+            self.role = role
+            self.expectedSourceDigest = expectedSourceDigest
+            self.preparedContentDigest = preparedContentDigest
         }
+
+        var effectiveRole: PlannedFileRole { role ?? .media }
     }
 
     struct Plan: Codable, Equatable, Sendable {
@@ -160,6 +193,7 @@ enum FileOperationJournal {
 
     private enum ManipulatedPathRole {
         case source
+        case readOnlySource
         case owned
     }
 
@@ -215,6 +249,32 @@ enum FileOperationJournal {
                 ),
                 includeStatusChange: true
             )
+            if let expectedDigest = file.expectedSourceDigest {
+                guard try FileOperationJournal.contentDigest(
+                    at: FileOperationJournal.plannedURL(
+                        for: file,
+                        role: .source,
+                        planVersion: plan.version
+                    )
+                ) == expectedDigest else {
+                    throw JournalError.sourceChangedSinceScan(
+                        try FileOperationJournal.plannedURL(
+                            for: file,
+                            role: .source,
+                            planVersion: plan.version
+                        )
+                    )
+                }
+            }
+        }
+
+        func requirePreparedContent(at index: Int, fileURL: URL) throws {
+            guard plan.files.indices.contains(index),
+                  let expected = plan.files[index].preparedContentDigest,
+                  try FileOperationJournal.contentDigest(at: fileURL)
+                    == expected else {
+                throw JournalError.sourceChangedSinceScan(fileURL)
+            }
         }
 
         func requirePlannedIdentity(
@@ -433,6 +493,11 @@ enum FileOperationJournal {
         )
 
         do {
+            let planVersion = seeds.contains {
+                $0.role != .media
+                    || $0.expectedSourceDigest != nil
+                    || $0.preparedContentDigest != nil
+            } ? 4 : 3
             let files = try seeds.enumerated().map { index, seed in
                 let destination = seed.destination
                 let temporary: URL?
@@ -451,6 +516,7 @@ enum FileOperationJournal {
                 }
                 let currentIdentity = try fileIdentity(at: seed.identityURL)
                 if kind != .exportCopy,
+                   seed.role != .preparedXMP,
                    try linkCount(at: seed.identityURL) != 1 {
                     // A directory entry with another hard link cannot be
                     // located unambiguously after a pre-checkpoint Trash or
@@ -464,6 +530,14 @@ enum FileOperationJournal {
                     includeStatusChange: true
                    ) {
                     throw JournalError.sourceChangedSinceScan(seed.identityURL)
+                }
+                if let expectedDigest = seed.expectedSourceDigest,
+                   try contentDigest(at: seed.identityURL) != expectedDigest {
+                    throw JournalError.sourceChangedSinceScan(seed.identityURL)
+                }
+                if seed.role == .preparedXMP,
+                   seed.preparedContentDigest?.count != 32 {
+                    throw JournalError.unsafePlan(creating)
                 }
                 let sourcePathBytes = try validatedPathBytes(
                     for: seed.source
@@ -482,11 +556,14 @@ enum FileOperationJournal {
                     identity: seed.expectedIdentity ?? currentIdentity,
                     sourcePathBytes: sourcePathBytes,
                     destinationPathBytes: destinationPathBytes,
-                    temporaryPathBytes: temporaryPathBytes
+                    temporaryPathBytes: temporaryPathBytes,
+                    role: planVersion >= 4 ? seed.role : nil,
+                    expectedSourceDigest: seed.expectedSourceDigest,
+                    preparedContentDigest: seed.preparedContentDigest
                 )
             }
             let plan = Plan(
-                version: 3,
+                version: planVersion,
                 operationID: operationID,
                 kind: kind,
                 createdAt: Date(),
@@ -877,6 +954,35 @@ enum FileOperationJournal {
         planVersion: Int,
         preserveCompletedMove: Bool
     ) throws -> RecoveredFileCounts {
+        if file.effectiveRole == .preparedXMP {
+            if kind == .exportMove, !preserveCompletedMove {
+                return try rollbackPreparedMoveCopy(
+                    file,
+                    state: state,
+                    operationID: operationID,
+                    fileIndex: fileIndex,
+                    planVersion: planVersion
+                )
+            }
+            return try recoverPreparedCopy(
+                file,
+                state: state,
+                operationID: operationID,
+                fileIndex: fileIndex,
+                planVersion: planVersion
+            )
+        }
+        if file.effectiveRole == .retiredXMPSource,
+           kind == .exportMove {
+            return try recoverRetiredXMPSource(
+                file,
+                state: state,
+                operationID: operationID,
+                fileIndex: fileIndex,
+                planVersion: planVersion,
+                preserveDestination: preserveCompletedMove
+            )
+        }
         switch kind {
         case .exportCopy:
             return try recoverCopy(
@@ -910,6 +1016,284 @@ enum FileOperationJournal {
                 planVersion: planVersion
             )
         }
+    }
+
+    private static func rollbackPreparedMoveCopy(
+        _ file: PlannedFile,
+        state: StateRecord?,
+        operationID: String,
+        fileIndex: Int,
+        planVersion: Int
+    ) throws -> RecoveredFileCounts {
+        guard let expectedDigest = file.preparedContentDigest else {
+            throw RecoveryError.unverifiedOwnedFile(
+                try plannedURL(
+                    for: file,
+                    role: .source,
+                    planVersion: planVersion
+                )
+            )
+        }
+        let temporary = try plannedURL(
+            for: file,
+            role: .temporary,
+            planVersion: planVersion
+        )
+        let destination = try plannedURL(
+            for: file,
+            role: .destination,
+            planVersion: planVersion
+        )
+        try validateTemporary(
+            temporary,
+            for: file,
+            operationID: operationID,
+            fileIndex: fileIndex,
+            planVersion: planVersion
+        )
+        let candidates = [temporary, destination].filter(pathEntryExists)
+        guard candidates.count <= 1 else {
+            throw RecoveryError.multipleRecoveryCandidates(destination)
+        }
+        guard let copy = candidates.first else {
+            return RecoveredFileCounts()
+        }
+        let current = try fileIdentity(at: copy)
+        guard try contentDigest(at: copy) == expectedDigest,
+              let recorded = state?.resolvedIdentity,
+              state?.state == .staged || state?.state == .completed,
+              identitiesMatch(
+                expected: recorded,
+                actual: current,
+                includeStatusChange: false
+              ) else {
+            // A complete generated packet without a recorded inode is safe to
+            // preserve during Copy, but Move rollback must never delete it by
+            // filename and digest alone.
+            throw RecoveryError.unverifiedOwnedFile(copy)
+        }
+        return try removeRecordedPartialCopy(
+            copy,
+            temporary: temporary,
+            destination: destination,
+            identity: current
+        )
+    }
+
+    private static func recoverPreparedCopy(
+        _ file: PlannedFile,
+        state: StateRecord?,
+        operationID: String,
+        fileIndex: Int,
+        planVersion: Int
+    ) throws -> RecoveredFileCounts {
+        let source = try plannedURL(
+            for: file,
+            role: .source,
+            planVersion: planVersion
+        )
+        guard let expectedDigest = file.preparedContentDigest,
+              file.temporaryPath != nil,
+              file.destinationPath != nil else {
+            throw RecoveryError.unverifiedOwnedFile(source)
+        }
+        let temporary = try plannedURL(
+            for: file,
+            role: .temporary,
+            planVersion: planVersion
+        )
+        let destination = try plannedURL(
+            for: file,
+            role: .destination,
+            planVersion: planVersion
+        )
+        try validateTemporary(
+            temporary,
+            for: file,
+            operationID: operationID,
+            fileIndex: fileIndex,
+            planVersion: planVersion
+        )
+        let candidates = [temporary, destination].filter(pathEntryExists)
+        guard candidates.count <= 1 else {
+            throw RecoveryError.multipleRecoveryCandidates(source)
+        }
+        guard let copy = candidates.first else {
+            return RecoveredFileCounts()
+        }
+        let identity = try fileIdentity(at: copy)
+        let digestMatches = try contentDigest(at: copy) == expectedDigest
+        if !digestMatches {
+            guard state?.state == .started,
+                  let recorded = state?.resolvedIdentity,
+                  identitiesMatch(
+                    expected: recorded,
+                    actual: identity,
+                    includeStatusChange: false
+                  ) else {
+                throw RecoveryError.unverifiedOwnedFile(copy)
+            }
+            return try removeRecordedPartialCopy(
+                copy,
+                temporary: temporary,
+                destination: destination,
+                identity: identity
+            )
+        }
+
+        switch state?.state {
+        case .started:
+            // Before the staged identity exists, only the operation-specific
+            // temporary may be adopted, and only because its bytes exactly
+            // match the digest sealed into the durable plan.
+            guard exactPathsEqual(copy, temporary) else {
+                throw RecoveryError.unverifiedOwnedFile(copy)
+            }
+            if let recorded = state?.resolvedIdentity {
+                guard identitiesMatch(
+                    expected: recorded,
+                    actual: identity,
+                    includeStatusChange: false
+                ) else {
+                    throw RecoveryError.unverifiedOwnedFile(copy)
+                }
+            }
+        case .staged, .completed:
+            guard let recorded = state?.resolvedIdentity,
+                  identitiesMatch(
+                    expected: recorded,
+                    actual: identity,
+                    includeStatusChange: false
+                  ) else {
+                throw RecoveryError.unverifiedOwnedFile(copy)
+            }
+        case .rolledBack, nil:
+            throw RecoveryError.unverifiedOwnedFile(copy)
+        }
+
+        try requireIdentity(identity, at: copy, includeStatusChange: false)
+        let final: URL
+        if exactPathsEqual(copy, temporary) {
+            try DurableFileIO.syncFile(at: temporary, fullSync: true)
+            try DurableFileIO.atomicExclusiveRename(
+                from: temporary,
+                to: destination
+            )
+            try DurableFileIO.syncRenameDirectories(
+                from: temporary,
+                to: destination,
+                fullSync: true
+            )
+            final = destination
+        } else {
+            final = destination
+        }
+        guard try contentDigest(at: final) == expectedDigest else {
+            throw RecoveryError.unverifiedOwnedFile(final)
+        }
+        var counts = RecoveredFileCounts()
+        counts.preservedCopies = 1
+        return counts
+    }
+
+    private static func recoverRetiredXMPSource(
+        _ file: PlannedFile,
+        state: StateRecord?,
+        operationID: String,
+        fileIndex: Int,
+        planVersion: Int,
+        preserveDestination: Bool
+    ) throws -> RecoveredFileCounts {
+        guard preserveDestination else {
+            return try recoverMove(
+                file,
+                state: state,
+                operationID: operationID,
+                fileIndex: fileIndex,
+                planVersion: planVersion,
+                preserveDestination: false
+            )
+        }
+        let source = try plannedURL(
+            for: file,
+            role: .source,
+            planVersion: planVersion
+        )
+        let temporary = try plannedURL(
+            for: file,
+            role: .temporary,
+            planVersion: planVersion
+        )
+        let destination = try plannedURL(
+            for: file,
+            role: .destination,
+            planVersion: planVersion
+        )
+        try validateTemporary(
+            temporary,
+            for: file,
+            operationID: operationID,
+            fileIndex: fileIndex,
+            planVersion: planVersion
+        )
+        let sourceExists = pathEntryExists(source)
+        let candidates = [temporary, destination].filter(pathEntryExists)
+        guard candidates.count <= 1,
+              !(sourceExists && !candidates.isEmpty) else {
+            throw RecoveryError.multipleRecoveryCandidates(source)
+        }
+        guard state?.state == .completed else {
+            throw RecoveryError.unverifiedOwnedFile(source)
+        }
+
+        if sourceExists {
+            try requireIdentity(
+                file.identity,
+                at: source,
+                includeStatusChange: false
+            )
+            if let expected = file.expectedSourceDigest,
+               try contentDigest(at: source) != expected {
+                throw RecoveryError.unverifiedOwnedFile(source)
+            }
+            try DurableFileIO.atomicExclusiveRename(
+                from: source,
+                to: destination
+            )
+            try DurableFileIO.syncRenameDirectories(
+                from: source,
+                to: destination,
+                fullSync: true
+            )
+        }
+
+        guard pathEntryExists(destination) || candidates.isEmpty else {
+            throw RecoveryError.unverifiedOwnedFile(temporary)
+        }
+        guard pathEntryExists(destination) else {
+            // The worker or an earlier recovery already retired the exact
+            // source after the durable completed checkpoint.
+            return RecoveredFileCounts()
+        }
+        let current = try fileIdentity(at: destination)
+        let expected = state?.resolvedIdentity ?? file.identity
+        guard identitiesMatch(
+            expected: expected,
+            actual: current,
+            includeStatusChange: false
+        ) else {
+            throw RecoveryError.unverifiedOwnedFile(destination)
+        }
+        var result = try removeRecordedPartialCopy(
+            destination,
+            temporary: temporary,
+            destination: destination,
+            identity: current
+        )
+        // This was the intentional source-retirement half of a completed XMP
+        // transfer, not a failed Copy artifact.
+        result.removedCopies = 0
+        return result
     }
 
     /// A single-file Trash action can be accepted in any crash state without
@@ -2114,7 +2498,7 @@ enum FileOperationJournal {
                     maximumBytes: maximumPlanBytes
                 )
             )
-            guard (1...3).contains(plan.version),
+            guard (1...4).contains(plan.version),
                   operationURL.lastPathComponent == "\(plan.operationID).operation" else {
                 throw JournalError.corruptPlan(planURL)
             }
@@ -2155,7 +2539,12 @@ enum FileOperationJournal {
         )
         var pathBytes = Set<Data>()
         var resolvedPathBytes = Set<Data>()
-        var sourceFileIdentities = Set<String>()
+        var ownedPathBytes = Set<Data>()
+        var ownedResolvedPathBytes = Set<Data>()
+        var readOnlyPathBytes = Set<Data>()
+        var readOnlyResolvedPathBytes = Set<Data>()
+        var mutatingSourceFileIdentities = Set<String>()
+        var readOnlySourceIdentities = Set<String>()
         var ownedFileIdentities = Set<String>()
 
         func isInJournalRoot(
@@ -2205,7 +2594,17 @@ enum FileOperationJournal {
             guard !isInJournalRoot(
                 path: registeredPath,
                 bytes: registeredBytes
-            ), pathBytes.insert(registeredBytes).inserted else {
+            ) else {
+                return false
+            }
+            let pathWasInserted = pathBytes.insert(registeredBytes).inserted
+            if role == .readOnlySource {
+                guard !ownedPathBytes.contains(registeredBytes) else {
+                    return false
+                }
+            } else if !pathWasInserted,
+                      !(role == .source
+                        && readOnlyPathBytes.contains(registeredBytes)) {
                 return false
             }
 
@@ -2233,7 +2632,18 @@ enum FileOperationJournal {
             guard !isInJournalRoot(
                 path: resolvedPath,
                 bytes: resolvedBytes
-            ), resolvedPathBytes.insert(resolvedBytes).inserted else {
+            ) else {
+                return false
+            }
+            let resolvedWasInserted = resolvedPathBytes
+                .insert(resolvedBytes).inserted
+            if role == .readOnlySource {
+                guard !ownedResolvedPathBytes.contains(resolvedBytes) else {
+                    return false
+                }
+            } else if !resolvedWasInserted,
+                      !(role == .source
+                        && readOnlyResolvedPathBytes.contains(resolvedBytes)) {
                 return false
             }
 
@@ -2264,12 +2674,18 @@ enum FileOperationJournal {
                     // checkpoint and make crash recovery ambiguous. Mutating
                     // batches therefore fail before their first file change.
                     guard plan.kind == .exportCopy
-                            || !sourceFileIdentities.contains(identity) else {
+                            || !mutatingSourceFileIdentities.contains(identity) else {
                         return false
                     }
-                    sourceFileIdentities.insert(identity)
+                    mutatingSourceFileIdentities.insert(identity)
+                case .readOnlySource:
+                    guard !ownedFileIdentities.contains(identity) else {
+                        return false
+                    }
+                    readOnlySourceIdentities.insert(identity)
                 case .owned:
-                    guard !sourceFileIdentities.contains(identity),
+                    guard !mutatingSourceFileIdentities.contains(identity),
+                          !readOnlySourceIdentities.contains(identity),
                           ownedFileIdentities.insert(identity).inserted else {
                         return false
                     }
@@ -2277,16 +2693,35 @@ enum FileOperationJournal {
             } else if lstatError != ENOENT && lstatError != ENOTDIR {
                 return false
             }
+            if role == .owned {
+                ownedPathBytes.insert(registeredBytes)
+                ownedResolvedPathBytes.insert(resolvedBytes)
+            } else if role == .readOnlySource {
+                readOnlyPathBytes.insert(registeredBytes)
+                readOnlyResolvedPathBytes.insert(resolvedBytes)
+            }
             return true
         }
 
         for (index, file) in plan.files.enumerated() {
+            let effectiveRole = file.effectiveRole
+            guard plan.version >= 4 || effectiveRole == .media,
+                  file.expectedSourceDigest == nil
+                    || file.expectedSourceDigest?.count == 32,
+                  (effectiveRole == .preparedXMP)
+                    == (file.preparedContentDigest?.count == 32),
+                  effectiveRole == .preparedXMP
+                    || file.preparedContentDigest == nil else {
+                throw JournalError.corruptPlan(operationURL)
+            }
             guard !file.itemID.isEmpty,
                   (file.identity.volumeRootPath as NSString).isAbsolutePath,
                   registerManipulatedPath(
                     file.sourcePath,
                     exactBytes: file.sourcePathBytes,
-                    role: .source
+                    role: effectiveRole == .preparedXMP
+                        ? .readOnlySource
+                        : .source
                   ) else {
                 throw JournalError.corruptPlan(operationURL)
             }
@@ -2421,10 +2856,18 @@ enum FileOperationJournal {
             .joined()
     }
 
+    static func contentDigest(at url: URL) throws -> Data {
+        Data(SHA256.hash(data: try DurableFileIO.readRegularFile(
+            at: url,
+            maximumBytes: maximumXMPPacketBytes
+        )))
+    }
+
     // A 100,000-file operation with long Unicode paths can legitimately be
     // well above 64 MiB. Keep the read finite without rejecting the scale the
     // prepared-session index and export architecture are designed to handle.
     private static let maximumPlanBytes = 512 * 1024 * 1024
+    private static let maximumXMPPacketBytes = 64 * 1024 * 1024
     private static let maximumStateBytes = 64 * 1024
     private static let maximumCommitBytes = 64 * 1024
     private static let legacyCommitMarker = Data("committed\n".utf8)

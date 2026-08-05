@@ -475,6 +475,8 @@ final class ExportWorkerSafetyTests: XCTestCase {
                 ) { _, _ in }
                 XCTAssertEqual(result.movedFiles, 1)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+            case .metadataXMP:
+                XCTFail("Destination spelling coverage applies only to Copy and Move")
             }
 
             let exported = try FileOperationJournal

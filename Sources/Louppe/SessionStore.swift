@@ -32,6 +32,16 @@ enum SessionEmptyReason: Equatable, Sendable {
     case unavailableAfterFailedRestore
 }
 
+enum XMPPublicationLifecycleState: Equatable, Sendable {
+    case idle
+    case preflighting(done: Int, total: Int)
+    case awaitingConfirmation(XMPPublicationPlan)
+    case publishing(done: Int, total: Int)
+    case cancelling
+    case finished(XMPPublicationResult)
+    case failed(String)
+}
+
 /// The app's single source of truth: the loaded session (photos + ratings),
 /// navigation, undo, view state, and persistence to the sidecar file.
 @MainActor
@@ -165,6 +175,10 @@ final class SessionStore: ObservableObject {
     @Published private(set) var activeFileOperation: FileOperationKind? {
         didSet { updateFileOperationPowerActivity() }
     }
+    @Published private(set) var xmpPublicationState:
+        XMPPublicationLifecycleState = .idle {
+        didSet { updateFileOperationPowerActivity() }
+    }
     @Published private(set) var isSessionTransitioning = false
     @Published private(set) var isPreparingForTermination = false
     @Published private(set) var isRecoveringInterruptedOperations = false {
@@ -189,7 +203,8 @@ final class SessionStore: ObservableObject {
     /// An unresolved journal reserves filesystem mutations for Recovery. It
     /// does not reserve ordinary review, ratings, navigation, or persistence.
     var isNewFileOperationBlocked: Bool {
-        isFileOperationRunning || recoveryNeedsAttention
+        isFileOperationRunning || isXMPPublicationRunning
+            || recoveryNeedsAttention
     }
     /// Successful recovery only needs acknowledgement when it did something
     /// visible. Merely verifying and retiring a stale record is silent.
@@ -259,6 +274,17 @@ final class SessionStore: ObservableObject {
     var isCleaningUp: Bool { activeFileOperation == .cleanUp }
     var isCopyingExport: Bool { activeFileOperation == .exportCopy }
     var isMovingExport: Bool { activeFileOperation == .exportMove }
+    var isXMPPublicationRunning: Bool {
+        switch xmpPublicationState {
+        case .preflighting, .publishing, .cancelling:
+            return true
+        default:
+            return false
+        }
+    }
+    private var hasXMPPublicationSessionState: Bool {
+        xmpPublicationState != .idle
+    }
     var canRate: Bool {
         return !items.isEmpty
             && !isFileOperationRunning
@@ -287,11 +313,12 @@ final class SessionStore: ObservableObject {
 
     private func updateFileOperationPowerActivity() {
         let shouldPreventSleep = activeFileOperation != nil
+            || isXMPPublicationRunning
             || isRecoveringInterruptedOperations
         if shouldPreventSleep, fileOperationPowerActivity == nil {
             fileOperationPowerActivity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .idleSystemSleepDisabled],
-                reason: "Louppe is safely transferring media files"
+                reason: "Louppe is safely transferring files or writing metadata"
             )
         } else if !shouldPreventSleep,
                   let activity = fileOperationPowerActivity {
@@ -302,10 +329,16 @@ final class SessionStore: ObservableObject {
 
     /// One undo step can hold several photo changes (e.g. "clear all"),
     /// so a single ⌘Z restores the whole batch.
-    private struct RatingChange {
-        let fileID: String
-        let previousRating: Rating
-        let previousRatedAt: Date?
+    private enum MetadataDimension {
+        case decision
+        case stars
+        case color
+    }
+    private struct MetadataChange {
+        /// A complete before-image keeps every physical file's metadata
+        /// coherent, while `dimension` makes undo restore only the attribute
+        /// changed by that action.
+        let previous: PhotoFileMetadataSnapshot
     }
     /// A photo removed by Clean Up, with everything needed to bring it back:
     /// its former position in `items` and where each file landed in the Trash.
@@ -315,7 +348,11 @@ final class SessionStore: ObservableObject {
         let trashedFiles: [TrashedFile]
     }
     private enum UndoStep {
-        case ratings([RatingChange], previousFileID: String?)
+        case metadata(
+            MetadataDimension,
+            [MetadataChange],
+            previousFileID: String?
+        )
         case cleanUp(
             [RemovedPhoto],
             previousItemID: String?,
@@ -379,6 +416,15 @@ final class SessionStore: ObservableObject {
     private var scanGeneration: UInt64 = 0
     private var folderOpenGeneration: UInt64 = 0
     private var cleanUpGeneration: UInt64 = 0
+    private var xmpPublicationGeneration: UInt64 = 0
+    private var xmpPublicationCancelFlag: XMPPublicationCancelFlag?
+    private var xmpPublicationTask: Task<Void, Never>?
+    private struct XMPPublicationSessionToken: Equatable {
+        let generation: UInt64
+        let scanGeneration: UInt64
+        let folder: URL?
+    }
+    private var xmpPublicationSessionToken: XMPPublicationSessionToken?
     private var deferredFolderOpen: URL?
     /// The session affected by an interrupted mutation. Both the exact path
     /// bytes and stable directory identity must still match before a delayed
@@ -397,6 +443,12 @@ final class SessionStore: ObservableObject {
     private var scanResumeIdentity: ScanResumeIdentity?
     private var ratingTally = (yes: 0, no: 0, undecided: 0)
     private var mixedRatingCount = 0
+    private var starTally: [StarRating: Int] = [:]
+    private var unratedStarCountStorage = 0
+    private var mixedStarCountStorage = 0
+    private var colorTally: [PhotoColorLabel: Int] = [:]
+    private var noColorCountStorage = 0
+    private var mixedColorCountStorage = 0
     /// Physical ids include hidden JPEG partners, so rating undo remains
     /// stable across an in-memory pairing projection.
     private var itemIndexByFileID: [String: Int] = [:]
@@ -597,6 +649,13 @@ final class SessionStore: ObservableObject {
     }
 
 #if DEBUG
+    /// Gives model-focused tests the same derived-data boundary as a completed
+    /// folder scan without requiring filesystem setup.
+    func rebuildDerivedDataForTesting() {
+        rebuildDerivedData()
+        applyFilter()
+    }
+
     /// Deterministic recovery-state setup for command-gating tests. Production
     /// reaches the same state only through the journal worker above.
     func presentOperationRecoveryReportForTesting(
@@ -625,8 +684,17 @@ final class SessionStore: ObservableObject {
     var yesCount: Int { ratingTally.yes }
     var noCount: Int { ratingTally.no }
     var undecidedCount: Int { ratingTally.undecided }
+    /// Mixed decisions remain part of the legacy/export Undecided total, but
+    /// the normal Filter exposes both buckets independently.
+    var plainUndecidedCount: Int { max(0, ratingTally.undecided - mixedRatingCount) }
     var mixedCount: Int { mixedRatingCount }
     var ratedCount: Int { ratingTally.yes + ratingTally.no + mixedRatingCount }
+    func starCount(_ rating: StarRating) -> Int { starTally[rating, default: 0] }
+    var unratedStarCount: Int { unratedStarCountStorage }
+    var mixedStarCount: Int { mixedStarCountStorage }
+    func colorCount(_ label: PhotoColorLabel) -> Int { colorTally[label, default: 0] }
+    var noColorCount: Int { noColorCountStorage }
+    var mixedColorCount: Int { mixedColorCountStorage }
 
     /// Reset remains available when the date UI is in its non-default mode or
     /// retains hidden day exclusions, even if those choices currently show all
@@ -802,6 +870,32 @@ final class SessionStore: ObservableObject {
         publishPreparedVisibility()
     }
 
+    /// Review metadata is lock-backed and therefore does not replace the
+    /// `PhotoItem` value. Refresh only a prepared sort/filter that depends on
+    /// the changed dimension, then publish the new scalar snapshot to tiles.
+    private func publishMetadataMutation(_ dimension: MetadataDimension) {
+        let changesSort: Bool
+        let changesFilter: Bool
+        switch dimension {
+        case .decision:
+            changesSort = sort.key == .decision
+            changesFilter = !filter.excludedDecisionStates.isEmpty
+        case .stars:
+            changesSort = sort.key == .starRating
+            changesFilter = !filter.excludedStarStates.isEmpty
+        case .color:
+            changesSort = sort.key == .colorLabel
+            changesFilter = !filter.excludedColorStates.isEmpty
+        }
+        if changesSort {
+            preparedIndex.rebuildSort(items, sort: sort)
+        }
+        if changesSort || changesFilter {
+            applyFilter()
+        }
+        objectWillChange.send()
+    }
+
     private func publishPreparedVisibility() {
         visibleIndices = preparedIndex.visibleIndices
         visibleGroups = preparedIndex.visibleGroups
@@ -814,6 +908,12 @@ final class SessionStore: ObservableObject {
     private func rebuildDerivedData() {
         var tally = (yes: 0, no: 0, undecided: 0)
         var mixed = 0
+        var stars: [StarRating: Int] = [:]
+        var unratedStars = 0
+        var mixedStars = 0
+        var colors: [PhotoColorLabel: Int] = [:]
+        var noColor = 0
+        var mixedColors = 0
         var types: [String: Int] = [:]
         var mediaKinds: [MediaKind: Int] = [:]
         var cameras: [String: Int] = [:]
@@ -830,9 +930,10 @@ final class SessionStore: ObservableObject {
         var minimumDuration: Double?
         var maximumDuration: Double?
         for item in items {
+            let metadata = item.metadataState
             // Keep the three public counts exhaustive: mixed pairs are
             // unresolved and therefore included in `undecidedCount`.
-            switch item.ratingState {
+            switch metadata.decision {
             case .yes:
                 tally.yes += 1
             case .no:
@@ -842,6 +943,16 @@ final class SessionStore: ObservableObject {
             case .mixed:
                 tally.undecided += 1
                 mixed += 1
+            }
+            switch metadata.stars {
+            case .unrated: unratedStars += 1
+            case .stars(let rating): stars[rating, default: 0] += 1
+            case .mixed: mixedStars += 1
+            }
+            switch metadata.color {
+            case .none: noColor += 1
+            case .label(let label): colors[label, default: 0] += 1
+            case .mixed: mixedColors += 1
             }
             types[item.fileTypeLabel, default: 0] += 1
             mediaKinds[item.mediaKind, default: 0] += 1
@@ -872,6 +983,12 @@ final class SessionStore: ObservableObject {
         }
         ratingTally = tally
         mixedRatingCount = mixed
+        starTally = stars
+        unratedStarCountStorage = unratedStars
+        mixedStarCountStorage = mixedStars
+        colorTally = colors
+        noColorCountStorage = noColor
+        mixedColorCountStorage = mixedColors
         typeCounts = types
         mediaKindCounts = mediaKinds
         cameraCounts = cameras
@@ -1050,6 +1167,12 @@ final class SessionStore: ObservableObject {
         publishPreparedVisibility()
         ratingTally = (0, 0, 0)
         mixedRatingCount = 0
+        starTally = [:]
+        unratedStarCountStorage = 0
+        mixedStarCountStorage = 0
+        colorTally = [:]
+        noColorCountStorage = 0
+        mixedColorCountStorage = 0
         itemIndexByFileID = [:]
         availableTypes = []
         availableMediaKinds = []
@@ -1089,6 +1212,20 @@ final class SessionStore: ObservableObject {
     func openFolder(_ url: URL) {
         if isRecoveringInterruptedOperations {
             deferredFolderOpen = url
+            return
+        }
+        if hasXMPPublicationSessionState {
+            guard !isSessionTransitioning,
+                  activeFileOperation == nil,
+                  !isPreparingForTermination else { return }
+            isSessionTransitioning = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.cancelAndAwaitXMPPublication()
+                self.isExportPresented = false
+                self.isSessionTransitioning = false
+                self.openFolder(url)
+            }
             return
         }
         guard !isFileOperationRunning else { return }
@@ -1396,11 +1533,15 @@ final class SessionStore: ObservableObject {
                         consumedPersistedFileIDs.insert(
                             match.persistedFileIDBytes
                         )
-                        loaded[i].restoreRating(
-                            PhotoFileRatingSnapshot(
+                        loaded[i].restoreMetadata(
+                            PhotoFileMetadataSnapshot(
                                 fileID: file.id,
                                 rating: match.value.rating,
-                                ratedAt: match.value.ratedAt
+                                ratedAt: match.value.ratedAt,
+                                starRating: match.value.starRating,
+                                starsChangedAt: match.value.starsChangedAt,
+                                colorLabel: match.value.colorLabel,
+                                colorChangedAt: match.value.colorChangedAt
                             )
                         )
                     case .identityConflict(let conflict):
@@ -1546,6 +1687,20 @@ final class SessionStore: ObservableObject {
     /// Existing ratings survive: they're saved to the sidecar first,
     /// and the scan restores them by filename.
     func rescan() {
+        if hasXMPPublicationSessionState {
+            guard !isSessionTransitioning,
+                  activeFileOperation == nil,
+                  !isPreparingForTermination else { return }
+            isSessionTransitioning = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.cancelAndAwaitXMPPublication()
+                self.isExportPresented = false
+                self.isSessionTransitioning = false
+                self.rescan()
+            }
+            return
+        }
         guard !isFileOperationRunning, let folder = sourceFolder else { return }
         isSessionTransitioning = true
         Task { @MainActor [weak self] in
@@ -1569,6 +1724,30 @@ final class SessionStore: ObservableObject {
             visibleIndices: visibleIndices,
             itemCount: items.count
         )
+    }
+
+    var effectiveDecisionState: PhotoItemRatingState {
+        let states = effectiveSelection.sorted().compactMap {
+            items.indices.contains($0) ? items[$0].ratingState : nil
+        }
+        guard let first = states.first else { return .undecided }
+        return states.dropFirst().allSatisfy { $0 == first } ? first : .mixed
+    }
+
+    var effectiveStarRatingState: PhotoItemStarRatingState {
+        let states = effectiveSelection.sorted().compactMap {
+            items.indices.contains($0) ? items[$0].starRatingState : nil
+        }
+        guard let first = states.first else { return .unrated }
+        return states.dropFirst().allSatisfy { $0 == first } ? first : .mixed
+    }
+
+    var effectiveColorLabelState: PhotoItemColorLabelState {
+        let states = effectiveSelection.sorted().compactMap {
+            items.indices.contains($0) ? items[$0].colorLabelState : nil
+        }
+        guard let first = states.first else { return .none }
+        return states.dropFirst().allSatisfy { $0 == first } ? first : .mixed
     }
 
     func clearSelection() {
@@ -1736,20 +1915,13 @@ final class SessionStore: ObservableObject {
         let valid = targets.filter { items.indices.contains($0) }
         guard !valid.isEmpty else { return }
         let changes = valid.flatMap { index in
-            items[index].ratingSnapshots.map {
-                RatingChange(
-                    fileID: $0.fileID,
-                    previousRating: $0.rating,
-                    previousRatedAt: $0.ratedAt
-                )
-            }
+            items[index].metadataSnapshots.map { MetadataChange(previous: $0) }
         }
-        pushUndo(.ratings(changes, previousFileID: currentItemID))
+        pushUndo(.metadata(.decision, changes, previousFileID: currentItemID))
         let now = Date()
-        // Ratings live in each physical file's tiny shared storage. Publish
-        // once, then update only the selected records without copying the
-        // full immutable metadata array.
-        objectWillChange.send()
+        // Ratings live in shared lock-backed storage whose reference identity
+        // does not change. Update it first, then publish once so lazy Browser
+        // and Grid rows cannot redraw the old snapshot and miss the mutation.
         for index in valid {
             let previousState = items[index].ratingState
             items[index].setRating(rating, ratedAt: now)
@@ -1758,28 +1930,88 @@ final class SessionStore: ObservableObject {
                 to: items[index].ratingState
             )
         }
+        publishMetadataMutation(.decision)
         scheduleSave()
     }
 
     private func setRating(_ rating: Rating, atIndex index: Int, recordUndo: Bool) {
         guard items.indices.contains(index) else { return }
         if recordUndo {
-            let changes = items[index].ratingSnapshots.map {
-                RatingChange(
-                    fileID: $0.fileID,
-                    previousRating: $0.rating,
-                    previousRatedAt: $0.ratedAt
-                )
+            let changes = items[index].metadataSnapshots.map {
+                MetadataChange(previous: $0)
             }
-            pushUndo(.ratings(changes, previousFileID: currentItemID))
+            pushUndo(.metadata(.decision, changes, previousFileID: currentItemID))
         }
         let previousState = items[index].ratingState
-        objectWillChange.send()
         items[index].setRating(rating, ratedAt: Date())
         transitionRatingCount(
             from: previousState,
             to: items[index].ratingState
         )
+        publishMetadataMutation(.decision)
+        scheduleSave()
+    }
+
+    /// Applies stars independently of the Yes/No decision. Numeric shortcuts
+    /// and the Info panel use this batch-aware entry point and never advance.
+    func setStarRating(_ rating: StarRating?) {
+        guard canRate else { return }
+        applyStarRating(rating, to: effectiveSelection.sorted())
+    }
+
+    func setStarRating(_ rating: StarRating?, at index: Int) {
+        guard canRate, items.indices.contains(index) else { return }
+        let targets = selectedIndices.count > 1 && selectedIndices.contains(index)
+            ? selectedIndices.sorted()
+            : [index]
+        applyStarRating(rating, to: targets)
+    }
+
+    private func applyStarRating(_ rating: StarRating?, to targets: [Int]) {
+        let valid = targets.filter { items.indices.contains($0) }
+        guard !valid.isEmpty else { return }
+        let changes = valid.flatMap { index in
+            items[index].metadataSnapshots.map { MetadataChange(previous: $0) }
+        }
+        pushUndo(.metadata(.stars, changes, previousFileID: currentItemID))
+        let now = Date()
+        for index in valid {
+            let previousState = items[index].starRatingState
+            items[index].setStars(rating, changedAt: now)
+            transitionStarCount(from: previousState, to: items[index].starRatingState)
+        }
+        publishMetadataMutation(.stars)
+        scheduleSave()
+    }
+
+    /// Applies a color label independently of decision and stars.
+    func setColorLabel(_ label: PhotoColorLabel?) {
+        guard canRate else { return }
+        applyColorLabel(label, to: effectiveSelection.sorted())
+    }
+
+    func setColorLabel(_ label: PhotoColorLabel?, at index: Int) {
+        guard canRate, items.indices.contains(index) else { return }
+        let targets = selectedIndices.count > 1 && selectedIndices.contains(index)
+            ? selectedIndices.sorted()
+            : [index]
+        applyColorLabel(label, to: targets)
+    }
+
+    private func applyColorLabel(_ label: PhotoColorLabel?, to targets: [Int]) {
+        let valid = targets.filter { items.indices.contains($0) }
+        guard !valid.isEmpty else { return }
+        let changes = valid.flatMap { index in
+            items[index].metadataSnapshots.map { MetadataChange(previous: $0) }
+        }
+        pushUndo(.metadata(.color, changes, previousFileID: currentItemID))
+        let now = Date()
+        for index in valid {
+            let previousState = items[index].colorLabelState
+            items[index].setColor(label, changedAt: now)
+            transitionColorCount(from: previousState, to: items[index].colorLabelState)
+        }
+        publishMetadataMutation(.color)
         scheduleSave()
     }
 
@@ -1802,25 +2034,21 @@ final class SessionStore: ObservableObject {
     func clearAllRatings() {
         guard !isFileOperationRunning else { return }
         isClearAllRatingsConfirmationPresented = false
-        let changes = items.flatMap { item -> [RatingChange] in
+        let changes = items.flatMap { item -> [MetadataChange] in
             guard item.hasAnyRating else { return [] }
-            return item.ratingSnapshots.compactMap {
+            return item.metadataSnapshots.compactMap {
                 guard $0.rating != .undecided else { return nil }
-                return RatingChange(
-                    fileID: $0.fileID,
-                    previousRating: $0.rating,
-                    previousRatedAt: $0.ratedAt
-                )
+                return MetadataChange(previous: $0)
             }
         }
         guard !changes.isEmpty else { return }
-        pushUndo(.ratings(changes, previousFileID: currentItemID))
-        objectWillChange.send()
+        pushUndo(.metadata(.decision, changes, previousFileID: currentItemID))
         for item in items {
             item.setRating(.undecided, ratedAt: nil)
         }
         ratingTally = (0, 0, items.count)
         mixedRatingCount = 0
+        publishMetadataMutation(.decision)
         scheduleSave()
     }
 
@@ -1844,6 +2072,40 @@ final class SessionStore: ObservableObject {
         case .mixed:
             ratingTally.undecided += 1
             mixedRatingCount += 1
+        }
+    }
+
+    private func transitionStarCount(
+        from old: PhotoItemStarRatingState,
+        to new: PhotoItemStarRatingState
+    ) {
+        guard old != new else { return }
+        adjustStarCount(for: old, by: -1)
+        adjustStarCount(for: new, by: 1)
+    }
+
+    private func adjustStarCount(for state: PhotoItemStarRatingState, by amount: Int) {
+        switch state {
+        case .unrated: unratedStarCountStorage += amount
+        case .stars(let rating): starTally[rating, default: 0] += amount
+        case .mixed: mixedStarCountStorage += amount
+        }
+    }
+
+    private func transitionColorCount(
+        from old: PhotoItemColorLabelState,
+        to new: PhotoItemColorLabelState
+    ) {
+        guard old != new else { return }
+        adjustColorCount(for: old, by: -1)
+        adjustColorCount(for: new, by: 1)
+    }
+
+    private func adjustColorCount(for state: PhotoItemColorLabelState, by amount: Int) {
+        switch state {
+        case .none: noColorCountStorage += amount
+        case .label(let label): colorTally[label, default: 0] += amount
+        case .mixed: mixedColorCountStorage += amount
         }
     }
 
@@ -1875,40 +2137,49 @@ final class SessionStore: ObservableObject {
         // longer mean what the user built it for.
         setSelectionIndices([])
         switch step {
-        case .ratings(let changes, let previousFileID):
-            let indexedChanges: [(index: Int, change: RatingChange)] =
+        case .metadata(let dimension, let changes, let previousFileID):
+            let indexedChanges: [(index: Int, change: MetadataChange)] =
                 changes.compactMap { change in
-                    guard let index = itemIndexByFileID[change.fileID],
+                    guard let index = itemIndexByFileID[change.previous.fileID],
                           items.indices.contains(index) else { return nil }
                     return (index: index, change: change)
                 }
-            var previousStates: [Int: PhotoItemRatingState] = [:]
+            var previousDecisionStates: [Int: PhotoItemRatingState] = [:]
+            var previousStarStates: [Int: PhotoItemStarRatingState] = [:]
+            var previousColorStates: [Int: PhotoItemColorLabelState] = [:]
             for (index, _) in indexedChanges {
-                previousStates[index] = previousStates[index]
-                    ?? items[index].ratingState
-            }
-            if !indexedChanges.isEmpty {
-                objectWillChange.send()
+                previousDecisionStates[index] = items[index].ratingState
+                previousStarStates[index] = items[index].starRatingState
+                previousColorStates[index] = items[index].colorLabelState
             }
             for (index, change) in indexedChanges {
-                items[index].restoreRating(
-                    PhotoFileRatingSnapshot(
-                        fileID: change.fileID,
-                        rating: change.previousRating,
-                        ratedAt: change.previousRatedAt
-                    )
-                )
+                switch dimension {
+                case .decision: items[index].restoreRating(change.previous)
+                case .stars: items[index].restoreStars(change.previous)
+                case .color: items[index].restoreColor(change.previous)
+                }
             }
-            for (index, previousState) in previousStates {
-                transitionRatingCount(
-                    from: previousState,
-                    to: items[index].ratingState
-                )
+            for (index, previousState) in previousDecisionStates {
+                switch dimension {
+                case .decision:
+                    transitionRatingCount(from: previousState, to: items[index].ratingState)
+                case .stars:
+                    if let old = previousStarStates[index] {
+                        transitionStarCount(from: old, to: items[index].starRatingState)
+                    }
+                case .color:
+                    if let old = previousColorStates[index] {
+                        transitionColorCount(from: old, to: items[index].colorLabelState)
+                    }
+                }
             }
             restoreCurrentFile(
                 fileID: previousFileID,
                 fallbackIndex: currentIndex
             )
+            if !indexedChanges.isEmpty {
+                publishMetadataMutation(dimension)
+            }
             scheduleSave()
         case .cleanUp(
             let removed,
@@ -2220,6 +2491,168 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Export
 
+    func prepareXMPPublication(
+        selected: [PhotoItem],
+        profile: XMPApplicationProfile,
+        visibleDecisionKeywords: Bool,
+        allowExternalLabelReplacement: Bool = false
+    ) {
+        guard !selected.isEmpty,
+              !isNewFileOperationBlocked,
+              case .idle = xmpPublicationState,
+              case .ready = phase else { return }
+        let input: XMPPublicationInput
+        do {
+            // Capture every physical file's complete metadata once on the
+            // session actor. Later rating changes cannot alter this plan.
+            input = try XMPPublicationInput(
+                items: selected,
+                familyContextItems: items,
+                profile: profile,
+                visibleDecisionKeywords: visibleDecisionKeywords,
+                allowExternalLabelReplacement: allowExternalLabelReplacement
+            )
+        } catch {
+            xmpPublicationState = .failed(error.localizedDescription)
+            return
+        }
+
+        xmpPublicationGeneration &+= 1
+        let token = XMPPublicationSessionToken(
+            generation: xmpPublicationGeneration,
+            scanGeneration: scanGeneration,
+            folder: sourceFolder
+        )
+        let cancelFlag = XMPPublicationCancelFlag()
+        xmpPublicationSessionToken = token
+        xmpPublicationCancelFlag = cancelFlag
+        xmpPublicationState = .preflighting(
+            done: 0,
+            total: input.selectedMediaPaths.count
+        )
+        let progress: XMPPublicationPlanner.Progress = { [weak self] done, total in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.xmpPublicationSessionToken == token,
+                      case .preflighting = self.xmpPublicationState else { return }
+                self.xmpPublicationState = .preflighting(done: done, total: total)
+            }
+        }
+        let worker = Task.detached(priority: .userInitiated) {
+            await XMPPublicationPlanner.preflight(
+                input,
+                isCancelled: { cancelFlag.isSet },
+                progress: progress
+            )
+        }
+        xmpPublicationTask = Task { @MainActor [weak self] in
+            let plan = await worker.value
+            guard let self,
+                  self.xmpPublicationSessionToken == token else { return }
+            self.xmpPublicationTask = nil
+            self.xmpPublicationCancelFlag = nil
+            guard self.matchesCurrentSession(token) else {
+                self.finishXMPPublicationLifecycle()
+                return
+            }
+            if let plan {
+                self.xmpPublicationState = .awaitingConfirmation(plan)
+            } else {
+                self.finishXMPPublicationLifecycle()
+            }
+        }
+    }
+
+    func startXMPPublication(planID: UUID) {
+        guard !isNewFileOperationBlocked,
+              case .awaitingConfirmation(let plan) = xmpPublicationState,
+              plan.id == planID,
+              case .ready = phase else { return }
+        xmpPublicationGeneration &+= 1
+        let token = XMPPublicationSessionToken(
+            generation: xmpPublicationGeneration,
+            scanGeneration: scanGeneration,
+            folder: sourceFolder
+        )
+        let cancelFlag = XMPPublicationCancelFlag()
+        xmpPublicationSessionToken = token
+        xmpPublicationCancelFlag = cancelFlag
+        xmpPublicationState = .publishing(done: 0, total: plan.publishableCount)
+        let progress: XMPPublicationWorker.Progress = { [weak self] done, total in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.xmpPublicationSessionToken == token,
+                      case .publishing = self.xmpPublicationState else { return }
+                self.xmpPublicationState = .publishing(done: done, total: total)
+            }
+        }
+        let worker = Task.detached(priority: .userInitiated) {
+            await XMPPublicationWorker.publish(
+                plan,
+                cancelFlag: cancelFlag,
+                progress: progress
+            )
+        }
+        xmpPublicationTask = Task { @MainActor [weak self] in
+            let result = await worker.value
+            guard let self,
+                  self.xmpPublicationSessionToken == token else { return }
+            self.xmpPublicationTask = nil
+            self.xmpPublicationCancelFlag = nil
+            guard self.matchesCurrentSession(token) else {
+                self.finishXMPPublicationLifecycle()
+                return
+            }
+            self.xmpPublicationState = .finished(result)
+        }
+    }
+
+    func cancelXMPPublication() {
+        switch xmpPublicationState {
+        case .preflighting, .publishing:
+            xmpPublicationCancelFlag?.set()
+            xmpPublicationState = .cancelling
+        case .awaitingConfirmation, .finished, .failed:
+            finishXMPPublicationLifecycle()
+        case .idle, .cancelling:
+            break
+        }
+    }
+
+    func resetXMPPublication() {
+        guard !isXMPPublicationRunning else { return }
+        finishXMPPublicationLifecycle()
+    }
+
+    /// Folder transitions and Quit call this before changing session
+    /// identity. A requested cancellation waits until an in-progress atomic
+    /// replacement has either committed or rolled back its private temporary.
+    func cancelAndAwaitXMPPublication() async {
+        xmpPublicationCancelFlag?.set()
+        if isXMPPublicationRunning {
+            xmpPublicationState = .cancelling
+        }
+        let task = xmpPublicationTask
+        await task?.value
+        finishXMPPublicationLifecycle()
+    }
+
+    private func matchesCurrentSession(
+        _ token: XMPPublicationSessionToken
+    ) -> Bool {
+        token.scanGeneration == scanGeneration
+            && token.folder?.standardizedFileURL
+                == sourceFolder?.standardizedFileURL
+    }
+
+    private func finishXMPPublicationLifecycle() {
+        xmpPublicationGeneration &+= 1
+        xmpPublicationCancelFlag = nil
+        xmpPublicationTask = nil
+        xmpPublicationSessionToken = nil
+        xmpPublicationState = .idle
+    }
+
     /// The folder the export started from. Completion refuses to apply moved
     /// IDs to a different session even though the active-operation guards
     /// already prevent folder replacement.
@@ -2230,6 +2663,7 @@ final class SessionStore: ObservableObject {
     /// protection as operations that move originals.
     func exportWillStart(mode: ExportMode) -> Bool {
         guard !isNewFileOperationBlocked else { return false }
+        guard mode != .metadataXMP else { return false }
         videoPlayback.stop()
         operationRecoveryCause = nil
         activeFileOperation = mode == .copy ? .exportCopy : .exportMove
@@ -2246,6 +2680,7 @@ final class SessionStore: ObservableObject {
         requiresRecovery: Bool,
         interruptionMessage: String? = nil
     ) {
+        guard mode != .metadataXMP else { return }
         let expectedOperation: FileOperationKind = mode == .copy ? .exportCopy : .exportMove
         guard activeFileOperation == expectedOperation else { return }
         let expectedFolder = activeExportFolder
@@ -2849,12 +3284,16 @@ final class SessionStore: ObservableObject {
               case .ready = phase else { return nil }
         let currentEntries = items.flatMap { item in
             item.individualFiles.map { file in
-                let rating = file.ratingSnapshot
+                let metadata = file.metadataSnapshot
                 return SessionEntry(
                     filename: file.id,
                     pairedFilename: nil,
-                    rating: rating.rating.rawValue,
-                    ratedAt: rating.ratedAt,
+                    rating: metadata.rating.rawValue,
+                    ratedAt: metadata.ratedAt,
+                    stars: metadata.starRating,
+                    starsChangedAt: metadata.starsChangedAt,
+                    colorLabel: metadata.colorLabel,
+                    colorChangedAt: metadata.colorChangedAt,
                     fileIdentity: file.scannedIdentity
                 )
             }
@@ -2900,6 +3339,20 @@ final class SessionStore: ObservableObject {
     // MARK: - Going back to the welcome screen
 
     func closeSession() {
+        if hasXMPPublicationSessionState {
+            guard !isSessionTransitioning,
+                  activeFileOperation == nil,
+                  !isPreparingForTermination else { return }
+            isSessionTransitioning = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.cancelAndAwaitXMPPublication()
+                self.isExportPresented = false
+                self.isSessionTransitioning = false
+                self.closeSession()
+            }
+            return
+        }
         guard !isFileOperationRunning else { return }
         if isLegacySessionMigrationConfirmationPresented {
             closeLegacySessionWithoutMigrating()
@@ -2917,6 +3370,7 @@ final class SessionStore: ObservableObject {
     }
 
     private func finishClosingSession() {
+        finishXMPPublicationLifecycle()
         cancelScheduledSave()
         videoPlayback.stop()
         zoomMode = .fit

@@ -2,7 +2,7 @@ import Foundation
 
 enum SessionConstants {
     static let sidecarName = ".louppe_session.json"
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
     static let supportedSchemaVersions = 1...currentSchemaVersion
 }
 
@@ -10,6 +10,30 @@ enum Rating: String, Codable, Sendable {
     case undecided
     case yes
     case no
+}
+
+/// Portable XMP-style star value. Absence is deliberately distinct from one
+/// star: `nil` means the photographer has not assigned stars yet.
+enum StarRating: UInt8, Codable, CaseIterable, Hashable, Sendable {
+    case one = 1
+    case two = 2
+    case three = 3
+    case four = 4
+    case five = 5
+
+    var count: Int { Int(rawValue) }
+}
+
+/// Louppe's five interoperable color labels. XMP stores the corresponding
+/// English label text at the file boundary; the in-session value stays typed.
+enum PhotoColorLabel: String, Codable, CaseIterable, Hashable, Sendable {
+    case red
+    case yellow
+    case green
+    case blue
+    case purple
+
+    var displayName: String { rawValue.capitalized }
 }
 
 enum MediaKind: String, Hashable, Sendable {
@@ -29,43 +53,104 @@ enum RawJPEGPairingMode: String, Hashable, Sendable {
     case separate
 }
 
-struct PhotoFileRatingSnapshot: Equatable, Sendable {
+struct PhotoFileMetadataSnapshot: Equatable, Sendable {
     let fileID: String
     let rating: Rating
     let ratedAt: Date?
+    let starRating: StarRating?
+    let starsChangedAt: Date?
+    let colorLabel: PhotoColorLabel?
+    let colorChangedAt: Date?
+
+    init(
+        fileID: String,
+        rating: Rating,
+        ratedAt: Date?,
+        starRating: StarRating? = nil,
+        starsChangedAt: Date? = nil,
+        colorLabel: PhotoColorLabel? = nil,
+        colorChangedAt: Date? = nil
+    ) {
+        self.fileID = fileID
+        self.rating = rating
+        self.ratedAt = ratedAt
+        self.starRating = starRating
+        self.starsChangedAt = starsChangedAt
+        self.colorLabel = colorLabel
+        self.colorChangedAt = colorChangedAt
+    }
 }
 
+/// Compatibility spelling retained while decision-specific callers migrate.
+typealias PhotoFileRatingSnapshot = PhotoFileMetadataSnapshot
+
 /// The only frequently changing part of a physical file. `PhotoItem` values
-/// contain substantially more immutable scan metadata, so keeping this tiny
-/// pair behind shared storage lets culling update one file without copying the
-/// entire `@Published [PhotoItem]` session. A lock makes snapshots safe when a
-/// detached persistence/pairing worker reads a value-semantic item copy.
-private final class PhotoFileRatingStorage: @unchecked Sendable {
+/// contain substantially more immutable scan metadata, so keeping this small
+/// review-metadata value behind shared storage lets culling update one file
+/// without copying the entire `@Published [PhotoItem]` session. A lock makes
+/// complete snapshots safe for detached persistence and pairing workers.
+private final class PhotoFileMetadataStorage: @unchecked Sendable {
     private struct Value {
         var rating: Rating
         var ratedAt: Date?
+        var starRating: StarRating?
+        var starsChangedAt: Date?
+        var colorLabel: PhotoColorLabel?
+        var colorChangedAt: Date?
     }
 
     private let lock = NSLock()
     private var value: Value
 
-    init(rating: Rating, ratedAt: Date?) {
-        value = Value(rating: rating, ratedAt: ratedAt)
+    init(
+        rating: Rating,
+        ratedAt: Date?,
+        starRating: StarRating?,
+        starsChangedAt: Date?,
+        colorLabel: PhotoColorLabel?,
+        colorChangedAt: Date?
+    ) {
+        value = Value(
+            rating: rating,
+            ratedAt: ratedAt,
+            starRating: starRating,
+            starsChangedAt: starsChangedAt,
+            colorLabel: colorLabel,
+            colorChangedAt: colorChangedAt
+        )
     }
 
-    func snapshot(fileID: String) -> PhotoFileRatingSnapshot {
+    func snapshot(fileID: String) -> PhotoFileMetadataSnapshot {
         lock.lock()
         defer { lock.unlock() }
-        return PhotoFileRatingSnapshot(
+        return PhotoFileMetadataSnapshot(
             fileID: fileID,
             rating: value.rating,
-            ratedAt: value.ratedAt
+            ratedAt: value.ratedAt,
+            starRating: value.starRating,
+            starsChangedAt: value.starsChangedAt,
+            colorLabel: value.colorLabel,
+            colorChangedAt: value.colorChangedAt
         )
     }
 
     func set(rating: Rating, ratedAt: Date?) {
         lock.lock()
-        value = Value(rating: rating, ratedAt: ratedAt)
+        value.rating = rating
+        value.ratedAt = ratedAt
+        lock.unlock()
+    }
+
+    func restore(_ snapshot: PhotoFileMetadataSnapshot) {
+        lock.lock()
+        value = Value(
+            rating: snapshot.rating,
+            ratedAt: snapshot.ratedAt,
+            starRating: snapshot.starRating,
+            starsChangedAt: snapshot.starsChangedAt,
+            colorLabel: snapshot.colorLabel,
+            colorChangedAt: snapshot.colorChangedAt
+        )
         lock.unlock()
     }
 
@@ -78,6 +163,20 @@ private final class PhotoFileRatingStorage: @unchecked Sendable {
     func setRatedAt(_ ratedAt: Date?) {
         lock.lock()
         value.ratedAt = ratedAt
+        lock.unlock()
+    }
+
+    func setStars(_ starRating: StarRating?, changedAt: Date?) {
+        lock.lock()
+        value.starRating = starRating
+        value.starsChangedAt = changedAt
+        lock.unlock()
+    }
+
+    func setColor(_ colorLabel: PhotoColorLabel?, changedAt: Date?) {
+        lock.lock()
+        value.colorLabel = colorLabel
+        value.colorChangedAt = changedAt
         lock.unlock()
     }
 }
@@ -147,20 +246,29 @@ struct PhotoFile: Identifiable, Sendable {
     /// False only for a hidden JPEG partner whose filesystem facts are known
     /// but whose EXIF has deliberately not been opened yet.
     let metadataIsLoaded: Bool
-    private let ratingStorage: PhotoFileRatingStorage
+    private let metadataStorage: PhotoFileMetadataStorage
 
     var rating: Rating {
         get { ratingSnapshot.rating }
-        nonmutating set { ratingStorage.setRating(newValue) }
+        nonmutating set { metadataStorage.setRating(newValue) }
     }
 
     var ratedAt: Date? {
         get { ratingSnapshot.ratedAt }
-        nonmutating set { ratingStorage.setRatedAt(newValue) }
+        nonmutating set { metadataStorage.setRatedAt(newValue) }
     }
 
+    var starRating: StarRating? { metadataSnapshot.starRating }
+    var starsChangedAt: Date? { metadataSnapshot.starsChangedAt }
+    var colorLabel: PhotoColorLabel? { metadataSnapshot.colorLabel }
+    var colorChangedAt: Date? { metadataSnapshot.colorChangedAt }
+
     var ratingSnapshot: PhotoFileRatingSnapshot {
-        ratingStorage.snapshot(fileID: id)
+        metadataSnapshot
+    }
+
+    var metadataSnapshot: PhotoFileMetadataSnapshot {
+        metadataStorage.snapshot(fileID: id)
     }
 
     init(
@@ -184,7 +292,11 @@ struct PhotoFile: Identifiable, Sendable {
         scannedIdentity: FileOperationJournal.FileIdentity? = nil,
         metadataIsLoaded: Bool = true,
         rating: Rating = .undecided,
-        ratedAt: Date? = nil
+        ratedAt: Date? = nil,
+        starRating: StarRating? = nil,
+        starsChangedAt: Date? = nil,
+        colorLabel: PhotoColorLabel? = nil,
+        colorChangedAt: Date? = nil
     ) {
         let displayName = url.lastPathComponent
         let fileTypeLabel = Self.makeFileTypeLabel(url: url, mediaKind: mediaKind)
@@ -216,9 +328,13 @@ struct PhotoFile: Identifiable, Sendable {
         self.fileSize = fileSize
         self.identityStorage = PhotoFileIdentityStorage(scannedIdentity)
         self.metadataIsLoaded = metadataIsLoaded
-        self.ratingStorage = PhotoFileRatingStorage(
+        self.metadataStorage = PhotoFileMetadataStorage(
             rating: rating,
-            ratedAt: ratedAt
+            ratedAt: ratedAt,
+            starRating: starRating,
+            starsChangedAt: starsChangedAt,
+            colorLabel: colorLabel,
+            colorChangedAt: colorChangedAt
         )
 
         var parts = [displayName, fileTypeLabel, mediaKind.label]
@@ -230,7 +346,19 @@ struct PhotoFile: Identifiable, Sendable {
     }
 
     func setRating(_ rating: Rating, ratedAt: Date?) {
-        ratingStorage.set(rating: rating, ratedAt: ratedAt)
+        metadataStorage.set(rating: rating, ratedAt: ratedAt)
+    }
+
+    func setStars(_ starRating: StarRating?, changedAt: Date?) {
+        metadataStorage.setStars(starRating, changedAt: changedAt)
+    }
+
+    func setColor(_ colorLabel: PhotoColorLabel?, changedAt: Date?) {
+        metadataStorage.setColor(colorLabel, changedAt: changedAt)
+    }
+
+    func restoreMetadata(_ snapshot: PhotoFileMetadataSnapshot) {
+        metadataStorage.restore(snapshot)
     }
 
     /// Refreshes the scan-time checkpoint after a verified Louppe-owned
@@ -254,7 +382,7 @@ struct PhotoFile: Identifiable, Sendable {
     }
 }
 
-enum PhotoItemRatingState: Equatable, Sendable {
+enum PhotoItemRatingState: Equatable, Hashable, Sendable {
     case yes
     case no
     case undecided
@@ -265,6 +393,57 @@ enum PhotoItemRatingState: Equatable, Sendable {
         case .yes: return .yes
         case .no: return .no
         case .undecided, .mixed: return .undecided
+        }
+    }
+}
+
+enum PhotoItemStarRatingState: Equatable, Hashable, Sendable {
+    case unrated
+    case stars(StarRating)
+    case mixed
+}
+
+enum PhotoItemColorLabelState: Equatable, Hashable, Sendable {
+    case none
+    case label(PhotoColorLabel)
+    case mixed
+}
+
+/// One coherent read of every mutable metadata dimension represented by a
+/// projected item. Each physical file contributes one complete lock-backed
+/// snapshot, so filtering and export planning cannot combine fields captured
+/// at different moments.
+struct PhotoItemMetadataState: Equatable, Sendable {
+    let decision: PhotoItemRatingState
+    let stars: PhotoItemStarRatingState
+    let color: PhotoItemColorLabelState
+
+    init(
+        primary: PhotoFileMetadataSnapshot,
+        paired: PhotoFileMetadataSnapshot?
+    ) {
+        if let paired, paired.rating != primary.rating {
+            decision = .mixed
+        } else {
+            switch primary.rating {
+            case .yes: decision = .yes
+            case .no: decision = .no
+            case .undecided: decision = .undecided
+            }
+        }
+
+        if let paired, paired.starRating != primary.starRating {
+            stars = .mixed
+        } else {
+            stars = primary.starRating.map(PhotoItemStarRatingState.stars)
+                ?? .unrated
+        }
+
+        if let paired, paired.colorLabel != primary.colorLabel {
+            color = .mixed
+        } else {
+            color = primary.colorLabel.map(PhotoItemColorLabelState.label)
+                ?? .none
         }
     }
 }
@@ -430,22 +609,14 @@ struct PhotoItem: Identifiable, Sendable {
     }
     let searchableText: String
 
-    var ratingState: PhotoItemRatingState {
-        let primaryRating = primaryFile.rating
-        guard let pairedFile else {
-            switch primaryRating {
-            case .yes: return .yes
-            case .no: return .no
-            case .undecided: return .undecided
-            }
-        }
-        guard pairedFile.rating == primaryRating else { return .mixed }
-        switch primaryRating {
-        case .yes: return .yes
-        case .no: return .no
-        case .undecided: return .undecided
-        }
+    var metadataState: PhotoItemMetadataState {
+        PhotoItemMetadataState(
+            primary: primaryFile.metadataSnapshot,
+            paired: pairedFile?.metadataSnapshot
+        )
     }
+
+    var ratingState: PhotoItemRatingState { metadataState.decision }
 
     /// Existing filtering/export code consumes the three-state rating. A
     /// mixed pair behaves conservatively as unresolved until the user rates
@@ -476,14 +647,31 @@ struct PhotoItem: Identifiable, Sendable {
         return files
     }
     var ratingSnapshots: [PhotoFileRatingSnapshot] {
-        individualFiles.map(\.ratingSnapshot)
+        metadataSnapshots
     }
+    var metadataSnapshots: [PhotoFileMetadataSnapshot] {
+        individualFiles.map(\.metadataSnapshot)
+    }
+
+    var starRatingState: PhotoItemStarRatingState { metadataState.stars }
+
+    var colorLabelState: PhotoItemColorLabelState { metadataState.color }
 
     /// Update the pair atomically per physical file while keeping PhotoItem's
     /// much larger immutable metadata value untouched.
     func setRating(_ rating: Rating, ratedAt: Date?) {
         primaryFile.setRating(rating, ratedAt: ratedAt)
         pairedFile?.setRating(rating, ratedAt: ratedAt)
+    }
+
+    func setStars(_ starRating: StarRating?, changedAt: Date?) {
+        primaryFile.setStars(starRating, changedAt: changedAt)
+        pairedFile?.setStars(starRating, changedAt: changedAt)
+    }
+
+    func setColor(_ colorLabel: PhotoColorLabel?, changedAt: Date?) {
+        primaryFile.setColor(colorLabel, changedAt: changedAt)
+        pairedFile?.setColor(colorLabel, changedAt: changedAt)
     }
 
     init(primaryFile: PhotoFile, pairedFile: PhotoFile? = nil) {
@@ -515,7 +703,11 @@ struct PhotoItem: Identifiable, Sendable {
         fileSize: Int64,
         pairedFileSize: Int64 = 0,
         rating: Rating = .undecided,
-        ratedAt: Date? = nil
+        ratedAt: Date? = nil,
+        starRating: StarRating? = nil,
+        starsChangedAt: Date? = nil,
+        colorLabel: PhotoColorLabel? = nil,
+        colorChangedAt: Date? = nil
     ) {
         primaryFile = PhotoFile(
             id: id,
@@ -538,7 +730,11 @@ struct PhotoItem: Identifiable, Sendable {
                 at: primaryURL
             ),
             rating: rating,
-            ratedAt: ratedAt
+            ratedAt: ratedAt,
+            starRating: starRating,
+            starsChangedAt: starsChangedAt,
+            colorLabel: colorLabel,
+            colorChangedAt: colorChangedAt
         )
         if let pairedURL {
             let parent = (id as NSString).deletingLastPathComponent
@@ -558,7 +754,11 @@ struct PhotoItem: Identifiable, Sendable {
                 ),
                 metadataIsLoaded: false,
                 rating: rating,
-                ratedAt: ratedAt
+                ratedAt: ratedAt,
+                starRating: starRating,
+                starsChangedAt: starsChangedAt,
+                colorLabel: colorLabel,
+                colorChangedAt: colorChangedAt
             )
         } else {
             pairedFile = nil
@@ -608,6 +808,30 @@ struct PhotoItem: Identifiable, Sendable {
                 snapshot.rating,
                 ratedAt: snapshot.ratedAt
             )
+        }
+    }
+
+    func restoreStars(_ snapshot: PhotoFileMetadataSnapshot) {
+        if primaryFile.id == snapshot.fileID {
+            primaryFile.setStars(snapshot.starRating, changedAt: snapshot.starsChangedAt)
+        } else if pairedFile?.id == snapshot.fileID {
+            pairedFile?.setStars(snapshot.starRating, changedAt: snapshot.starsChangedAt)
+        }
+    }
+
+    func restoreColor(_ snapshot: PhotoFileMetadataSnapshot) {
+        if primaryFile.id == snapshot.fileID {
+            primaryFile.setColor(snapshot.colorLabel, changedAt: snapshot.colorChangedAt)
+        } else if pairedFile?.id == snapshot.fileID {
+            pairedFile?.setColor(snapshot.colorLabel, changedAt: snapshot.colorChangedAt)
+        }
+    }
+
+    func restoreMetadata(_ snapshot: PhotoFileMetadataSnapshot) {
+        if primaryFile.id == snapshot.fileID {
+            primaryFile.restoreMetadata(snapshot)
+        } else if pairedFile?.id == snapshot.fileID {
+            pairedFile?.restoreMetadata(snapshot)
         }
     }
 
@@ -733,6 +957,178 @@ enum ExportMode: Equatable, Sendable {
     /// and the move is not undoable in Louppe — the files themselves stay
     /// intact at the destination.
     case move
+    /// Merge Louppe's current review metadata into sidecars beside the
+    /// originals. No media is copied, moved, or embedded.
+    case metadataXMP
+}
+
+/// Compact star choices used by Export. Mixed pairs deliberately match only
+/// `any`, because choosing either an empty or concrete value must never guess
+/// which physical file the photographer intended.
+enum ExportStarSelection: Hashable, CaseIterable, Sendable {
+    case any
+    case unrated
+    case one
+    case two
+    case three
+    case four
+    case five
+
+    var label: String {
+        switch self {
+        case .any: return "Any rating"
+        case .unrated: return "Unrated only"
+        case .one: return "1 star only"
+        case .two: return "2 stars only"
+        case .three: return "3 stars only"
+        case .four: return "4 stars only"
+        case .five: return "5 stars only"
+        }
+    }
+
+    fileprivate var rating: StarRating? {
+        switch self {
+        case .any, .unrated: return nil
+        case .one: return .one
+        case .two: return .two
+        case .three: return .three
+        case .four: return .four
+        case .five: return .five
+        }
+    }
+}
+
+enum ExportColorSelection: Hashable, CaseIterable, Sendable {
+    case any
+    case none
+    case red
+    case yellow
+    case green
+    case blue
+    case purple
+
+    var label: String {
+        switch self {
+        case .any: return "Any color"
+        case .none: return "No color only"
+        case .red: return "Red only"
+        case .yellow: return "Yellow only"
+        case .green: return "Green only"
+        case .blue: return "Blue only"
+        case .purple: return "Purple only"
+        }
+    }
+
+    fileprivate var color: PhotoColorLabel? {
+        switch self {
+        case .any, .none: return nil
+        case .red: return .red
+        case .yellow: return .yellow
+        case .green: return .green
+        case .blue: return .blue
+        case .purple: return .purple
+        }
+    }
+}
+
+/// Pure AND predicate shared by Export's count snapshot and execution input.
+struct ExportSelectionPredicate: Equatable, Sendable {
+    var decisions: Set<Rating> = [.yes]
+    var stars: ExportStarSelection = .any
+    var color: ExportColorSelection = .any
+
+    func matches(_ item: PhotoItem) -> Bool {
+        matches(item.metadataState)
+    }
+
+    func matches(_ metadata: PhotoItemMetadataState) -> Bool {
+        guard decisions.contains(metadata.decision.effectiveRating) else {
+            return false
+        }
+        switch stars {
+        case .any:
+            break
+        case .unrated:
+            guard metadata.stars == .unrated else { return false }
+        default:
+            guard let rating = stars.rating,
+                  metadata.stars == .stars(rating) else { return false }
+        }
+        switch color {
+        case .any:
+            break
+        case .none:
+            guard metadata.color == .none else { return false }
+        default:
+            guard let color = color.color,
+                  metadata.color == .label(color) else { return false }
+        }
+        return true
+    }
+}
+
+/// One prepared pass over the current session. SwiftUI reads these cached
+/// totals instead of repeatedly filtering the whole item array while laying
+/// out the Export sheet.
+struct ExportSelectionSnapshot: Equatable, Sendable {
+    static let empty = ExportSelectionSnapshot(
+        itemIndices: [],
+        physicalFileCount: 0,
+        mixedDecisionCount: 0,
+        mixedStarsCount: 0,
+        mixedColorCount: 0
+    )
+
+    let itemIndices: [Int]
+    let physicalFileCount: Int
+    let mixedDecisionCount: Int
+    let mixedStarsCount: Int
+    let mixedColorCount: Int
+
+    var itemCount: Int { itemIndices.count }
+
+    init(items: [PhotoItem], predicate: ExportSelectionPredicate) {
+        var indices: [Int] = []
+        var files = 0
+        var mixedDecisions = 0
+        var mixedStars = 0
+        var mixedColors = 0
+        indices.reserveCapacity(items.count)
+        for (index, item) in items.enumerated() {
+            let metadata = item.metadataState
+            guard predicate.matches(metadata) else { continue }
+            indices.append(index)
+            files += item.allURLs.count
+            if metadata.decision == .mixed { mixedDecisions += 1 }
+            if metadata.stars == .mixed { mixedStars += 1 }
+            if metadata.color == .mixed { mixedColors += 1 }
+        }
+        self.init(
+            itemIndices: indices,
+            physicalFileCount: files,
+            mixedDecisionCount: mixedDecisions,
+            mixedStarsCount: mixedStars,
+            mixedColorCount: mixedColors
+        )
+    }
+
+    private init(
+        itemIndices: [Int],
+        physicalFileCount: Int,
+        mixedDecisionCount: Int,
+        mixedStarsCount: Int,
+        mixedColorCount: Int
+    ) {
+        self.itemIndices = itemIndices
+        self.physicalFileCount = physicalFileCount
+        self.mixedDecisionCount = mixedDecisionCount
+        self.mixedStarsCount = mixedStarsCount
+        self.mixedColorCount = mixedColorCount
+    }
+
+    func selectedItems(from items: [PhotoItem]) -> [PhotoItem] {
+        itemIndices.compactMap { items.indices.contains($0) ? items[$0] : nil }
+    }
 }
 
 // MARK: - Session sort
@@ -751,6 +1147,9 @@ struct PhotoSort: Equatable, Sendable {
         case shutterSpeed
         case iso
         case duration
+        case decision
+        case starRating
+        case colorLabel
 
         var ascendingLabel: String {
             switch self {
@@ -761,6 +1160,9 @@ struct PhotoSort: Equatable, Sendable {
             case .shutterSpeed: return "Fastest first"
             case .iso: return "Lowest first"
             case .duration: return "Shortest first"
+            case .decision: return "Yes first"
+            case .starRating: return "Lowest first"
+            case .colorLabel: return "Red to Purple"
             }
         }
 
@@ -773,6 +1175,9 @@ struct PhotoSort: Equatable, Sendable {
             case .shutterSpeed: return "Slowest first"
             case .iso: return "Highest first"
             case .duration: return "Longest first"
+            case .decision: return "No first"
+            case .starRating: return "Highest first"
+            case .colorLabel: return "Purple to Red"
             }
         }
 
@@ -807,6 +1212,12 @@ struct PhotoSort: Equatable, Sendable {
             case .duration:
                 return roundedDurationBucket(a.duration)
                     == roundedDurationBucket(b.duration)
+            case .decision:
+                return a.ratingState == b.ratingState
+            case .starRating:
+                return a.starRatingState == b.starRatingState
+            case .colorLabel:
+                return a.colorLabelState == b.colorLabelState
             }
         }
 
@@ -840,6 +1251,26 @@ struct PhotoSort: Equatable, Sendable {
                 return "ISO \(MetadataFormat.iso(iso))"
             case .duration:
                 return item.duration.map { MediaDurationFormat.display($0) } ?? "Unknown duration"
+            case .decision:
+                switch item.ratingState {
+                case .yes: return "Yes"
+                case .undecided: return "Undecided"
+                case .mixed: return "Mixed"
+                case .no: return "No"
+                }
+            case .starRating:
+                switch item.starRatingState {
+                case .unrated: return "Unrated"
+                case .stars(let rating):
+                    return rating == .one ? "1 star" : "\(rating.count) stars"
+                case .mixed: return "Mixed"
+                }
+            case .colorLabel:
+                switch item.colorLabelState {
+                case .none: return "None"
+                case .label(let label): return label.displayName
+                case .mixed: return "Mixed"
+                }
             }
         }
 
@@ -871,6 +1302,12 @@ struct PhotoSort: Equatable, Sendable {
                 value = .numberBits(groupNumberBits(item.iso))
             case .duration:
                 value = .roundedDuration(roundedDurationBucket(item.duration))
+            case .decision:
+                value = .decision(item.ratingState)
+            case .starRating:
+                value = .stars(item.starRatingState)
+            case .colorLabel:
+                value = .color(item.colorLabelState)
             }
             return PhotoGroup.ID(key: self, value: value)
         }
@@ -936,7 +1373,99 @@ struct PhotoSort: Equatable, Sendable {
             return optionalValuesInOrder(a.duration, b.duration, ascending: ascending) {
                 dateThenNameInOrder(a, b)
             }
+        case .decision:
+            let aRank = decisionRank(a.ratingState)
+            let bRank = decisionRank(b.ratingState)
+            if aRank != bRank { return ascending ? aRank < bRank : aRank > bRank }
+            return dateThenNameInOrder(a, b)
+        case .starRating:
+            return metadataValuesInOrder(
+                starSortValue(a.starRatingState),
+                starSortValue(b.starRatingState),
+                ascending: ascending
+            ) { dateThenNameInOrder(a, b) }
+        case .colorLabel:
+            return metadataValuesInOrder(
+                colorSortValue(a.colorLabelState),
+                colorSortValue(b.colorLabelState),
+                ascending: ascending
+            ) { dateThenNameInOrder(a, b) }
         }
+    }
+
+    /// PreparedSessionIndex captures mutable metadata once per item before a
+    /// metadata sort. This overload avoids taking locks again for every
+    /// O(N log N) comparison while retaining the same stable tie-breakers.
+    func areInOrder(
+        _ a: PhotoItem,
+        metadata aMetadata: PhotoItemMetadataState,
+        _ b: PhotoItem,
+        metadata bMetadata: PhotoItemMetadataState
+    ) -> Bool {
+        switch key {
+        case .decision:
+            let aRank = decisionRank(aMetadata.decision)
+            let bRank = decisionRank(bMetadata.decision)
+            if aRank != bRank { return ascending ? aRank < bRank : aRank > bRank }
+            return dateThenNameInOrder(a, b)
+        case .starRating:
+            return metadataValuesInOrder(
+                starSortValue(aMetadata.stars),
+                starSortValue(bMetadata.stars),
+                ascending: ascending
+            ) { dateThenNameInOrder(a, b) }
+        case .colorLabel:
+            return metadataValuesInOrder(
+                colorSortValue(aMetadata.color),
+                colorSortValue(bMetadata.color),
+                ascending: ascending
+            ) { dateThenNameInOrder(a, b) }
+        default:
+            return areInOrder(a, b)
+        }
+    }
+
+    private func decisionRank(_ state: PhotoItemRatingState) -> Int {
+        switch state {
+        case .yes: return 0
+        case .undecided: return 1
+        case .mixed: return 2
+        case .no: return 3
+        }
+    }
+
+    /// The first component distinguishes a meaningful value from a special
+    /// missing/Mixed bucket. Only the meaningful rank reverses direction.
+    private func starSortValue(_ state: PhotoItemStarRatingState) -> (bucket: Int, rank: Int) {
+        switch state {
+        case .stars(let rating): return (0, rating.count)
+        case .unrated: return (1, 0)
+        case .mixed: return (1, 1)
+        }
+    }
+
+    private func colorSortValue(_ state: PhotoItemColorLabelState) -> (bucket: Int, rank: Int) {
+        switch state {
+        case .label(let label):
+            return (0, PhotoColorLabel.allCases.firstIndex(of: label) ?? 0)
+        case .none: return (1, 0)
+        case .mixed: return (1, 1)
+        }
+    }
+
+    private func metadataValuesInOrder(
+        _ a: (bucket: Int, rank: Int),
+        _ b: (bucket: Int, rank: Int),
+        ascending: Bool,
+        tie: () -> Bool
+    ) -> Bool {
+        if a.bucket != b.bucket { return a.bucket < b.bucket }
+        if a.rank != b.rank {
+            return a.bucket == 0
+                ? (ascending ? a.rank < b.rank : a.rank > b.rank)
+                : a.rank < b.rank
+        }
+        return tie()
     }
 
     /// Finder-style name comparison (numbers compare numerically, so
@@ -1019,6 +1548,9 @@ struct PhotoGroup: Equatable, Identifiable, Sendable {
             case mediaKind(MediaKind)
             case numberBits(UInt64?)
             case roundedDuration(Int?)
+            case decision(PhotoItemRatingState)
+            case stars(PhotoItemStarRatingState)
+            case color(PhotoItemColorLabelState)
         }
 
         let key: PhotoSort.Key?
@@ -1188,6 +1720,11 @@ struct PhotoFilter: Equatable {
     var excludedLenses: Set<String> = []
     /// Same exclusion pattern for subfolder labels ("None" = the folder root).
     var excludedSubfolders: Set<String> = []
+    /// Review metadata facets use the same all-included-by-default exclusion
+    /// convention as the existing file/camera/lens facets.
+    var excludedDecisionStates: Set<PhotoItemRatingState> = []
+    var excludedStarStates: Set<PhotoItemStarRatingState> = []
+    var excludedColorStates: Set<PhotoItemColorLabelState> = []
 
     var isActive: Bool {
         !searchText.trimmingCharacters(in: .whitespaces).isEmpty
@@ -1201,6 +1738,9 @@ struct PhotoFilter: Equatable {
             || !excludedCameras.isEmpty
             || !excludedLenses.isEmpty
             || !excludedSubfolders.isEmpty
+            || !excludedDecisionStates.isEmpty
+            || !excludedStarStates.isEmpty
+            || !excludedColorStates.isEmpty
     }
 
 }
@@ -1213,6 +1753,9 @@ struct PreparedPhotoFilter {
     let excludedCameras: Set<String>
     let excludedLenses: Set<String>
     let excludedSubfolders: Set<String>
+    let excludedDecisionStates: Set<PhotoItemRatingState>
+    let excludedStarStates: Set<PhotoItemStarRatingState>
+    let excludedColorStates: Set<PhotoItemColorLabelState>
     let dateRange: Range<Date>?
     let usesSpecificDates: Bool
     let excludedDates: Set<Date>
@@ -1229,6 +1772,9 @@ struct PreparedPhotoFilter {
         excludedCameras = filter.excludedCameras
         excludedLenses = filter.excludedLenses
         excludedSubfolders = filter.excludedSubfolders
+        excludedDecisionStates = filter.excludedDecisionStates
+        excludedStarStates = filter.excludedStarStates
+        excludedColorStates = filter.excludedColorStates
         usesSpecificDates = filter.dateEnabled && filter.dateMode == .specificDates
         excludedDates = filter.excludedDates
         excludesUnknownDate = filter.excludesUnknownDate
@@ -1269,6 +1815,14 @@ struct PreparedPhotoFilter {
         if excludedCameras.contains(item.cameraLabel) { return false }
         if excludedLenses.contains(item.lensLabel) { return false }
         if excludedSubfolders.contains(item.subfolderLabel) { return false }
+        if !excludedDecisionStates.isEmpty
+            || !excludedStarStates.isEmpty
+            || !excludedColorStates.isEmpty {
+            let metadata = item.metadataState
+            if excludedDecisionStates.contains(metadata.decision) { return false }
+            if excludedStarStates.contains(metadata.stars) { return false }
+            if excludedColorStates.contains(metadata.color) { return false }
+        }
         if let dateRange {
             guard let date = item.captureDate, dateRange.contains(date) else { return false }
         }
@@ -1317,6 +1871,12 @@ struct SessionEntry: Codable, Sendable {
     var pairedFilename: String?
     var rating: String
     var ratedAt: Date?
+    /// Added in schema 5. Missing keys in schema 1–4 decode as nil, preserving
+    /// the distinction between an absent value and an explicit one-star mark.
+    var stars: StarRating? = nil
+    var starsChangedAt: Date? = nil
+    var colorLabel: PhotoColorLabel? = nil
+    var colorChangedAt: Date? = nil
     /// Required by schema 4. Older sidecars remain readable for one-way
     /// migration, but current ratings are restored only onto this exact
     /// scanned physical file rather than whichever file now owns the path.
@@ -1349,6 +1909,10 @@ struct SessionRatingIndex {
     struct Value: Equatable {
         let rating: Rating
         let ratedAt: Date?
+        let starRating: StarRating?
+        let starsChangedAt: Date?
+        let colorLabel: PhotoColorLabel?
+        let colorChangedAt: Date?
         let fileIdentity: FileOperationJournal.FileIdentity?
     }
 
@@ -1423,10 +1987,22 @@ struct SessionRatingIndex {
         var legacyValues: [Data: Value] = [:]
         var identityValues: [PersistedIdentityKey: IdentityCandidate] = [:]
         var physicalFileIDBytes = Set<Data>()
+        let supportsNativeMetadata = session.version >= 5
         for entry in session.entries {
             let value = Value(
                 rating: Rating(rawValue: entry.rating) ?? .undecided,
                 ratedAt: entry.ratedAt,
+                // Schema 5 introduced these fields. Keep older schemas
+                // decision-only even if a hand-edited or downgraded document
+                // contains keys its declared version does not own.
+                starRating: supportsNativeMetadata ? entry.stars : nil,
+                starsChangedAt: supportsNativeMetadata
+                    ? entry.starsChangedAt
+                    : nil,
+                colorLabel: supportsNativeMetadata ? entry.colorLabel : nil,
+                colorChangedAt: supportsNativeMetadata
+                    ? entry.colorChangedAt
+                    : nil,
                 fileIdentity: entry.fileIdentity
             )
             if usesExactIDs {

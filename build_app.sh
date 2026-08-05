@@ -41,6 +41,10 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" \
 cp .build/release/Louppe "$APP_DIR/Contents/MacOS/Louppe"
 cp AppIcon/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 cp CHANGELOG.md "$APP_DIR/Contents/Resources/Version History.md"
+cp ThirdPartyLicenses/XMPCore-BSD-3-Clause.txt \
+    "$APP_DIR/Contents/Resources/XMPCore License.txt"
+cp ThirdPartyLicenses/Expat-MIT.txt \
+    "$APP_DIR/Contents/Resources/Expat License.txt"
 
 SPARKLE_FRAMEWORK="$(find .build/artifacts -type d \
     -path '*/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework' \

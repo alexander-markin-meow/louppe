@@ -68,8 +68,21 @@ struct PreparedSessionIndex {
             sortedIndices = Array(items.indices)
             return
         }
-        sortedIndices = items.indices.sorted {
-            sort.areInOrder(items[$0], items[$1])
+        switch sort.key {
+        case .decision, .starRating, .colorLabel:
+            let metadata = items.map(\.metadataState)
+            sortedIndices = items.indices.sorted {
+                sort.areInOrder(
+                    items[$0],
+                    metadata: metadata[$0],
+                    items[$1],
+                    metadata: metadata[$1]
+                )
+            }
+        default:
+            sortedIndices = items.indices.sorted {
+                sort.areInOrder(items[$0], items[$1])
+            }
         }
     }
 

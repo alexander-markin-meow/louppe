@@ -33,12 +33,12 @@ cannot verify the developer. Right-click Louppe, choose **Open**, then choose
 4. Press **⌘E** to copy your chosen photos to another folder.
 
 Most photo and video formats are supported; support for more file types is
-planned. Filters and sorting cover ratings, dates, folders, file types, camera
-details, media type, and video length.
+planned. Filters and sorting cover decisions, star ratings, color labels,
+dates, folders, file types, camera details, media type, and video length.
 
 Matching RAW+JPEG files are grouped by default, including across subfolders
 when the filename match is unambiguous; you can separate or regroup them. RAW
-and JPEG each keep their own rating.
+and JPEG each keep their own decision, stars, and color label.
 
 For close inspection, Gallery offers a fast Fit view, a phone-sized preview
 (**A**), and true 100% zoom (**S**). The Info panel includes metadata, a
@@ -52,6 +52,7 @@ histogram, and clipping information. Press **X** to mark clipped areas.
 |---|---|
 | **F** | Mark Yes and move to the next undecided item |
 | **D** | Mark No and move to the next undecided item |
+| **0–5** | Clear stars or assign 1–5 stars without changing the Yes/No decision |
 | **← / →** | Go to the previous / next item |
 | **↑ / ↓** | Gallery: previous / next item. Grid: previous / next row |
 | **Space** | Play or pause a video. On a photo, go to the next item |
@@ -68,8 +69,8 @@ histogram, and clipping information. Press **X** to mark clipped areas.
 | Key | What it does |
 |---|---|
 | **E** or **⌘E** | Open Export |
-| **R** | Clear all ratings. Large sets ask for confirmation; **Return** confirms |
-| **Z** or **⌘Z** | Undo the last rating, rating reset, or Trash action |
+| **R** | Clear all Yes/No decisions. Large sets ask for confirmation; **Return** confirms |
+| **Z** or **⌘Z** | Undo the last decision, star, color-label, decision reset, or Trash action |
 | **⌘O** | Open a different folder |
 | **⌘R** | Scan the current folder again |
 | **⌘A** | Select every item currently shown by the filter |
@@ -77,7 +78,7 @@ histogram, and clipping information. Press **X** to mark clipped areas.
 | **Esc** | Cancel a scan or clear the current selection |
 | **⌘⌫** | Move the selection to the Trash immediately, without a dialog. **⌘Z** restores it |
 
-Letter review shortcuts such as F, D, and G stay active after clicking Rating,
+Letter review shortcuts such as F, D, and G stay active after clicking Decision,
 View, toolbar, or video controls. When a control has keyboard focus, Space,
 Tab, Escape, and the arrow keys remain available to that control. Louppe also
 leaves every shortcut alone while you are editing or selecting text, or
@@ -86,22 +87,46 @@ responding to a dialog, sheet, or popover.
 ## Mouse and trackpad
 
 - In Grid, click a photo to select it immediately. Click its status circle to
-  change its rating. Double-click the photo to open it in Gallery. These
+  change its Yes/No decision. Double-click the photo to open it in Gallery. These
   actions keep the Grid at the same scroll position.
 - **Shift-click** selects a range. **Command-click** adds or removes one item.
 - Drag across Grid photos to select several of them.
 - In Gallery, double-click a point on a photo to inspect that area at true
   100% size. Double-click again to return to Fit.
 
-Louppe also supports VoiceOver. Ratings and controls do not rely on color
+Louppe also supports VoiceOver. Decisions, stars, labels, and controls do not rely on color
 alone, so the main review workflow can be completed with the keyboard.
 
 ## Keeping your files safe
 
-- Export works with any mix of Yes, No, and Undecided items. It uses
-  **Copy to…** by default. **Move to…** is available when the destination is
+- Export combines decisions, stars, and colors, so only items matching all
+  selected metadata are included. It uses **Copy** by default. **Move** is
+  available when the destination is
   on the same storage volume and uses atomic filesystem renames; use Copy for
-  another drive or card.
+  another drive or card. **Metadata (XMP)** safely writes or merges sidecars
+  beside the selected originals without copying, moving, or embedding media.
+  Choose Universal XMP, Lightroom Classic, Bridge, Capture One, or darktable
+  so decisions use the intended portable representation; stars and colors
+  always keep their native XMP fields.
+- Copy and Move now offer **Include XMP sidecars**. It starts off when the
+  selected photos have no recognized XMP and starts on when at least one does;
+  a manual choice remains in force until the Export sheet closes. With it on,
+  Louppe creates or safely merges the destination stem packet and carries
+  extension-qualified application packets unchanged. Copy never edits the
+  source packet. Move leaves XMP behind when the option is off; when it is on,
+  a shared RAW+JPEG packet is copied if a same-stem member stays behind and is
+  transferred only when the whole family moves. Lightroom Classic `.acr`
+  heavy-edit companions are never included or modified; Export warns when an
+  exact associated companion will remain in the source folder.
+- Metadata (XMP) inspects every same-stem family before writing. It shows
+  creates, updates, already-current packets, unsupported files, and conflicts,
+  then publishes through three bounded background lanes. Existing edit data
+  and unrelated keywords survive; replacing or removing an external color
+  label requires explicit confirmation. A stop, folder change, rescan, or Quit waits
+  for an atomic sidecar boundary, and an externally changed packet is skipped
+  instead of overwritten. Sidecars for JPEG, TIFF, DNG, HEIC, and PNG are
+  best-effort because some applications expect metadata embedded in those
+  formats; Louppe never modifies the original to work around that limitation.
 - Export checks the destination before starting. A long copy can be stopped
   safely, and a RAW+JPEG pair never gets left half-copied. Louppe prevents
   automatic system sleep while files are moving (the display may still turn

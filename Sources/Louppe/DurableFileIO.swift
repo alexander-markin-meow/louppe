@@ -164,6 +164,94 @@ enum DurableFileIO {
         try syncDirectory(parent, fullSync: fullSync)
     }
 
+    /// Publishes a brand-new file without ever replacing an entry that appears
+    /// after preflight. XMP sidecar creation uses this instead of
+    /// `atomicWrite`, because a concurrent application may create the packet
+    /// between planning and the final rename.
+    static func atomicCreate(
+        _ data: Data,
+        at destination: URL,
+        fullSync: Bool,
+        validateBeforePublish: () throws -> Void = {}
+    ) throws {
+        let parent = destination.deletingLastPathComponent()
+        let temporary = parent.appendingPathComponent(
+            ".louppe-write-\(UUID().uuidString.lowercased()).tmp"
+        )
+        var shouldRemoveTemporary = false
+        defer {
+            if shouldRemoveTemporary {
+                try? unlinkRegularFile(at: temporary)
+            }
+        }
+
+        let descriptor = try openFileForCreation(temporary)
+        shouldRemoveTemporary = true
+        var closeNeeded = true
+        defer {
+            if closeNeeded { Darwin.close(descriptor) }
+        }
+        try writeAll(data, descriptor: descriptor, path: temporary.path)
+        try syncDescriptor(
+            descriptor,
+            path: temporary.path,
+            fullSync: fullSync
+        )
+        let closeResult = Darwin.close(descriptor)
+        let closeFailure = errno
+        closeNeeded = false
+        guard closeResult == 0 else {
+            throw IOError.system(
+                operation: "close",
+                path: temporary.path,
+                code: closeFailure
+            )
+        }
+
+        try validateBeforePublish()
+        try atomicExclusiveRename(from: temporary, to: destination)
+        shouldRemoveTemporary = false
+        try syncDirectory(parent, fullSync: fullSync)
+    }
+
+    /// Writes a brand-new operation-owned file at one exact, preplanned path.
+    /// Unlike `atomicCreate`, this intentionally has no second hidden
+    /// temporary: the file-operation journal already reserves `destination`
+    /// and must be able to account for every artifact after a crash. If a
+    /// write fails, the partial is left in place so its inode can be recorded
+    /// and reconciled rather than guessed away by pathname.
+    static func writeNewFile(
+        _ data: Data,
+        to destination: URL,
+        fullSync: Bool
+    ) throws {
+        let descriptor = try openFileForCreation(destination)
+        var closeNeeded = true
+        defer {
+            if closeNeeded { Darwin.close(descriptor) }
+        }
+        try writeAll(data, descriptor: descriptor, path: destination.path)
+        try syncDescriptor(
+            descriptor,
+            path: destination.path,
+            fullSync: fullSync
+        )
+        let closeResult = Darwin.close(descriptor)
+        let closeFailure = errno
+        closeNeeded = false
+        guard closeResult == 0 else {
+            throw IOError.system(
+                operation: "close",
+                path: destination.path,
+                code: closeFailure
+            )
+        }
+        try syncDirectory(
+            destination.deletingLastPathComponent(),
+            fullSync: fullSync
+        )
+    }
+
     static func syncFile(at url: URL, fullSync: Bool) throws {
         let descriptor = try openDescriptor(
             url,

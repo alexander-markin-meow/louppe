@@ -1,0 +1,26 @@
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Synthetic Lightroom Classic fixture">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+      xmlns:xmpDM="http://ns.adobe.com/xmp/1.0/DynamicMedia/"
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
+      xmp:Rating="5"
+      xmp:Label="Green"
+      xmpDM:pick="1"
+      xmpDM:good="True"
+      crs:Exposure2012="Lightroom edit sentinel 0.75">
+      <dc:subject>
+        <rdf:Bag>
+          <rdf:li>Existing Lightroom Keyword</rdf:li>
+        </rdf:Bag>
+      </dc:subject>
+      <lr:hierarchicalSubject>
+        <rdf:Bag>
+          <rdf:li>Lightroom hierarchical sentinel</rdf:li>
+        </rdf:Bag>
+      </lr:hierarchicalSubject>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>

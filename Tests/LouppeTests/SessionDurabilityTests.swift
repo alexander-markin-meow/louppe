@@ -415,6 +415,8 @@ final class SessionDurabilityTests: XCTestCase {
             try readSession(at: backup).entries.first?.rating,
             Rating.no.rawValue
         )
+        let offlineSaveObserverFinished = await store.waitForPersistenceIdleForTesting()
+        XCTAssertTrue(offlineSaveObserverFinished)
 
         // Backup-only success keeps Retry available for repairing the card's
         // sidecar later, but it is already durable and must never block Quit.

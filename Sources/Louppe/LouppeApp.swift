@@ -11,6 +11,9 @@ struct LouppeApp: App {
     private let updaterController: SPUStandardUpdaterController
 
     init() {
+        // Initialize the bundled XMPCore runtime once before any explicit
+        // Metadata (XMP), Copy-with-XMP, or Move-with-XMP request reaches it.
+        _ = XMPFieldMapping.runtimeIsAvailable
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
@@ -158,7 +161,7 @@ private struct FocusedLouppeSessionCommands: Commands {
                     || actionableStore?.canUndo != true
             )
 
-            Button("Clear All Ratings") {
+            Button("Clear All Decisions") {
                 actionableStore?.requestClearAllRatings()
             }
             .disabled(
@@ -266,12 +269,17 @@ private final class LouppeApplicationDelegate: NSObject, NSApplicationDelegate {
                 application.reply(toApplicationShouldTerminate: true)
                 return
             }
+            // Metadata publication is independently cancellable. Wait for a
+            // safe between-file/atomic-replacement boundary before saving or
+            // allowing AppKit to terminate the process.
+            await store.cancelAndAwaitXMPPublication()
             let result = await store.saveSessionForTermination()
             // AppKit remains interactive during `.terminateLater`. No file
             // reconciliation may begin after the initial Quit check and then
             // be cut off by the final persistence reply.
             if store.isRecoveringInterruptedOperations
-                || store.activeFileOperation != nil {
+                || store.activeFileOperation != nil
+                || store.isXMPPublicationRunning {
                 self.isPreparingToTerminate = false
                 store.cancelTerminationPreparation()
                 application.reply(toApplicationShouldTerminate: false)

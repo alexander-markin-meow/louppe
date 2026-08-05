@@ -1,0 +1,26 @@
+<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Synthetic Louppe interoperability fixture">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:example="https://example.invalid/xmp/foreign/1.0/"
+      xmp:Rating="2"
+      xmp:Label="Client Violet"
+      example:Untouched="Unknown namespace sentinel">
+      <dc:subject>
+        <rdf:Bag>
+          <rdf:li>Existing universal keyword</rdf:li>
+        </rdf:Bag>
+      </dc:subject>
+      <dc:description>
+        <rdf:Alt>
+          <rdf:li xml:lang="x-default">Localized description sentinel</rdf:li>
+        </rdf:Alt>
+      </dc:description>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+                                                                                                                                
+                                                                                                                                
+<?xpacket end="w"?>

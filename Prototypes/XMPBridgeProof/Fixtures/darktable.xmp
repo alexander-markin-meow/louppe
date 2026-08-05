@@ -1,0 +1,30 @@
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Synthetic darktable fixture">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:darktable="http://darktable.sf.net/"
+      xmp:Rating="0"
+      xmp:Label="Blue">
+      <dc:subject>
+        <rdf:Bag>
+          <rdf:li>Existing darktable Keyword</rdf:li>
+        </rdf:Bag>
+      </dc:subject>
+      <darktable:history>
+        <rdf:Seq>
+          <rdf:li rdf:parseType="Resource">
+            <darktable:operation>darktable history sentinel</darktable:operation>
+            <darktable:blendop_params>darktable blend sentinel</darktable:blendop_params>
+          </rdf:li>
+        </rdf:Seq>
+      </darktable:history>
+      <darktable:colorlabels>
+        <rdf:Seq>
+          <rdf:li>0</rdf:li>
+          <rdf:li>3</rdf:li>
+        </rdf:Seq>
+      </darktable:colorlabels>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
