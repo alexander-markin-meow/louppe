@@ -4,15 +4,21 @@
 
 | | |
 |---|---|
-| Status | Approved product direction; ready for implementation |
+| Status | Implemented baseline; amended by `RAW_JPEG_XMP_EXECUTIVE_PLAN.md` |
 | Audience | Coding agent implementing the feature on a separate branch |
-| Last updated | 2026-08-05 |
+| Last updated | 2026-08-07 |
 
 ---
 
 ## 1. Purpose
 
-This document is the single source of truth for adding:
+This document is the source of truth for the implemented XMP foundation and
+all unchanged safety requirements. The later
+`Docs/RAW_JPEG_XMP_EXECUTIVE_PLAN.md` supersedes it only for the default
+RAW+JPEG projection, grouping-control wording/location, explicit same-stem
+conflict resolution, and the additional verification those changes require.
+
+This document defines:
 
 - native 1–5 star ratings to Louppe;
 - native color labels to Louppe;
@@ -112,8 +118,8 @@ Use **Metadata (XMP)** everywhere: segmented control, heading, help text, access
 │                                                              │
 │  Photos to include                                           │
 │  Decision   [✓ Yes] [ No] [Undecided]                        │
-│  Stars      [ Any rating ▾ ]                                 │
-│  Color      [ Any color  ▾ ]                                 │
+│  Stars      [ All selected ▾ ]                               │
+│  Color      [ All selected ▾ ]                               │
 │                                                              │
 │  Application                                                  │
 │  [ Universal XMP ▾ ]                                         │
@@ -173,27 +179,30 @@ The existing decision tiles remain:
 
 A RAW+JPEG item whose decisions differ continues to project as Mixed and is treated conservatively as Undecided for the existing export selection behavior. The sheet should explain the number of mixed items if any are included through Undecided.
 
-Add a star menu:
+Add a star multi-select menu whose checkboxes all start selected:
 
-- Any rating — default;
-- Unrated only;
-- 1 star only;
-- 2 stars only;
-- 3 stars only;
-- 4 stars only;
-- 5 stars only.
+- Unrated;
+- 1 star;
+- 2 stars;
+- 3 stars;
+- 4 stars;
+- 5 stars;
+- Mixed.
 
-Add a color menu:
+Add a color multi-select menu whose checkboxes all start selected:
 
-- Any color — default;
-- No color only;
-- Red only;
-- Yellow only;
-- Green only;
-- Blue only;
-- Purple only.
+- None;
+- Red;
+- Yellow;
+- Green;
+- Blue;
+- Purple;
+- Mixed.
 
-For these two export menus, a Mixed RAW+JPEG pair matches **Any** but does not match Unrated/None or a specific star/color value. Show a mixed-item note when such pairs are present. The normal session Filter, unlike this compact Export selector, has an explicit Mixed choice.
+There is no synthetic **Any rating** or **Any color** menu item. The collapsed
+control summarizes the checked values; **All selected** is a summary, not a
+selectable row. A Mixed RAW+JPEG pair matches only the explicit Mixed checkbox
+in the corresponding menu. Show a mixed-item note when such pairs are present.
 
 The displayed item and physical-file counts must always reflect the actual intersection of all choices. Implement this through a pure `ExportSelectionPredicate` and one prepared snapshot, not repeated whole-session work during SwiftUI rendering.
 

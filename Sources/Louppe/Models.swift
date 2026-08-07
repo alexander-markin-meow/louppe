@@ -962,80 +962,20 @@ enum ExportMode: Equatable, Sendable {
     case metadataXMP
 }
 
-/// Compact star choices used by Export. Mixed pairs deliberately match only
-/// `any`, because choosing either an empty or concrete value must never guess
-/// which physical file the photographer intended.
-enum ExportStarSelection: Hashable, CaseIterable, Sendable {
-    case any
-    case unrated
-    case one
-    case two
-    case three
-    case four
-    case five
-
-    var label: String {
-        switch self {
-        case .any: return "Any rating"
-        case .unrated: return "Unrated only"
-        case .one: return "1 star only"
-        case .two: return "2 stars only"
-        case .three: return "3 stars only"
-        case .four: return "4 stars only"
-        case .five: return "5 stars only"
-        }
-    }
-
-    fileprivate var rating: StarRating? {
-        switch self {
-        case .any, .unrated: return nil
-        case .one: return .one
-        case .two: return .two
-        case .three: return .three
-        case .four: return .four
-        case .five: return .five
-        }
-    }
-}
-
-enum ExportColorSelection: Hashable, CaseIterable, Sendable {
-    case any
-    case none
-    case red
-    case yellow
-    case green
-    case blue
-    case purple
-
-    var label: String {
-        switch self {
-        case .any: return "Any color"
-        case .none: return "No color only"
-        case .red: return "Red only"
-        case .yellow: return "Yellow only"
-        case .green: return "Green only"
-        case .blue: return "Blue only"
-        case .purple: return "Purple only"
-        }
-    }
-
-    fileprivate var color: PhotoColorLabel? {
-        switch self {
-        case .any, .none: return nil
-        case .red: return .red
-        case .yellow: return .yellow
-        case .green: return .green
-        case .blue: return .blue
-        case .purple: return .purple
-        }
-    }
-}
-
 /// Pure AND predicate shared by Export's count snapshot and execution input.
 struct ExportSelectionPredicate: Equatable, Sendable {
+    static let allStarStates = Set(
+        [PhotoItemStarRatingState.unrated, .mixed]
+            + StarRating.allCases.map(PhotoItemStarRatingState.stars)
+    )
+    static let allColorStates = Set(
+        [PhotoItemColorLabelState.none, .mixed]
+            + PhotoColorLabel.allCases.map(PhotoItemColorLabelState.label)
+    )
+
     var decisions: Set<Rating> = [.yes]
-    var stars: ExportStarSelection = .any
-    var color: ExportColorSelection = .any
+    var starStates = allStarStates
+    var colorStates = allColorStates
 
     func matches(_ item: PhotoItem) -> Bool {
         matches(item.metadataState)
@@ -1045,25 +985,8 @@ struct ExportSelectionPredicate: Equatable, Sendable {
         guard decisions.contains(metadata.decision.effectiveRating) else {
             return false
         }
-        switch stars {
-        case .any:
-            break
-        case .unrated:
-            guard metadata.stars == .unrated else { return false }
-        default:
-            guard let rating = stars.rating,
-                  metadata.stars == .stars(rating) else { return false }
-        }
-        switch color {
-        case .any:
-            break
-        case .none:
-            guard metadata.color == .none else { return false }
-        default:
-            guard let color = color.color,
-                  metadata.color == .label(color) else { return false }
-        }
-        return true
+        return starStates.contains(metadata.stars)
+            && colorStates.contains(metadata.color)
     }
 }
 

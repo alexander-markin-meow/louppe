@@ -7,8 +7,8 @@ struct ExportView: View {
     // from the safe default: Copy, keepers only.
     @State private var mode: ExportMode = .copy
     @State private var selectedRatings: Set<Rating> = [.yes]
-    @State private var selectedStars: ExportStarSelection = .any
-    @State private var selectedColor: ExportColorSelection = .any
+    @State private var selectedStars = ExportSelectionPredicate.allStarStates
+    @State private var selectedColors = ExportSelectionPredicate.allColorStates
     @State private var selectionSnapshot = ExportSelectionSnapshot.empty
     @State private var xmpProfile: XMPApplicationProfile = .universal
     @State private var universalDecisionKeywords = false
@@ -63,7 +63,7 @@ struct ExportView: View {
         }
         .onChange(of: selectedRatings) { refreshSelectionSnapshot() }
         .onChange(of: selectedStars) { refreshSelectionSnapshot() }
-        .onChange(of: selectedColor) { refreshSelectionSnapshot() }
+        .onChange(of: selectedColors) { refreshSelectionSnapshot() }
         .onChange(of: store.items.count) { refreshSelectionSnapshot() }
     }
 
@@ -98,19 +98,65 @@ struct ExportView: View {
                 }
 
                 exportMenuRow("Stars") {
-                    Picker("Stars", selection: $selectedStars) {
-                        ForEach(ExportStarSelection.allCases, id: \.self) { choice in
-                            Text(choice.label).tag(choice)
+                    Menu(starSelectionSummary) {
+                        Toggle(
+                            "Unrated",
+                            isOn: membershipBinding(
+                                .unrated,
+                                in: $selectedStars
+                            )
+                        )
+                        ForEach(StarRating.allCases, id: \.self) { rating in
+                            Toggle(
+                                rating == .one
+                                    ? "1 star"
+                                    : "\(rating.count) stars",
+                                isOn: membershipBinding(
+                                    .stars(rating),
+                                    in: $selectedStars
+                                )
+                            )
                         }
+                        Toggle(
+                            "Mixed",
+                            isOn: membershipBinding(.mixed, in: $selectedStars)
+                        )
                     }
+                    .accessibilityLabel("Star ratings")
+                    .accessibilityValue(starSelectionSummary)
                 }
 
                 exportMenuRow("Color") {
-                    Picker("Color", selection: $selectedColor) {
-                        ForEach(ExportColorSelection.allCases, id: \.self) { choice in
-                            Text(choice.label).tag(choice)
+                    Menu(colorSelectionSummary) {
+                        Toggle(
+                            "None",
+                            isOn: membershipBinding(
+                                .none,
+                                in: $selectedColors
+                            )
+                        )
+                        ForEach(PhotoColorLabel.allCases, id: \.self) { label in
+                            Toggle(
+                                isOn: membershipBinding(
+                                    .label(label),
+                                    in: $selectedColors
+                                )
+                            ) {
+                                HStack(spacing: 7) {
+                                    Circle()
+                                        .fill(label.swatchColor)
+                                        .frame(width: 10, height: 10)
+                                    Text(label.displayName)
+                                }
+                            }
                         }
+                        Toggle(
+                            "Mixed",
+                            isOn: membershipBinding(.mixed, in: $selectedColors)
+                        )
                     }
+                    .accessibilityLabel("Color labels")
+                    .accessibilityValue(colorSelectionSummary)
                 }
             }
 
@@ -265,8 +311,8 @@ struct ExportView: View {
     private var selectionPredicate: ExportSelectionPredicate {
         ExportSelectionPredicate(
             decisions: selectedRatings,
-            stars: selectedStars,
-            color: selectedColor
+            starStates: selectedStars,
+            colorStates: selectedColors
         )
     }
 
@@ -335,10 +381,16 @@ struct ExportView: View {
         if selectedRatings.isEmpty {
             return "Select at least one decision tile above to export."
         }
+        if selectedStars.isEmpty {
+            return "Select at least one star rating to export."
+        }
+        if selectedColors.isEmpty {
+            return "Select at least one color label to export."
+        }
         if selectionSnapshot.itemCount == 0 {
             return selectedRatings == [.yes]
-                && selectedStars == .any
-                && selectedColor == .any
+                && selectedStars == ExportSelectionPredicate.allStarStates
+                && selectedColors == ExportSelectionPredicate.allColorStates
                 ? "Mark some items Yes (press F) before exporting."
                 : "No items match all selected metadata."
         }
@@ -377,7 +429,68 @@ struct ExportView: View {
         }
         return parts.joined(separator: " and ")
             + (total == 1 ? " matches" : " match")
-            + " only the corresponding Any choice."
+            + " only when Mixed is selected in the corresponding menu."
+    }
+
+    private var starSelectionSummary: String {
+        selectionSummary(
+            selectedStars,
+            all: ExportSelectionPredicate.allStarStates,
+            label: starStateLabel
+        )
+    }
+
+    private var colorSelectionSummary: String {
+        selectionSummary(
+            selectedColors,
+            all: ExportSelectionPredicate.allColorStates,
+            label: colorStateLabel
+        )
+    }
+
+    private func selectionSummary<Value: Hashable>(
+        _ selected: Set<Value>,
+        all: Set<Value>,
+        label: (Value) -> String
+    ) -> String {
+        if selected == all { return "All selected" }
+        if selected.isEmpty { return "None selected" }
+        if selected.count == 1, let only = selected.first {
+            return label(only)
+        }
+        return "\(selected.count) selected"
+    }
+
+    private func starStateLabel(_ state: PhotoItemStarRatingState) -> String {
+        switch state {
+        case .unrated: return "Unrated"
+        case .stars(let rating):
+            return rating == .one ? "1 star" : "\(rating.count) stars"
+        case .mixed: return "Mixed"
+        }
+    }
+
+    private func colorStateLabel(_ state: PhotoItemColorLabelState) -> String {
+        switch state {
+        case .none: return "None"
+        case .label(let label): return label.displayName
+        case .mixed: return "Mixed"
+        }
+    }
+
+    private func membershipBinding<Value: Hashable>(
+        _ value: Value,
+        in selection: Binding<Set<Value>>
+    ) -> Binding<Bool> {
+        Binding {
+            selection.wrappedValue.contains(value)
+        } set: { isSelected in
+            if isSelected {
+                selection.wrappedValue.insert(value)
+            } else {
+                selection.wrappedValue.remove(value)
+            }
+        }
     }
 
     private func exportMenuRow<Content: View>(

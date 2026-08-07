@@ -124,7 +124,7 @@ final class XMPFilterSortExportTests: XCTestCase {
         )
     }
 
-    func testExportPredicateUsesANDAndMixedMatchesOnlyAny() {
+    func testExportPredicateUsesANDAndExplicitMultiselects() {
         let exact = item("EXACT.JPG", decision: .yes, stars: .four, color: .red)
         let wrongColor = item("BLUE.JPG", decision: .yes, stars: .four, color: .blue)
         let wrongDecision = item("NO.JPG", decision: .no, stars: .four, color: .red)
@@ -159,28 +159,45 @@ final class XMPFilterSortExportTests: XCTestCase {
 
         let exactPredicate = ExportSelectionPredicate(
             decisions: [.yes],
-            stars: .four,
-            color: .red
+            starStates: [.stars(.four)],
+            colorStates: [.label(.red)]
         )
         let exactSnapshot = ExportSelectionSnapshot(items: items, predicate: exactPredicate)
         XCTAssertEqual(exactSnapshot.itemIndices, [0])
         XCTAssertEqual(exactSnapshot.physicalFileCount, 1)
 
-        let anyMetadata = ExportSelectionPredicate(
-            decisions: [.yes],
-            stars: .any,
-            color: .any
+        let allMetadata = ExportSelectionPredicate(decisions: [.yes])
+        let allSnapshot = ExportSelectionSnapshot(items: items, predicate: allMetadata)
+        XCTAssertEqual(allSnapshot.itemIndices, [0, 1, 4, 5])
+        XCTAssertEqual(allSnapshot.physicalFileCount, 6)
+        XCTAssertEqual(allSnapshot.mixedStarsCount, 1)
+        XCTAssertEqual(allSnapshot.mixedColorCount, 1)
+        XCTAssertEqual(
+            allMetadata.starStates,
+            ExportSelectionPredicate.allStarStates
         )
-        let anySnapshot = ExportSelectionSnapshot(items: items, predicate: anyMetadata)
-        XCTAssertEqual(anySnapshot.itemIndices, [0, 1, 4, 5])
-        XCTAssertEqual(anySnapshot.physicalFileCount, 6)
-        XCTAssertEqual(anySnapshot.mixedStarsCount, 1)
-        XCTAssertEqual(anySnapshot.mixedColorCount, 1)
+        XCTAssertEqual(
+            allMetadata.colorStates,
+            ExportSelectionPredicate.allColorStates
+        )
+
+        let mixedAndConcrete = ExportSelectionPredicate(
+            decisions: [.yes],
+            starStates: [.stars(.four), .mixed],
+            colorStates: [.label(.red), .mixed]
+        )
+        XCTAssertEqual(
+            ExportSelectionSnapshot(
+                items: items,
+                predicate: mixedAndConcrete
+            ).itemIndices,
+            [0, 4, 5]
+        )
 
         let mixedAsUndecided = ExportSelectionPredicate(
             decisions: [.undecided],
-            stars: .four,
-            color: .red
+            starStates: [.stars(.four)],
+            colorStates: [.label(.red)]
         )
         let mixedDecisionSnapshot = ExportSelectionSnapshot(
             items: items,

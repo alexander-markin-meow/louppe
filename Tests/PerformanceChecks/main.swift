@@ -3139,8 +3139,8 @@ struct PerformanceChecks {
 
         let predicate = ExportSelectionPredicate(
             decisions: [.yes],
-            stars: .three,
-            color: .green
+            starStates: [.stars(.three)],
+            colorStates: [.label(.green)]
         )
         var snapshot = ExportSelectionSnapshot.empty
         let exportDuration = clock.measure {

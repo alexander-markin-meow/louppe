@@ -22,10 +22,12 @@ release bundle.
   VoiceOver actions, and 0–5 shortcuts. Decision, star, and color facets now
   filter the normal session independently; each dimension can also sort and
   form stable Browser/Grid groups. Export applies decision + star + color as
-  one prepared AND selection with exact item and physical-file counts. The
-  pinned parser now also ships as an audited source target with complete
-  license resources. Typed Universal, Lightroom, Bridge, Capture One, and
-  darktable mappings preserve foreign edits and keywords; exact-path sidecar
+  one prepared AND selection with exact item and physical-file counts. Star
+  and color Export menus are true multi-selects with Unrated/None, every
+  concrete value, and Mixed checked by default instead of a synthetic Any
+  choice. The pinned parser now also ships as an audited source target with
+  complete license resources. Typed Universal, Lightroom, Bridge, Capture One,
+  and darktable mappings preserve foreign edits and keywords; exact-path sidecar
   planning detects shared-stem, casing, and Unicode conflicts; and the bounded
   actor store rejects unsafe files and external edits before a flushed,
   atomic, verified replacement. Export now includes the explicit
