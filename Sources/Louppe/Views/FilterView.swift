@@ -443,7 +443,7 @@ struct FilterView: View {
             VStack(alignment: .leading, spacing: 7) {
                 Toggle(isOn: rawJPEGPairingBinding) {
                     HStack {
-                        Text("Keep RAW + JPEG together")
+                        Text("Treat matching RAW + JPEG as one photo")
                         Spacer()
                         if store.isChangingRawJPEGPairingMode {
                             ProgressView()
@@ -452,7 +452,20 @@ struct FilterView: View {
                         }
                     }
                 }
-                .disabled(store.isChangingRawJPEGPairingMode)
+                .disabled(
+                    store.isChangingRawJPEGPairingMode
+                        || store.isFileOperationRunning
+                        || store.isXMPPublicationRunning
+                )
+                .accessibilityLabel(
+                    "Treat matching RAW and JPEG as one photo"
+                )
+                .accessibilityHint(
+                    "When enabled, ratings, selection, Export, Move, and Clean Up apply to both files."
+                )
+                .help(
+                    "When enabled, ratings, selection, Export, Move, and Clean Up apply to both files."
+                )
                 Divider()
                 ForEach(store.availableTypes, id: \.self) { type in
                     Toggle(isOn: exclusionBinding(type, \.excludedTypes)) {

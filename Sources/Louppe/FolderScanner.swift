@@ -187,7 +187,7 @@ enum FolderScanner {
     /// workers too, so it must be safe to call from any thread.
     static func scan(
         _ root: URL,
-        pairingMode: RawJPEGPairingMode = .together,
+        pairingMode: RawJPEGPairingMode = .separate,
         isCancelled: @Sendable () -> Bool = { false },
         beforeFinalIdentityValidation: () throws -> Void = {},
         progress: (Int) -> Void

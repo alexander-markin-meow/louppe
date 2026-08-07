@@ -4,12 +4,28 @@
 
 | | |
 |---|---|
-| Status | Approved product direction; implementation plan for the next coding task |
+| Status | Implemented and locally verified; real Capture One resolver acceptance remains pending |
 | Audience | A coding agent continuing the existing XMP feature branch |
 | Written | 2026-08-07 |
 | Current branch | `codex/xmp-interoperability-foundation` |
 | Baseline commit | `2a516e5` — Add safe XMP interoperability |
 | Companion specification | `Docs/XMP_INTEROPERABILITY.md` |
+
+Implementation completed on 2026-08-07. The implemented code now uses separate
+RAW/JPEG photos by default, exposes the hidden grouping switch with the exact
+approved wording, provides typed and stale-safe conflict resolution for an
+unambiguous RAW+JPEG family, applies all chosen winners as one undoable session
+mutation, and discards and fully rebuilds the old immutable publication or
+Copy/Move preflight plan. The complete 267-test XCTest suite, 73 performance
+checks, current-SDK debug build, release package and archive checks, installed
+signature verification, and an installed `-openFolder` launch all pass. The
+launch sidecar contained two physical entries for one same-stem CR3+JPEG pair,
+confirming the packaged app's fresh-session default.
+
+Capture One 16.8.4.13 is installed, but its new end-to-end resolver/reload row
+requires visible manual interaction and remains pending. Lightroom Classic,
+Bridge, and darktable are not installed and also remain explicitly pending.
+No result is inferred from packet tests.
 
 ---
 
@@ -901,50 +917,50 @@ so it requires a separate product and safety design.
 
 ### Product behavior
 
-- [ ] Fresh launch treats RAW and JPEG separately.
-- [ ] Grouping control exists only under Filter -> File types.
-- [ ] Exact wording is “Treat matching RAW + JPEG as one photo.”
-- [ ] No pairing toolbar icon/status element is added.
-- [ ] Grouping consequences are explained accessibly.
-- [ ] Enabling grouping never silently synchronizes metadata.
-- [ ] Separate rating/filter/export/cleanup behavior is correct.
-- [ ] Grouped pair-wide safety behavior is unchanged.
+- [x] Fresh launch treats RAW and JPEG separately.
+- [x] Grouping control exists only under Filter -> File types.
+- [x] Exact wording is “Treat matching RAW + JPEG as one photo.”
+- [x] No pairing toolbar icon/status element is added.
+- [x] Grouping consequences are explained accessibly.
+- [x] Enabling grouping never silently synchronizes metadata.
+- [x] Separate rating/filter/export/cleanup behavior is correct.
+- [x] Grouped pair-wide safety behavior is unchanged.
 
 ### Conflict resolution
 
-- [ ] Eligible conflicts expose Resolve RAW + JPEG Conflicts.
-- [ ] Skip is the safe default and publication can continue partially.
-- [ ] RAW and JPEG winner choices are explicit.
-- [ ] Applying resolutions changes the Louppe session, not only the packet.
-- [ ] One resolver apply creates one undo step.
-- [ ] Stale snapshots/generations are rejected.
-- [ ] Old immutable plans are discarded.
-- [ ] Selection and complete preflight are recomputed.
-- [ ] Ambiguous families never offer a winner.
+- [x] Eligible conflicts expose Resolve RAW + JPEG Conflicts.
+- [x] Skip is the safe default and publication can continue partially.
+- [x] RAW and JPEG winner choices are explicit.
+- [x] Applying resolutions changes the Louppe session, not only the packet.
+- [x] One resolver apply creates one undo step.
+- [x] Stale snapshots/generations are rejected.
+- [x] Old immutable plans are discarded.
+- [x] Selection and complete preflight are recomputed.
+- [x] Ambiguous families never offer a winner.
 
 ### Existing XMP work retained
 
-- [ ] Export star/color multi-select follow-up is reviewed and passing.
-- [ ] Existing XMPCore merge and safety tests remain passing.
-- [ ] Existing profile mappings and keyword ownership remain unchanged.
-- [ ] Copy/Move journal and recovery tests remain passing.
-- [ ] Source media and Copy-source XMP bytes remain unchanged.
-- [ ] Non-RAW best-effort warnings remain visible.
+- [x] Export star/color multi-select follow-up is reviewed and passing.
+- [x] Existing XMPCore merge and safety tests remain passing.
+- [x] Existing profile mappings and keyword ownership remain unchanged.
+- [x] Copy/Move journal and recovery tests remain passing.
+- [x] Source media and Copy-source XMP bytes remain unchanged.
+- [x] Non-RAW best-effort warnings remain visible.
 
 ### Verification
 
-- [ ] Focused model/filter/export/resolver tests pass.
-- [ ] Performance checks pass, including separate-mode scan coverage.
-- [ ] Full XCTest passes with full Xcode.
-- [ ] Debug build passes with the current SDK.
-- [ ] Release package and archive verification pass.
-- [ ] Installed app signature verifies.
-- [ ] App launches with `-openFolder` and creates/updates its session safely.
+- [x] Focused model/filter/export/resolver tests pass.
+- [x] Performance checks pass, including separate-mode scan coverage.
+- [x] Full XCTest passes with full Xcode.
+- [x] Debug build passes with the current SDK.
+- [x] Release package and archive verification pass.
+- [x] Installed app signature verifies.
+- [x] App launches with `-openFolder` and creates/updates its session safely.
 - [ ] Capture One end-to-end resolution/reload matrix passes.
-- [ ] Bridge/Lightroom/darktable rows are completed or explicitly pending.
-- [ ] README, performance notes if needed, original XMP plan, and changelog
+- [x] Bridge/Lightroom/darktable rows are completed or explicitly pending.
+- [x] README, performance notes if needed, original XMP plan, and changelog
       accurately describe the final behavior.
-- [ ] `VERSION` is bumped only if the GitHub release state requires it.
+- [x] `VERSION` is bumped only if the GitHub release state requires it.
 
 ---
 

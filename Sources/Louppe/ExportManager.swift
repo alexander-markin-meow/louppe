@@ -75,6 +75,7 @@ final class ExportManager: ObservableObject {
         sourceFolder: URL?,
         selected: [PhotoItem],
         familyContextItems: [PhotoItem],
+        sessionGeneration: UInt64,
         mode: ExportMode,
         includeXMP: Bool,
         xmpProfile: XMPApplicationProfile,
@@ -125,11 +126,13 @@ final class ExportManager: ObservableObject {
             prepareXMPExport(
                 selected: selected,
                 familyContextItems: familyContextItems,
+                sessionGeneration: sessionGeneration,
                 mode: mode,
                 xmpProfile: xmpProfile,
                 visibleDecisionKeywords: visibleDecisionKeywords,
                 allowExternalLabelReplacement:
                     allowExternalLabelReplacement,
+                sourceFolder: sourceFolder,
                 to: validatedDestination,
                 onOperationWillStart: onOperationWillStart,
                 onOperationDidFinish: onOperationDidFinish
@@ -149,10 +152,12 @@ final class ExportManager: ObservableObject {
     private func prepareXMPExport(
         selected: [PhotoItem],
         familyContextItems: [PhotoItem],
+        sessionGeneration: UInt64,
         mode: ExportMode,
         xmpProfile: XMPApplicationProfile,
         visibleDecisionKeywords: Bool,
         allowExternalLabelReplacement: Bool,
+        sourceFolder: URL?,
         to destination: URL,
         onOperationWillStart: @escaping @MainActor (ExportMode) -> Bool,
         onOperationDidFinish: @escaping @MainActor (
@@ -167,6 +172,7 @@ final class ExportManager: ObservableObject {
             input = try XMPExportPreparationInput(
                 selected: selected,
                 familyContextItems: familyContextItems,
+                sessionGeneration: sessionGeneration,
                 profile: xmpProfile,
                 visibleDecisionKeywords: visibleDecisionKeywords,
                 allowExternalLabelReplacement:
@@ -204,9 +210,14 @@ final class ExportManager: ObservableObject {
             case .prepared(let plan):
                 self.pendingExport = PendingExport(
                     selected: selected,
+                    sourceFolder: sourceFolder,
                     mode: mode,
                     destination: destination,
                     plan: plan,
+                    xmpProfile: xmpProfile,
+                    visibleDecisionKeywords: visibleDecisionKeywords,
+                    allowExternalLabelReplacement:
+                        allowExternalLabelReplacement,
                     onOperationWillStart: onOperationWillStart,
                     onOperationDidFinish: onOperationDidFinish
                 )
@@ -236,6 +247,53 @@ final class ExportManager: ObservableObject {
             mode: pendingExport.mode,
             xmpPlan: pendingExport.plan,
             to: pendingExport.destination,
+            onOperationWillStart: pendingExport.onOperationWillStart,
+            onOperationDidFinish: pendingExport.onOperationDidFinish
+        )
+    }
+
+    /// Discards the old immutable XMP/media selection after a conflict
+    /// resolution, revalidates the retained destination, and performs the
+    /// complete planner pass again before confirmation can be offered.
+    func reprepareXMPExportAfterResolution(
+        selected: [PhotoItem],
+        familyContextItems: [PhotoItem],
+        sessionGeneration: UInt64
+    ) {
+        guard let pendingExport,
+              case .awaitingXMPConfirmation = state else { return }
+        guard !selected.isEmpty else {
+            self.pendingExport = nil
+            state = .failed(
+                "After resolving the RAW + JPEG metadata, no items match the selected Export filters."
+            )
+            return
+        }
+        let destination: URL
+        do {
+            destination = try ExportDestinationValidator.validate(
+                sourceFolder: pendingExport.sourceFolder,
+                destination: pendingExport.destination,
+                items: selected,
+                mode: pendingExport.mode
+            )
+        } catch {
+            self.pendingExport = nil
+            state = .failed(error.localizedDescription)
+            return
+        }
+        self.pendingExport = nil
+        prepareXMPExport(
+            selected: selected,
+            familyContextItems: familyContextItems,
+            sessionGeneration: sessionGeneration,
+            mode: pendingExport.mode,
+            xmpProfile: pendingExport.xmpProfile,
+            visibleDecisionKeywords: pendingExport.visibleDecisionKeywords,
+            allowExternalLabelReplacement:
+                pendingExport.allowExternalLabelReplacement,
+            sourceFolder: pendingExport.sourceFolder,
+            to: destination,
             onOperationWillStart: pendingExport.onOperationWillStart,
             onOperationDidFinish: pendingExport.onOperationDidFinish
         )
@@ -381,9 +439,13 @@ final class ExportManager: ObservableObject {
 
     private struct PendingExport {
         let selected: [PhotoItem]
+        let sourceFolder: URL?
         let mode: ExportMode
         let destination: URL
         let plan: XMPExportPreparedPlan
+        let xmpProfile: XMPApplicationProfile
+        let visibleDecisionKeywords: Bool
+        let allowExternalLabelReplacement: Bool
         let onOperationWillStart: @MainActor (ExportMode) -> Bool
         let onOperationDidFinish: @MainActor (
             ExportMode,

@@ -23,7 +23,8 @@ struct PerformanceChecks {
         try caseSensitivePairingKeepsDistinctBasenames()
         try videoNeverBecomesThePairForSameNamedRaw()
         try rawAndTiffStayIndependent()
-        try rawJPEGPairingCanBeDisabled()
+        try rawJPEGPairingDefaultsToSeparate()
+        try separateRAWJPEGInitialScanBaseline()
         try rawJPEGProjectionCachesMetadataAndPreservesRatings()
         try imageCacheKeyDoesNotTouchFilesystemAfterScan()
         try cleanUpScopeResolvesExpectedCandidates()
@@ -74,12 +75,12 @@ struct PerformanceChecks {
         try batchRatingUndoRestoresEveryRating()
         try exportMoveRemovalUpdatesSessionState()
         if ProcessInfo.processInfo.environment["LOUPPE_SKIP_REAL_TRASH"] == "1" {
-            print("Performance checks passed (69/72; 3 real Trash checks explicitly skipped)")
+            print("Performance checks passed (70/73; 3 real Trash checks explicitly skipped)")
         } else {
             try cleanUpPairRoundTripsThroughTrash()
             try cleanUpPairFailureRollsBackFirstFile()
             try cleanUpRollbackPreservesRacingSourceReplacement()
-            print("Performance checks passed (72/72)")
+            print("Performance checks passed (73/73)")
         }
     }
 
@@ -440,7 +441,10 @@ struct PerformanceChecks {
             withDestinationURL: folder
         )
 
-        let items = try FolderScanner.scan(folder) { _ in }
+        let items = try FolderScanner.scan(
+            folder,
+            pairingMode: .together
+        ) { _ in }
         try expect(items.count == 1, "deep scan should find one real photo and never follow the loop")
         try expect(
             items[0].id.hasSuffix("Level8/DEEP.JPG"),
@@ -520,7 +524,10 @@ struct PerformanceChecks {
         try Data().write(to: jpeg)
         try Data().write(to: video)
 
-        let items = try FolderScanner.scan(folder) { _ in }
+        let items = try FolderScanner.scan(
+            folder,
+            pairingMode: .together
+        ) { _ in }
         try expect(items.count == 2, "RAW+JPEG and same-named video should produce two review items")
         guard let rawItem = items.first(where: { $0.primaryURL == raw }),
               let videoItem = items.first(where: { $0.primaryURL == video }) else {
@@ -547,7 +554,7 @@ struct PerformanceChecks {
         )
     }
 
-    private static func rawJPEGPairingCanBeDisabled() throws {
+    private static func rawJPEGPairingDefaultsToSeparate() throws {
         let folder = try disposableFolder(named: "RawJPEGPairingMode")
         defer { try? FileManager.default.removeItem(at: folder) }
         let raw = folder.appendingPathComponent("SHOT.NEF")
@@ -555,16 +562,68 @@ struct PerformanceChecks {
         try Data().write(to: raw)
         try Data().write(to: jpeg)
 
-        let paired = try FolderScanner.scan(folder) { _ in }
-        try expect(paired.count == 1, "RAW+JPEG should stay one item by default")
-        try expect(paired[0].fileTypeLabel == "RAW + JPEG", "default pairing should use the combined type")
-
-        let separate = try FolderScanner.scan(folder, pairingMode: .separate) { _ in }
+        let separate = try FolderScanner.scan(folder) { _ in }
         try expect(separate.count == 2, "separate pairing mode should expose both files")
         try expect(separate.allSatisfy { $0.pairedURL == nil }, "separate pairing mode should remove the partner link")
         try expect(
             Set(separate.map(\.fileTypeLabel)) == ["RAW", "JPEG"],
             "separate pairing mode should expose independent file types"
+        )
+
+        let paired = try FolderScanner.scan(
+            folder,
+            pairingMode: .together
+        ) { _ in }
+        try expect(paired.count == 1, "explicit grouped mode should combine RAW+JPEG")
+        try expect(paired[0].fileTypeLabel == "RAW + JPEG", "grouped mode should use the combined type")
+    }
+
+    private static func separateRAWJPEGInitialScanBaseline() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "LouppeSeparateInitialScan-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fixture = try Data(contentsOf: URL(
+            fileURLWithPath: "AppIcon/AppIcon.iconset/icon_16x16.png"
+        ))
+        for index in 0..<250 {
+            let stem = String(format: "IMG_%04d", index)
+            try fixture.write(
+                to: folder.appendingPathComponent("\(stem).NEF")
+            )
+            try fixture.write(
+                to: folder.appendingPathComponent("\(stem).JPG")
+            )
+        }
+
+        let separateStart = ContinuousClock.now
+        let separate = try FolderScanner.scan(folder) { _ in }
+        let separateElapsed = separateStart.duration(to: .now)
+        let groupedStart = ContinuousClock.now
+        let grouped = try FolderScanner.scan(
+            folder,
+            pairingMode: .together
+        ) { _ in }
+        let groupedElapsed = groupedStart.duration(to: .now)
+
+        try expect(
+            separate.count == 500
+                && separate.allSatisfy { $0.pairedURL == nil },
+            "fresh separate scan should expose every physical RAW and JPEG"
+        )
+        try expect(
+            grouped.count == 250
+                && grouped.allSatisfy { $0.pairedURL != nil },
+            "explicit grouped scan should preserve the established pair projection"
+        )
+        print(
+            "RAW+JPEG initial scan 250 pairs: separate \(separateElapsed), grouped \(groupedElapsed)"
         )
     }
 
@@ -3514,6 +3573,7 @@ struct PerformanceChecks {
         )
 
         let store = SessionStore()
+        store.setRawJPEGPairingMode(.together)
         store.openFolder(folder)
         try await waitForReadySession(store, expectedItems: 1)
         try expect(
@@ -3593,6 +3653,7 @@ struct PerformanceChecks {
         )
 
         let reopened = SessionStore()
+        reopened.setRawJPEGPairingMode(.together)
         reopened.openFolder(folder)
         try await waitForReadySession(reopened, expectedItems: 1)
         try expect(

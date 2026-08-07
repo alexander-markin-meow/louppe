@@ -67,6 +67,120 @@ struct XMPPublicationChangeCounts: Equatable, Sendable {
     }
 }
 
+enum XMPMetadataDimension: String, CaseIterable, Hashable, Sendable {
+    case decision
+    case stars
+    case color
+}
+
+/// Typed, immutable data for one same-name conflict. Filesystem paths remain
+/// the planner's family authority; stable model IDs and scan identities are
+/// the only authority SessionStore may use to apply a resolution.
+struct XMPSameStemConflictDescriptor: Equatable, Sendable, Identifiable {
+    enum Role: String, Equatable, Sendable {
+        case raw
+        case jpeg
+        case other
+    }
+
+    enum Ineligibility: Equatable, Sendable {
+        case ambiguousFamily
+        case unsupportedMembers
+        case missingSessionIdentity
+    }
+
+    enum ResolutionEligibility: Equatable, Sendable {
+        case eligible
+        case ineligible(Ineligibility)
+    }
+
+    struct Member: Equatable, Sendable, Identifiable {
+        let id: String
+        let exactPath: XMPExactFileSystemPath
+        let role: Role
+        let metadata: PhotoFileMetadataSnapshot
+        let scannedIdentity: FileOperationJournal.FileIdentity
+        let wasSelectedForExport: Bool
+
+        var filename: String { exactPath.url.lastPathComponent }
+    }
+
+    let id: String
+    let sessionGeneration: UInt64
+    let members: [Member]
+    let differingDimensions: Set<XMPMetadataDimension>
+    let resolutionEligibility: ResolutionEligibility
+
+    var rawMember: Member? { members.first(where: { $0.role == .raw }) }
+    var jpegMember: Member? { members.first(where: { $0.role == .jpeg }) }
+
+    static func make(
+        id: String,
+        sessionGeneration: UInt64,
+        family: XMPSidecarFamilyPlan,
+        selectedMediaPaths: Set<XMPExactFileSystemPath>
+    ) -> XMPSameStemConflictDescriptor {
+        let completeMembers = family.members.compactMap { member -> Member? in
+            guard let fileID = member.sessionFileID,
+                  let metadata = member.sessionMetadata,
+                  let identity = member.scannedIdentity else { return nil }
+            let ext = member.mediaPath.url.pathExtension.lowercased()
+            let role: Role
+            if FolderScanner.rawExtensions.contains(ext) {
+                role = .raw
+            } else if ext == "jpg" || ext == "jpeg" {
+                role = .jpeg
+            } else {
+                role = .other
+            }
+            return Member(
+                id: fileID,
+                exactPath: member.mediaPath,
+                role: role,
+                metadata: metadata,
+                scannedIdentity: identity,
+                wasSelectedForExport: selectedMediaPaths.contains(
+                    member.mediaPath
+                )
+            )
+        }.sorted {
+            $0.exactPath.bytes.lexicographicallyPrecedes($1.exactPath.bytes)
+        }
+
+        let eligibility: ResolutionEligibility
+        if completeMembers.count != family.members.count {
+            eligibility = .ineligible(.missingSessionIdentity)
+        } else if completeMembers.count != 2 {
+            eligibility = .ineligible(.ambiguousFamily)
+        } else if completeMembers.count(where: { $0.role == .raw }) != 1
+                    || completeMembers.count(where: { $0.role == .jpeg }) != 1 {
+            eligibility = .ineligible(.unsupportedMembers)
+        } else {
+            eligibility = .eligible
+        }
+
+        var differing: Set<XMPMetadataDimension> = []
+        if let first = completeMembers.first {
+            if completeMembers.dropFirst().contains(where: {
+                $0.metadata.rating != first.metadata.rating
+            }) { differing.insert(.decision) }
+            if completeMembers.dropFirst().contains(where: {
+                $0.metadata.starRating != first.metadata.starRating
+            }) { differing.insert(.stars) }
+            if completeMembers.dropFirst().contains(where: {
+                $0.metadata.colorLabel != first.metadata.colorLabel
+            }) { differing.insert(.color) }
+        }
+        return XMPSameStemConflictDescriptor(
+            id: id,
+            sessionGeneration: sessionGeneration,
+            members: completeMembers,
+            differingDimensions: differing,
+            resolutionEligibility: eligibility
+        )
+    }
+}
+
 struct XMPPublicationPlanEntry: Equatable, Sendable, Identifiable {
     let id: String
     let filenames: [String]
@@ -79,6 +193,7 @@ struct XMPPublicationPlanEntry: Equatable, Sendable, Identifiable {
     let bestEffortFilenames: [String]
     let applicationPacketCount: Int
     let excludedACRCompanionCount: Int
+    let sameStemConflict: XMPSameStemConflictDescriptor?
 }
 
 struct XMPPublicationPlan: Equatable, Sendable {
@@ -115,6 +230,12 @@ struct XMPPublicationPlan: Equatable, Sendable {
     func count(_ category: XMPPublicationCategory) -> Int {
         entries.count(where: { $0.category == category })
     }
+
+    var resolvableSameStemConflicts: [XMPSameStemConflictDescriptor] {
+        entries.compactMap(\.sameStemConflict).filter {
+            $0.resolutionEligibility == .eligible
+        }
+    }
 }
 
 struct XMPPublicationResult: Equatable, Sendable {
@@ -134,6 +255,7 @@ struct XMPPublicationResult: Equatable, Sendable {
 }
 
 struct XMPPublicationInput: Sendable {
+    let sessionGeneration: UInt64
     let selectedItemCount: Int
     let selectedPhysicalFileCount: Int
     let selectedMediaPaths: Set<XMPExactFileSystemPath>
@@ -145,10 +267,12 @@ struct XMPPublicationInput: Sendable {
     init(
         items: [PhotoItem],
         familyContextItems: [PhotoItem]? = nil,
+        sessionGeneration: UInt64 = 0,
         profile: XMPApplicationProfile,
         visibleDecisionKeywords: Bool,
         allowExternalLabelReplacement: Bool = false
     ) throws {
+        self.sessionGeneration = sessionGeneration
         selectedItemCount = items.count
         let selectedFiles = items.flatMap(\.individualFiles)
         selectedPhysicalFileCount = selectedFiles.count(where: {
@@ -167,15 +291,19 @@ struct XMPPublicationInput: Sendable {
         let context = familyContextItems ?? items
         members = try context.flatMap { item in
             try item.individualFiles.map { file in
-                try XMPStemFamilyMember(
+                let snapshot = file.metadataSnapshot
+                return try XMPStemFamilyMember(
                     mediaURL: file.url,
                     mediaKind: file.mediaKind,
                     metadata: XMPPublicationMetadata(
-                        snapshot: file.metadataSnapshot,
+                        snapshot: snapshot,
                         profile: profile,
                         visibleDecisionKeywords: visibleDecisionKeywords,
                         allowExternalLabelRemoval: allowExternalLabelReplacement
-                    )
+                    ),
+                    sessionFileID: file.id,
+                    sessionMetadata: snapshot,
+                    scannedIdentity: file.scannedIdentity
                 )
             }
         }
@@ -206,6 +334,8 @@ enum XMPPublicationPlanner {
     private struct Job: Sendable {
         let order: Int
         let family: XMPSidecarFamilyPlan
+        let sessionGeneration: UInt64
+        let selectedMediaPaths: Set<XMPExactFileSystemPath>
     }
 
     private actor JobQueue {
@@ -259,7 +389,12 @@ enum XMPPublicationPlanner {
         }
         let reporter = ThrottledProgress(total: families.count, callback: progress)
         let jobs = families.enumerated().map {
-            Job(order: $0.offset, family: $0.element)
+            Job(
+                order: $0.offset,
+                family: $0.element,
+                sessionGeneration: input.sessionGeneration,
+                selectedMediaPaths: input.selectedMediaPaths
+            )
         }
         let queue = JobQueue(jobs)
         var preparedEntries: [(Int, XMPPublicationPlanEntry)] = []
@@ -272,7 +407,12 @@ enum XMPPublicationPlanner {
                     while !isCancelled(), let job = await queue.next() {
                         local.append((
                             job.order,
-                            await preflightEntry(job.family, store: store)
+                            await preflightEntry(
+                                job.family,
+                                sessionGeneration: job.sessionGeneration,
+                                selectedMediaPaths: job.selectedMediaPaths,
+                                store: store
+                            )
                         ))
                         reporter.advance()
                     }
@@ -325,6 +465,8 @@ enum XMPPublicationPlanner {
 
     private static func preflightEntry(
         _ family: XMPSidecarFamilyPlan,
+        sessionGeneration: UInt64,
+        selectedMediaPaths: Set<XMPExactFileSystemPath>,
         store: XMPMetadataStore
     ) async -> XMPPublicationPlanEntry {
         let filenames = family.members.map {
@@ -354,7 +496,13 @@ enum XMPPublicationPlanner {
             return base.entry(
                 sidecar: family.canonicalSidecar,
                 category: .sameStemMetadataConflict,
-                message: "Files sharing this stem have different Louppe metadata and will be skipped."
+                message: "Files sharing this stem have different Louppe metadata and will be skipped.",
+                sameStemConflict: .make(
+                    id: id,
+                    sessionGeneration: sessionGeneration,
+                    family: family,
+                    selectedMediaPaths: selectedMediaPaths
+                )
             )
         case .filenameCollision:
             return base.entry(
@@ -423,7 +571,8 @@ enum XMPPublicationPlanner {
             category: XMPPublicationCategory,
             message: String,
             fingerprint: XMPPreflightFingerprint? = nil,
-            changeCounts: XMPPublicationChangeCounts = .init()
+            changeCounts: XMPPublicationChangeCounts = .init(),
+            sameStemConflict: XMPSameStemConflictDescriptor? = nil
         ) -> XMPPublicationPlanEntry {
             XMPPublicationPlanEntry(
                 id: id,
@@ -436,7 +585,8 @@ enum XMPPublicationPlanner {
                 changeCounts: changeCounts,
                 bestEffortFilenames: bestEffortFilenames,
                 applicationPacketCount: applicationPacketCount,
-                excludedACRCompanionCount: excludedACRCompanionCount
+                excludedACRCompanionCount: excludedACRCompanionCount,
+                sameStemConflict: sameStemConflict
             )
         }
     }
@@ -606,7 +756,8 @@ enum XMPPublicationWorker {
             changeCounts: entry.changeCounts,
             bestEffortFilenames: entry.bestEffortFilenames,
             applicationPacketCount: entry.applicationPacketCount,
-            excludedACRCompanionCount: entry.excludedACRCompanionCount
+            excludedACRCompanionCount: entry.excludedACRCompanionCount,
+            sameStemConflict: entry.sameStemConflict
         )
     }
 }

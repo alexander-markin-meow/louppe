@@ -1,5 +1,16 @@
 import SwiftUI
 
+private enum XMPConflictResolutionOrigin {
+    case standalone
+    case copyOrMove
+}
+
+private struct XMPConflictResolverPresentation: Identifiable {
+    let id = UUID()
+    let conflicts: [XMPSameStemConflictDescriptor]
+    let origin: XMPConflictResolutionOrigin
+}
+
 struct ExportView: View {
     @ObservedObject var store: SessionStore
     @StateObject private var exporter = ExportManager()
@@ -20,6 +31,8 @@ struct ExportView: View {
     @State private var isCheckingExistingXMP = false
     @State private var xmpInspectionID = UUID()
     @State private var xmpInspectionTask: Task<Void, Never>?
+    @State private var conflictResolver: XMPConflictResolverPresentation?
+    @State private var conflictResolutionNotice: String?
 
     var body: some View {
         VStack(spacing: 16) {
@@ -65,6 +78,18 @@ struct ExportView: View {
         .onChange(of: selectedStars) { refreshSelectionSnapshot() }
         .onChange(of: selectedColors) { refreshSelectionSnapshot() }
         .onChange(of: store.items.count) { refreshSelectionSnapshot() }
+        .sheet(item: $conflictResolver) { presentation in
+            XMPConflictResolverView(
+                conflicts: presentation.conflicts,
+                onCancel: { conflictResolver = nil },
+                onApply: { requests in
+                    applyConflictResolutions(
+                        requests,
+                        origin: presentation.origin
+                    )
+                }
+            )
+        }
     }
 
     private var isWorking: Bool {
@@ -282,6 +307,8 @@ struct ExportView: View {
                             sourceFolder: store.sourceFolder,
                             selected: selectionSnapshot.selectedItems(from: store.items),
                             familyContextItems: store.items,
+                            sessionGeneration:
+                                store.xmpConflictSessionGeneration,
                             mode: mode,
                             includeXMP: xmpInclusionChoice.isIncluded,
                             xmpProfile: xmpProfile,
@@ -322,6 +349,57 @@ struct ExportView: View {
             predicate: selectionPredicate
         )
         scheduleXMPInspection()
+    }
+
+    private func applyConflictResolutions(
+        _ requests: [XMPConflictResolutionRequest],
+        origin: XMPConflictResolutionOrigin
+    ) {
+        let outcome = store.applyXMPConflictResolutions(requests)
+        conflictResolver = nil
+        conflictResolutionNotice = resolutionNotice(outcome)
+
+        // Resolution may change the active Export predicate. Rebuild it from
+        // the authoritative session before either planner captures new input.
+        refreshSelectionSnapshot()
+        let selected = selectionSnapshot.selectedItems(from: store.items)
+        switch origin {
+        case .standalone:
+            store.resetXMPPublication()
+            guard !selected.isEmpty else { return }
+            store.prepareXMPPublication(
+                selected: selected,
+                profile: xmpProfile,
+                visibleDecisionKeywords: effectiveVisibleDecisionKeywords,
+                allowExternalLabelReplacement:
+                    allowExternalLabelReplacement
+            )
+        case .copyOrMove:
+            exporter.reprepareXMPExportAfterResolution(
+                selected: selected,
+                familyContextItems: store.items,
+                sessionGeneration: store.xmpConflictSessionGeneration
+            )
+        }
+    }
+
+    private func resolutionNotice(
+        _ outcome: XMPConflictResolutionOutcome
+    ) -> String? {
+        var parts: [String] = []
+        if outcome.appliedCount > 0 {
+            parts.append(
+                "Unified \(outcome.appliedCount) RAW+JPEG conflict\(outcome.appliedCount == 1 ? "" : "s") in Louppe. Review the new plan before continuing."
+            )
+        }
+        let rejected = outcome.staleConflictIDs.count
+            + outcome.ineligibleConflictIDs.count
+        if rejected > 0 {
+            parts.append(
+                "\(rejected) conflict\(rejected == 1 ? " changed while the resolver was open and was" : "s changed while the resolver was open and were") not overwritten. The refreshed plan shows the current values."
+            )
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
     private var includeXMPBinding: Binding<Bool> {
@@ -677,9 +755,22 @@ struct ExportView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            if let conflictResolutionNotice {
+                warningText(conflictResolutionNotice)
+            }
+
             HStack {
                 Button("Back") { store.resetXMPPublication() }
                     .keyboardShortcut(.cancelAction)
+                if !plan.resolvableSameStemConflicts.isEmpty {
+                    Button("Resolve RAW + JPEG Conflicts…") {
+                        conflictResolutionNotice = nil
+                        conflictResolver = XMPConflictResolverPresentation(
+                            conflicts: plan.resolvableSameStemConflicts,
+                            origin: .standalone
+                        )
+                    }
+                }
                 Button("Write Sidecars") {
                     store.startXMPPublication(planID: plan.id)
                 }
@@ -896,6 +987,13 @@ struct ExportView: View {
                 .frame(maxHeight: 120)
             }
 
+            if let conflictResolutionNotice {
+                Text(conflictResolutionNotice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
             Text("Media and every included sidecar will enter one recovery plan before the first file changes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -904,6 +1002,15 @@ struct ExportView: View {
             HStack {
                 Button("Back") { exporter.backFromXMPConfirmation() }
                     .keyboardShortcut(.cancelAction)
+                if !plan.resolvableSameStemConflicts.isEmpty {
+                    Button("Resolve RAW + JPEG Conflicts…") {
+                        conflictResolutionNotice = nil
+                        conflictResolver = XMPConflictResolverPresentation(
+                            conflicts: plan.resolvableSameStemConflicts,
+                            origin: .copyOrMove
+                        )
+                    }
+                }
                 Button(confirmation.mode == .copy ? "Start Copy" : "Start Move") {
                     exporter.confirmXMPExport()
                 }

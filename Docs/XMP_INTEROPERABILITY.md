@@ -704,7 +704,8 @@ Rules:
 2. If any published dimension differs, one stem sidecar cannot represent both values.
 3. Never silently choose one file's value.
 4. Report a same-stem metadata conflict and skip publication for that family.
-5. Tell the user to pair/unify the files in Louppe or export them to separate folders.
+5. For exactly one RAW plus one JPEG, offer the explicit resolver defined in
+   `RAW_JPEG_XMP_EXECUTIVE_PLAN.md`; ambiguous families remain skipped.
 
 The resolver must plan at stem-family level before any write. Case-only and Unicode-normalization collisions must be detected using filesystem identities and directory enumeration rather than synthesized Swift strings alone.
 
@@ -1058,6 +1059,14 @@ cannot adopt schema-5 star/color keys; grouped same-stem export failures report
 every selected item; and Copy/Move now exposes the detailed preflight and
 completion accounting required above.
 
+The 2026-08-07 RAW+JPEG amendment is implemented and locally verified. Its
+complete 267-test suite, 73 performance checks, current-SDK builds, release and
+archive verification, installed signature, and real `-openFolder` launch pass.
+The launch sidecar records a same-stem CR3 and JPEG as two separate physical
+entries by default. Capture One's earlier profile acceptance remains valid, but
+the new interactive RAW/JPEG conflict-resolution and metadata-reload workflow
+has not yet been rerun and is explicitly pending.
+
 ---
 
 ## 12. Test plan
@@ -1139,7 +1148,7 @@ Use disposable originals and record exact application versions/settings.
 |---|---|---|
 | Lightroom Classic | Pending — not installed | Stars, all five colors, Pick/Reject/Unflagged, manual Read Metadata behavior, custom label-set warning |
 | Bridge | Pending — not installed | Stars, all five colors, visible decision keywords, existing Camera Raw edits preserved |
-| Capture One 16.8.4.13 | Passed 2026-08-05 | A disposable Session imported six synthetic JPEGs with stem XMP. Capture One read ratings 1–5 and Red/Yellow/Green/Blue/Purple as color-tag values 1/3/4/5/7. Its available keyword filters contained both hierarchical Louppe Yes/No decisions; applying them returned the expected 3 Yes and 3 No variants. With the session's observed automatic reload behavior inactive, an external change stayed cached until `reload metadata`, then changed 1 star/Red/Yes to 5 stars/Purple/No. Capture One alone created its `.cos` settings; Louppe's resolver and publication/export plans neither recognize nor touch them. Unrelated flat and hierarchical keywords and the synthetic Capture One-private XMP field survived independent packet validation. |
+| Capture One 16.8.4.13 | Base profile passed 2026-08-05; new resolver workflow pending | A disposable Session imported six synthetic JPEGs with stem XMP. Capture One read ratings 1–5 and Red/Yellow/Green/Blue/Purple as color-tag values 1/3/4/5/7. Its available keyword filters contained both hierarchical Louppe Yes/No decisions; applying them returned the expected 3 Yes and 3 No variants. With the session's observed automatic reload behavior inactive, an external change stayed cached until `reload metadata`, then changed 1 star/Red/Yes to 5 stars/Purple/No. Capture One alone created its `.cos` settings; Louppe's resolver and publication/export plans neither recognize nor touch them. Unrelated flat and hierarchical keywords and the synthetic Capture One-private XMP field survived independent packet validation. The 2026-08-07 RAW/JPEG winner-selection, publication, and Capture One reload sequence still needs a visible manual rerun. |
 | darktable | Pending — not installed | First-import stars/colors/keywords from stem XMP, native history sidecar preserved, no processing-history changes |
 
 The Capture One run confirms that version 16.8.4.13 reads stem sidecars for

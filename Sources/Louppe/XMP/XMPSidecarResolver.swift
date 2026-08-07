@@ -4,25 +4,40 @@ struct XMPStemFamilyMember: Equatable, Sendable {
     let mediaPath: XMPExactFileSystemPath
     let mediaKind: MediaKind
     let metadata: XMPPublicationMetadata
+    let sessionFileID: String?
+    let sessionMetadata: PhotoFileMetadataSnapshot?
+    let scannedIdentity: FileOperationJournal.FileIdentity?
 
     init(
         mediaURL: URL,
         mediaKind: MediaKind = .photo,
-        metadata: XMPPublicationMetadata
+        metadata: XMPPublicationMetadata,
+        sessionFileID: String? = nil,
+        sessionMetadata: PhotoFileMetadataSnapshot? = nil,
+        scannedIdentity: FileOperationJournal.FileIdentity? = nil
     ) throws {
         mediaPath = try XMPExactFileSystemPath(url: mediaURL)
         self.mediaKind = mediaKind
         self.metadata = metadata
+        self.sessionFileID = sessionFileID
+        self.sessionMetadata = sessionMetadata
+        self.scannedIdentity = scannedIdentity
     }
 
     init(
         mediaPath: XMPExactFileSystemPath,
         mediaKind: MediaKind = .photo,
-        metadata: XMPPublicationMetadata
+        metadata: XMPPublicationMetadata,
+        sessionFileID: String? = nil,
+        sessionMetadata: PhotoFileMetadataSnapshot? = nil,
+        scannedIdentity: FileOperationJournal.FileIdentity? = nil
     ) {
         self.mediaPath = mediaPath
         self.mediaKind = mediaKind
         self.metadata = metadata
+        self.sessionFileID = sessionFileID
+        self.sessionMetadata = sessionMetadata
+        self.scannedIdentity = scannedIdentity
     }
 }
 

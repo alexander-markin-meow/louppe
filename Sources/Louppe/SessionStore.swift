@@ -42,6 +42,29 @@ enum XMPPublicationLifecycleState: Equatable, Sendable {
     case failed(String)
 }
 
+enum XMPConflictResolutionChoice: String, Equatable, Hashable, Sendable {
+    case skip
+    case useRAW
+    case useJPEG
+}
+
+struct XMPConflictResolutionRequest: Equatable, Sendable {
+    let conflict: XMPSameStemConflictDescriptor
+    let choice: XMPConflictResolutionChoice
+}
+
+struct XMPConflictResolutionOutcome: Equatable, Sendable {
+    let appliedConflictIDs: [String]
+    let staleConflictIDs: [String]
+    let ineligibleConflictIDs: [String]
+    let skippedConflictIDs: [String]
+
+    var appliedCount: Int { appliedConflictIDs.count }
+    var hasRejectedChoices: Bool {
+        !staleConflictIDs.isEmpty || !ineligibleConflictIDs.isEmpty
+    }
+}
+
 /// The app's single source of truth: the loaded session (photos + ratings),
 /// navigation, undo, view state, and persistence to the sidecar file.
 @MainActor
@@ -69,8 +92,9 @@ final class SessionStore: ObservableObject {
     @Published var isFilterPresented = false
     @Published var isSortPresented = false
     /// Whether same-named RAW and JPEG files are reviewed and acted on as one
-    /// photo item. The safe default keeps the existing RAW+JPEG behavior.
-    @Published private(set) var rawJPEGPairingMode: RawJPEGPairingMode = .together
+    /// photo item. A fresh store starts with the safer per-file projection;
+    /// the photographer can opt into pair-wide actions for this app lifetime.
+    @Published private(set) var rawJPEGPairingMode: RawJPEGPairingMode = .separate
     /// The first transition to separate review may read metadata from hidden
     /// JPEG partners. The current session remains visible while this is true.
     @Published private(set) var isChangingRawJPEGPairingMode = false
@@ -333,6 +357,7 @@ final class SessionStore: ObservableObject {
         case decision
         case stars
         case color
+        case all
     }
     private struct MetadataChange {
         /// A complete before-image keeps every physical file's metadata
@@ -886,6 +911,13 @@ final class SessionStore: ObservableObject {
         case .color:
             changesSort = sort.key == .colorLabel
             changesFilter = !filter.excludedColorStates.isEmpty
+        case .all:
+            changesSort = sort.key == .decision
+                || sort.key == .starRating
+                || sort.key == .colorLabel
+            changesFilter = !filter.excludedDecisionStates.isEmpty
+                || !filter.excludedStarStates.isEmpty
+                || !filter.excludedColorStates.isEmpty
         }
         if changesSort {
             preparedIndex.rebuildSort(items, sort: sort)
@@ -1380,7 +1412,9 @@ final class SessionStore: ObservableObject {
     }
 
     func setRawJPEGPairingMode(_ mode: RawJPEGPairingMode) {
-        guard mode != rawJPEGPairingMode, !isFileOperationRunning else { return }
+        guard mode != rawJPEGPairingMode,
+              !isFileOperationRunning,
+              !isXMPPublicationRunning else { return }
         let previousMode = rawJPEGPairingMode
         rawJPEGPairingMode = mode
         guard let folder = sourceFolder, case .ready = phase, !items.isEmpty else { return }
@@ -2157,6 +2191,7 @@ final class SessionStore: ObservableObject {
                 case .decision: items[index].restoreRating(change.previous)
                 case .stars: items[index].restoreStars(change.previous)
                 case .color: items[index].restoreColor(change.previous)
+                case .all: items[index].restoreMetadata(change.previous)
                 }
             }
             for (index, previousState) in previousDecisionStates {
@@ -2170,6 +2205,23 @@ final class SessionStore: ObservableObject {
                 case .color:
                     if let old = previousColorStates[index] {
                         transitionColorCount(from: old, to: items[index].colorLabelState)
+                    }
+                case .all:
+                    transitionRatingCount(
+                        from: previousState,
+                        to: items[index].ratingState
+                    )
+                    if let old = previousStarStates[index] {
+                        transitionStarCount(
+                            from: old,
+                            to: items[index].starRatingState
+                        )
+                    }
+                    if let old = previousColorStates[index] {
+                        transitionColorCount(
+                            from: old,
+                            to: items[index].colorLabelState
+                        )
                     }
                 }
             }
@@ -2491,6 +2543,174 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Export
 
+    /// Generation captured by XMP preflight descriptors. It changes whenever
+    /// a folder scan/session identity changes, but not for ordinary ratings.
+    /// Ordinary metadata edits are protected separately by exact snapshots.
+    var xmpConflictSessionGeneration: UInt64 { scanGeneration }
+
+    func applyXMPConflictResolutions(
+        _ requests: [XMPConflictResolutionRequest]
+    ) -> XMPConflictResolutionOutcome {
+        struct PendingMutation {
+            let conflictID: String
+            let itemIndex: Int
+            let destination: PhotoFile
+            let previous: PhotoFileMetadataSnapshot
+            let source: PhotoFileMetadataSnapshot
+        }
+
+        guard case .ready = phase,
+              !isFileOperationRunning,
+              !isXMPPublicationRunning else {
+            return XMPConflictResolutionOutcome(
+                appliedConflictIDs: [],
+                staleConflictIDs: requests.filter { $0.choice != .skip }
+                    .map(\.conflict.id),
+                ineligibleConflictIDs: [],
+                skippedConflictIDs: requests.filter { $0.choice == .skip }
+                    .map(\.conflict.id)
+            )
+        }
+
+        var pending: [PendingMutation] = []
+        var stale: [String] = []
+        var ineligible: [String] = []
+        var skipped: [String] = []
+        var claimedDestinations = Set<String>()
+
+        for request in requests {
+            let conflict = request.conflict
+            guard request.choice != .skip else {
+                skipped.append(conflict.id)
+                continue
+            }
+            guard conflict.resolutionEligibility == .eligible,
+                  let raw = conflict.rawMember,
+                  let jpeg = conflict.jpegMember else {
+                ineligible.append(conflict.id)
+                continue
+            }
+            guard conflict.sessionGeneration == scanGeneration else {
+                stale.append(conflict.id)
+                continue
+            }
+            let sourceMember = request.choice == .useRAW ? raw : jpeg
+            let destinationMember = request.choice == .useRAW ? jpeg : raw
+            guard claimedDestinations.insert(destinationMember.id).inserted,
+                  let sourceIndex = itemIndexByFileID[sourceMember.id],
+                  let destinationIndex = itemIndexByFileID[destinationMember.id],
+                  items.indices.contains(sourceIndex),
+                  items.indices.contains(destinationIndex),
+                  let sourceFile = items[sourceIndex].individualFiles.first(
+                    where: { $0.id == sourceMember.id }
+                  ),
+                  let destinationFile = items[destinationIndex].individualFiles.first(
+                    where: { $0.id == destinationMember.id }
+                  ) else {
+                stale.append(conflict.id)
+                continue
+            }
+            let currentSource = sourceFile.metadataSnapshot
+            let currentDestination = destinationFile.metadataSnapshot
+            guard currentSource == sourceMember.metadata,
+                  currentDestination == destinationMember.metadata,
+                  sourceFile.scannedIdentity == sourceMember.scannedIdentity,
+                  destinationFile.scannedIdentity
+                    == destinationMember.scannedIdentity else {
+                stale.append(conflict.id)
+                continue
+            }
+            pending.append(PendingMutation(
+                conflictID: conflict.id,
+                itemIndex: destinationIndex,
+                destination: destinationFile,
+                previous: currentDestination,
+                source: currentSource
+            ))
+        }
+
+        guard !pending.isEmpty else {
+            return XMPConflictResolutionOutcome(
+                appliedConflictIDs: [],
+                staleConflictIDs: stale,
+                ineligibleConflictIDs: ineligible,
+                skippedConflictIDs: skipped
+            )
+        }
+
+        let previousFileID = currentItemID
+        pushUndo(.metadata(
+            .all,
+            pending.map { MetadataChange(previous: $0.previous) },
+            previousFileID: previousFileID
+        ))
+        let affectedIndices = Set(pending.map(\.itemIndex))
+        var oldDecision: [Int: PhotoItemRatingState] = [:]
+        var oldStars: [Int: PhotoItemStarRatingState] = [:]
+        var oldColors: [Int: PhotoItemColorLabelState] = [:]
+        for index in affectedIndices {
+            oldDecision[index] = items[index].ratingState
+            oldStars[index] = items[index].starRatingState
+            oldColors[index] = items[index].colorLabelState
+        }
+
+        let changedAt = Date()
+        for mutation in pending {
+            if mutation.previous.rating != mutation.source.rating {
+                mutation.destination.setRating(
+                    mutation.source.rating,
+                    ratedAt: changedAt
+                )
+            }
+            if mutation.previous.starRating != mutation.source.starRating {
+                mutation.destination.setStars(
+                    mutation.source.starRating,
+                    changedAt: changedAt
+                )
+            }
+            if mutation.previous.colorLabel != mutation.source.colorLabel {
+                mutation.destination.setColor(
+                    mutation.source.colorLabel,
+                    changedAt: changedAt
+                )
+            }
+        }
+        for index in affectedIndices {
+            if let oldDecision = oldDecision[index] {
+                transitionRatingCount(
+                    from: oldDecision,
+                    to: items[index].ratingState
+                )
+            }
+            if let oldStars = oldStars[index] {
+                transitionStarCount(
+                    from: oldStars,
+                    to: items[index].starRatingState
+                )
+            }
+            if let oldColors = oldColors[index] {
+                transitionColorCount(
+                    from: oldColors,
+                    to: items[index].colorLabelState
+                )
+            }
+        }
+        publishMetadataMutation(.all)
+        scheduleSave()
+
+        // A resolution changes the authoritative session. The immutable plan
+        // that described the conflict must never remain executable.
+        if case .awaitingConfirmation = xmpPublicationState {
+            finishXMPPublicationLifecycle()
+        }
+        return XMPConflictResolutionOutcome(
+            appliedConflictIDs: pending.map(\.conflictID),
+            staleConflictIDs: stale,
+            ineligibleConflictIDs: ineligible,
+            skippedConflictIDs: skipped
+        )
+    }
+
     func prepareXMPPublication(
         selected: [PhotoItem],
         profile: XMPApplicationProfile,
@@ -2508,6 +2728,7 @@ final class SessionStore: ObservableObject {
             input = try XMPPublicationInput(
                 items: selected,
                 familyContextItems: items,
+                sessionGeneration: scanGeneration,
                 profile: profile,
                 visibleDecisionKeywords: visibleDecisionKeywords,
                 allowExternalLabelReplacement: allowExternalLabelReplacement

@@ -36,9 +36,11 @@ Most photo and video formats are supported; support for more file types is
 planned. Filters and sorting cover decisions, star ratings, color labels,
 dates, folders, file types, camera details, media type, and video length.
 
-Matching RAW+JPEG files are grouped by default, including across subfolders
-when the filename match is unambiguous; you can separate or regroup them. RAW
-and JPEG each keep their own decision, stars, and color label.
+Matching RAW+JPEG files are separate photos by default. In Filter → File types,
+**Treat matching RAW + JPEG as one photo** groups an unambiguous match, including
+across subfolders. RAW and JPEG always keep their own decision, stars, and color
+label; while grouped, ratings, selection, Export, Move, and Clean Up apply to
+both files.
 
 For close inspection, Gallery offers a fast Fit view, a phone-sized preview
 (**A**), and true 100% zoom (**S**). The Info panel includes metadata, a
@@ -120,9 +122,13 @@ alone, so the main review workflow can be completed with the keyboard.
   exact associated companion will remain in the source folder.
 - Metadata (XMP) inspects every same-stem family before writing. It shows
   creates, updates, already-current packets, unsupported files, and conflicts,
-  then publishes through three bounded background lanes. Existing edit data
-  and unrelated keywords survive; replacing or removing an external color
-  label requires explicit confirmation. A stop, folder change, rescan, or Quit waits
+  then publishes through three bounded background lanes. When exactly one RAW
+  and one JPEG disagree, **Resolve RAW + JPEG Conflicts…** can explicitly use
+  either file’s Louppe metadata for both in one undoable action, or leave them
+  separate and skip the shared packet. Louppe always rebuilds the selection and
+  complete plan after a resolution. Existing edit data and unrelated keywords
+  survive; replacing or removing an external color label requires explicit
+  confirmation. A stop, folder change, rescan, or Quit waits
   for an atomic sidecar boundary, and an externally changed packet is skipped
   instead of overwritten. Sidecars for JPEG, TIFF, DNG, HEIC, and PNG are
   best-effort because some applications expect metadata embedded in those

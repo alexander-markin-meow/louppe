@@ -28,6 +28,7 @@ struct XMPExportSourceInspection: Equatable, Sendable {
 /// Value-semantic export snapshot captured before detached XMP preparation.
 /// Rating changes after this point cannot silently alter the confirmed plan.
 struct XMPExportPreparationInput: Sendable {
+    let sessionGeneration: UInt64
     let selectedItemCount: Int
     let selectedPhysicalFileCount: Int
     let selectedMediaPaths: Set<XMPExactFileSystemPath>
@@ -36,10 +37,12 @@ struct XMPExportPreparationInput: Sendable {
     init(
         selected: [PhotoItem],
         familyContextItems: [PhotoItem],
+        sessionGeneration: UInt64 = 0,
         profile: XMPApplicationProfile,
         visibleDecisionKeywords: Bool,
         allowExternalLabelReplacement: Bool
     ) throws {
+        self.sessionGeneration = sessionGeneration
         selectedItemCount = selected.count
         let selectedFiles = selected.flatMap(\.individualFiles)
         selectedPhysicalFileCount = selectedFiles.count
@@ -48,16 +51,20 @@ struct XMPExportPreparationInput: Sendable {
         })
         members = try familyContextItems.flatMap { item in
             try item.individualFiles.map { file in
-                try XMPStemFamilyMember(
+                let snapshot = file.metadataSnapshot
+                return try XMPStemFamilyMember(
                     mediaURL: file.url,
                     mediaKind: file.mediaKind,
                     metadata: XMPPublicationMetadata(
-                        snapshot: file.metadataSnapshot,
+                        snapshot: snapshot,
                         profile: profile,
                         visibleDecisionKeywords: visibleDecisionKeywords,
                         allowExternalLabelRemoval:
                             allowExternalLabelReplacement
-                    )
+                    ),
+                    sessionFileID: file.id,
+                    sessionMetadata: snapshot,
+                    scannedIdentity: file.scannedIdentity
                 )
             }
         }
@@ -88,6 +95,7 @@ struct XMPExportPreparedFamily: Equatable, Sendable {
     let canonicalSourceDigest: Data?
     let finalPacket: Data?
     let applicationPackets: [XMPExportApplicationPacket]
+    let sameStemConflict: XMPSameStemConflictDescriptor?
 
     var allFamilyMediaSelected: Bool {
         allMediaPaths.isSubset(of: selectedMediaPaths)
@@ -136,6 +144,12 @@ struct XMPExportPreparedPlan: Equatable, Sendable {
 
     var issueFamilies: [XMPExportPreparedFamily] {
         families.filter { !$0.category.canPublish }
+    }
+
+    var resolvableSameStemConflicts: [XMPSameStemConflictDescriptor] {
+        families.compactMap(\.sameStemConflict).filter {
+            $0.resolutionEligibility == .eligible
+        }
     }
 
     func count(_ category: XMPPublicationCategory) -> Int {
@@ -216,6 +230,7 @@ enum XMPExportPlanner {
     static func prepare(
         selected: [PhotoItem],
         familyContextItems: [PhotoItem],
+        sessionGeneration: UInt64 = 0,
         profile: XMPApplicationProfile,
         visibleDecisionKeywords: Bool,
         allowExternalLabelReplacement: Bool
@@ -223,6 +238,7 @@ enum XMPExportPlanner {
         try await prepare(XMPExportPreparationInput(
             selected: selected,
             familyContextItems: familyContextItems,
+            sessionGeneration: sessionGeneration,
             profile: profile,
             visibleDecisionKeywords: visibleDecisionKeywords,
             allowExternalLabelReplacement: allowExternalLabelReplacement
@@ -321,7 +337,13 @@ enum XMPExportPlanner {
                 preparedFamilies.append(base.family(
                     category: .sameStemMetadataConflict,
                     message: "Files sharing this stem have different Louppe metadata. Their shared XMP will be skipped.",
-                    applicationPackets: applicationPackets
+                    applicationPackets: applicationPackets,
+                    sameStemConflict: .make(
+                        id: base.id,
+                        sessionGeneration: input.sessionGeneration,
+                        family: family,
+                        selectedMediaPaths: selectedPaths
+                    )
                 ))
             case .filenameCollision:
                 preparedFamilies.append(base.family(
@@ -415,7 +437,8 @@ enum XMPExportPlanner {
             canonicalSourceIdentity: FileOperationJournal.FileIdentity? = nil,
             canonicalSourceDigest: Data? = nil,
             finalPacket: Data? = nil,
-            applicationPackets: [XMPExportApplicationPacket] = []
+            applicationPackets: [XMPExportApplicationPacket] = [],
+            sameStemConflict: XMPSameStemConflictDescriptor? = nil
         ) -> XMPExportPreparedFamily {
             XMPExportPreparedFamily(
                 id: id,
@@ -434,7 +457,8 @@ enum XMPExportPlanner {
                 canonicalSourceIdentity: canonicalSourceIdentity,
                 canonicalSourceDigest: canonicalSourceDigest,
                 finalPacket: finalPacket,
-                applicationPackets: applicationPackets
+                applicationPackets: applicationPackets,
+                sameStemConflict: sameStemConflict
             )
         }
     }

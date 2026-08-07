@@ -226,13 +226,21 @@ Movie duration, playability, dimensions, codec, and frame rate are likewise
 captured once by FolderScanner's bounded metadata workers. Filter, sort, and
 Info views must use those values rather than reopening every `AVAsset`.
 
-In paired mode, `FolderScanner` keeps a lightweight record for the hidden JPEG
-using filesystem facts already returned by enumeration; it deliberately does
-not open that JPEG's EXIF during the common initial scan. The first switch to
-separate review enriches only those missing JPEG records on the same bounded
-metadata workers while the ready session remains visible. Pairing projections
-then reuse the enriched physical-file records, so later toggles neither walk
-the folder nor reopen metadata.
+The fresh-session default is separate RAW and JPEG review, so the initial scan
+loads both files through the same bounded metadata workers. A 250-pair synthetic
+fixture measured 0.061 seconds in separate mode versus 0.051 seconds grouped on
+the 2026-08-07 verification machine. When grouped mode is selected before a
+scan, `FolderScanner` still keeps a lightweight record for the hidden JPEG using
+filesystem facts already returned by enumeration. The first later switch to
+separate review enriches only those missing JPEG records while the ready session
+remains visible. Pairing projections reuse the enriched physical-file records,
+so subsequent toggles neither walk the folder nor reopen metadata.
+
+Same-name XMP conflict preflight retains typed stable file IDs, scan identities,
+exact metadata snapshots, and exact filesystem paths. Resolution is one small
+main-actor metadata transaction; packet parsing, exact family resolution, and
+publication stay in the existing bounded workers. Every applied batch invalidates
+the old immutable plan and reruns selection and complete preflight.
 
 ## Grid scrolling
 

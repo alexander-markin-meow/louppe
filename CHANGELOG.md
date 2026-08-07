@@ -56,6 +56,16 @@ release bundle.
   Preflight also detects exact associated Lightroom Classic `.acr` heavy-edit
   companions and warns that Louppe will leave them untouched at the source.
 
+- Changed matching RAW+JPEG captures to appear as separate photos on every
+  fresh launch. The optional **Treat matching RAW + JPEG as one photo** setting
+  remains under Filter → File types for pair-wide rating, selection, Export,
+  Move, and Clean Up, and never synchronizes divergent metadata merely by
+  being enabled. Eligible shared-XMP conflicts now expose an explicit resolver
+  that can use the RAW or JPEG decision, stars, and color for both files. The
+  batch is one undoable Louppe action, rejects stale choices, performs no file
+  work itself, and discards and fully rebuilds the Export/XMP plan before a new
+  confirmation.
+
 - Restored full-size Grid tiles after the native immediate-click surface made
   cells adopt the preview image's intrinsic size, and made pairing group an
   unambiguous RAW+JPEG match even when its files live in different subfolders.

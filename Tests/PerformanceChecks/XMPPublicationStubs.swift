@@ -17,6 +17,49 @@ struct XMPExactFileSystemPath: Hashable, Sendable {
     }
 }
 
+enum XMPMetadataDimension: String, CaseIterable, Hashable, Sendable {
+    case decision
+    case stars
+    case color
+}
+
+struct XMPSameStemConflictDescriptor: Equatable, Sendable, Identifiable {
+    enum Role: String, Equatable, Sendable {
+        case raw
+        case jpeg
+        case other
+    }
+
+    enum Ineligibility: Equatable, Sendable {
+        case ambiguousFamily
+        case unsupportedMembers
+        case missingSessionIdentity
+    }
+
+    enum ResolutionEligibility: Equatable, Sendable {
+        case eligible
+        case ineligible(Ineligibility)
+    }
+
+    struct Member: Equatable, Sendable, Identifiable {
+        let id: String
+        let exactPath: XMPExactFileSystemPath
+        let role: Role
+        let metadata: PhotoFileMetadataSnapshot
+        let scannedIdentity: FileOperationJournal.FileIdentity
+        let wasSelectedForExport: Bool
+    }
+
+    let id: String
+    let sessionGeneration: UInt64
+    let members: [Member]
+    let differingDimensions: Set<XMPMetadataDimension>
+    let resolutionEligibility: ResolutionEligibility
+
+    var rawMember: Member? { members.first(where: { $0.role == .raw }) }
+    var jpegMember: Member? { members.first(where: { $0.role == .jpeg }) }
+}
+
 struct XMPExportApplicationPacket: Equatable, Sendable {
     let source: XMPExactFileSystemPath
     let ownerMediaPath: XMPExactFileSystemPath
@@ -103,6 +146,7 @@ struct XMPPublicationInput: Sendable {
     init(
         items: [PhotoItem],
         familyContextItems: [PhotoItem]? = nil,
+        sessionGeneration: UInt64 = 0,
         profile: XMPApplicationProfile,
         visibleDecisionKeywords: Bool,
         allowExternalLabelReplacement: Bool = false
